@@ -1,280 +1,390 @@
-# IONA Public Testnet Documentation
+# Iona Testnet
 
-**Version:** 28.0.0  
-**Launch Date:** 2026-03-01T12:00:00Z  
-**Chain Name:** `iona-testnet-1`  
-**Chain ID:** `6126151`  
-**Genesis SHA-256:** `8e9b9a028f8afeb0d6332096212d77cb59c97738544bed87137b2c8c901b0255`
+## Overview
 
----
+This document describes the operational purpose, structure, validation goals, and execution flow of the Iona testnet.
 
-## Network Summary
+The testnet is intended to provide a controlled environment for validating protocol behavior before larger-scale rollout. Its purpose is not only to confirm that nodes can start, but to verify that the protocol behaves consistently across multiple nodes under realistic operational conditions.
 
-| Parameter | Value |
-|-----------|-------|
-| **Chain ID** | `6126151` |
-| **Chain Name** | `iona-testnet-1` |
-| **Launch Time** | `2026-03-01T12:00:00Z` (Unix: `1772308800`) |
-| **Genesis Hash** | `8e9b9a02...901b0255` |
-| **Producers** | val2 (seed=2), val3 (seed=3), val4 (seed=4) |
-| **Follower** | val1 (seed=1) -- indexer, internal API |
-| **RPC** | rpc (seed=100) -- public endpoint, faucet |
-| **Bootnodes** | `/ip4/10.0.1.2/tcp/30334/p2p/val2`, `/ip4/10.0.1.3/tcp/30335/p2p/val3` |
-| **RPC URL** | `https://rpc.iona-testnet.example.com` (behind nginx proxy) |
-| **Faucet** | `https://rpc.iona-testnet.example.com/faucet` (rate-limited) |
-| **Explorer** | `https://explorer.iona-testnet.example.com` (val1 backend) |
-| **Block Time** | ~100-300ms (sub-second finality) |
-| **Gas Target** | 43,000,000 (EIP-1559) |
-| **Max TX/block** | 4,096 |
+The current focus is on:
 
----
+- validator connectivity
+- block production stability
+- deterministic state progression
+- restart and recovery behavior
+- sync correctness
+- deployment reproducibility
+- readiness for future upgrade validation
 
-## Topology
+## Testnet Goals
 
-```
-                    Internet
-                       |
-              [nginx reverse proxy]
-              TLS + rate limiting
-                       |
-                  [rpc node]
-                  seed=100, port=30337
-                  RPC: 0.0.0.0:9000
-                  faucet=true
-                       |
-         +-------------+-------------+
-         |             |             |
-    [val2]        [val3]        [val4]
-    seed=2        seed=3        seed=4
-    BOOTNODE      BOOTNODE      producer
-    port=30334    port=30335    port=30336
-         |             |             |
-         +------+------+------+-----+
-                |
-           [val1]
-           seed=1
-           follower/indexer
-           port=30333
-           RPC: 127.0.0.1:9001
-```
+The Iona testnet is designed to validate the following areas:
 
-**Bootnodes:** val2 and val3 are designated bootnodes.
-**All non-bootnode nodes** (val1, val4, rpc) connect through these bootnodes.
-**No node bootstraps from itself.**
+- stable multi-validator network operation
+- correct block production across nodes
+- peer discovery and connectivity reliability
+- consistent chain state progression
+- safe node restart and recovery
+- clean sync behavior for new or restarted nodes
+- operational readiness for future scaling and upgrade testing
 
----
+The testnet is also intended to support documentation, issue tracking, and grant-readiness by providing a reproducible validation path for the protocol.
 
-## Quick Start
+## Current Testnet Scope
 
-### 1. Build
+The current testnet scope is intentionally controlled.
 
-```bash
-cd iona_v27
-cargo build --release --locked --bin iona-node
-```
+Initial target topology:
 
-### 2. Local 5-Node Testnet
+- 4 validator nodes
+- 1 RPC / observer / seed node
 
-```bash
-./deploy/scripts/run_5nodes_local.sh
-```
+This initial phase is sufficient to validate core distributed behavior without introducing unnecessary operational complexity too early.
 
-### 3. Verify
+The testnet should first prove:
 
-```bash
-curl http://127.0.0.1:9000/health
-curl http://127.0.0.1:9000/status
-curl -s http://127.0.0.1:9000/status | jq '.height'
-```
+- validators can connect and remain connected
+- blocks are produced consistently
+- restart does not corrupt state
+- a joining node can sync successfully
+- the deployment process is repeatable
 
----
+## Node Roles
 
-## Joining the Public Testnet
+## Validator Nodes
 
-### 1. Get Genesis
+Validator nodes are responsible for:
 
-```bash
-curl -O https://rpc.iona-testnet.example.com/genesis.json
-sha256sum genesis.json
-# Expected: 8e9b9a028f8afeb0d6332096212d77cb59c97738544bed87137b2c8c901b0255
-```
+- maintaining canonical state
+- participating in protocol execution
+- validating and applying chain transitions
+- remaining consistent with the rest of the network
+- recovering safely after restart
 
-### 2. Configure Your Node
+Each validator node should run:
 
-```toml
-[node]
-data_dir  = "/var/lib/iona/my_node"
-seed      = 42
-chain_id  = 6126151
-log_level = "info"
-keystore  = "encrypted"
+- the same release candidate build
+- the same genesis file
+- standardized configuration format
+- node-specific identity and networking parameters
 
-[consensus]
-propose_timeout_ms   = 300
-prevote_timeout_ms   = 200
-precommit_timeout_ms = 200
-max_txs_per_block    = 4096
-gas_target           = 43000000
-fast_quorum          = true
-initial_base_fee     = 1
-stake_each           = 1000
-simple_producer      = false
+## RPC / Observer Node
 
-[network]
-listen = "/ip4/0.0.0.0/tcp/30333"
-peers  = []
-bootnodes = [
-  "/ip4/10.0.1.2/tcp/30334/p2p/val2",
-  "/ip4/10.0.1.3/tcp/30335/p2p/val3",
-]
-enable_mdns = false
-enable_kad  = true
-enable_p2p_state_sync = true
+The RPC node is responsible for:
 
-[rpc]
-listen        = "127.0.0.1:9001"
-enable_faucet = false
+- exposing chain query endpoints
+- providing visibility into network status
+- supporting sync and health validation
+- acting as a stable observer during test runs
+- optionally serving as a bootstrap / seed node
 
-[storage]
-enable_snapshots = true
-snapshot_every_n_blocks = 500
-snapshot_keep = 10
-```
+Separating the observer/RPC role from validators improves operational clarity during debugging and rollout.
 
-### 3. Start
+## Deployment Principles
 
-```bash
-RUST_LOG=info ./target/release/iona-node --config /var/lib/iona/my_node/config.toml
-```
+The testnet should always follow these deployment rules:
 
----
+- all nodes must run the same selected build
+- genesis must be generated once and distributed identically
+- chain ID must be identical across all nodes
+- node configs should be standardized
+- only role-specific fields should differ between nodes
+- deployment steps should be documented and reproducible
 
-## Firewall Configuration
+A testnet run should never rely on undocumented manual steps if those steps can affect reproducibility.
 
-### UFW Rules
+## Infrastructure Assumptions
 
-```bash
-sudo ufw default deny incoming
-sudo ufw default allow outgoing
-sudo ufw allow 22/tcp
-sudo ufw allow 30334/tcp comment "IONA bootnode val2"
-sudo ufw allow 30335/tcp comment "IONA bootnode val3"
-sudo ufw allow from 10.0.1.0/24 to any port 30333 comment "val1 P2P"
-sudo ufw allow from 10.0.1.0/24 to any port 30336 comment "val4 P2P"
-sudo ufw allow from 10.0.1.0/24 to any port 30337 comment "rpc P2P"
-sudo ufw allow 443/tcp comment "HTTPS nginx"
-sudo ufw allow 80/tcp comment "HTTP redirect"
-sudo ufw enable
-```
+Each node should have:
 
----
+- fixed hostname
+- static public IP
+- deployed Iona binary
+- systemd service for lifecycle management
+- open P2P ports
+- RPC enabled on the observer node
+- persistent data directory
+- log access through journal or file-based logging
 
-## RPC Hardening (nginx)
+Recommended baseline requirements:
 
-See `deploy/nginx/rpc.conf` for the full configuration.
+- enough CPU and memory for stable validator execution
+- reliable disk storage for chain data
+- consistent OS/runtime environment across nodes
 
-| Endpoint | Limit | Burst |
-|----------|-------|-------|
-| `/` (JSON-RPC) | 10 req/s | 20 |
-| `/faucet` | 1 req/min | 3 |
-| `/health` | 30 req/s | 50 |
-| `/metrics` | Blocked from public | Internal only |
+## Release Candidate Discipline
 
----
+Before testnet deployment:
 
-## Faucet
+1. choose a specific release candidate commit
+2. build the binary from that commit
+3. record the binary hash
+4. deploy the same binary to all nodes
+5. verify binary consistency across nodes
+6. freeze the build during rollout
 
-Enabled only on the RPC node. Protected by nginx rate limiting (1 req/min/IP).
+This avoids confusion between runtime failures and untracked code changes.
 
-```bash
-curl -X POST https://rpc.iona-testnet.example.com/faucet \
-  -H "Content-Type: application/json" \
-  -d '{"address": "0xYOUR_ADDRESS", "amount": 1000}'
-```
+## Genesis Discipline
 
-Rules: max 10,000 tokens/request, max 100,000 tokens/address/day.
+Genesis handling is a critical part of testnet correctness.
 
----
+The process should be:
 
-## Soak Test Procedures
+1. generate genesis once
+2. define validator set explicitly
+3. define chain ID explicitly
+4. distribute the exact same genesis file to all nodes
+5. verify the hash on every node before starting services
 
-| Phase | Duration | Script |
-|-------|----------|--------|
-| Stability | 24h | `./deploy/scripts/run_5nodes_local.sh` + `healthcheck.sh --watch` |
-| Restart resilience | 24h | `./deploy/scripts/soak_restart.sh --duration 24h --interval 300` |
-| Network partition | 4h | `./deploy/scripts/soak_partition.sh --duration 4h` |
-| RPC load | 4h | `./deploy/scripts/soak_rpc_load.sh --duration 4h --rps 100` |
+The testnet must not start unless genesis consistency has been confirmed.
 
-### Success Criteria
+## Network Topology
 
-| Metric | Threshold |
-|--------|-----------|
-| Uptime | > 99.9% over 72h |
-| Block production | Zero gaps > 5s |
-| Finality time | p99 < 1s |
-| Memory growth | < 10% over 24h |
-| Restart recovery | < 10s |
-| RPC p99 latency | < 500ms at 100 req/s |
+The initial topology should define:
 
----
+- validator node names
+- IP addresses
+- P2P ports
+- RPC ports
+- bootnode / seed node role
+- peer lists or bootstrap flow
 
-## Monitoring
+Example role layout:
 
-```bash
-./deploy/scripts/healthcheck.sh          # one-shot
-./deploy/scripts/healthcheck.sh --watch  # continuous
-./deploy/scripts/healthcheck.sh --json   # JSON output
-```
+- `val1`
+- `val2`
+- `val3`
+- `val4`
+- `rpc1`
 
-### Prometheus
+This layout is sufficient for the first controlled phase and can later be expanded.
 
-```yaml
-scrape_configs:
-  - job_name: 'iona-testnet'
-    scrape_interval: 5s
-    static_configs:
-      - targets: ['10.0.1.1:9001','10.0.1.2:9002','10.0.1.3:9003','10.0.1.4:9004','10.0.1.5:9000']
-        labels:
-          chain: 'iona-testnet-1'
-          chain_id: '6126151'
-```
+## Launch Strategy
 
----
+The recommended launch strategy is staged.
 
-## Testnet Reset
+## Stage 1
+Start:
 
-```bash
-pkill -f "iona-node" || true
-./deploy/scripts/dev_reset.sh
-./deploy/scripts/run_5nodes_local.sh
-```
+- `rpc1`
+- `val1`
 
----
+Validate:
 
-## Troubleshooting
+- process startup
+- correct configuration load
+- expected log output
+- ports listening correctly
 
-### Nodes Not Connecting
-```bash
-for port in 30333 30334 30335 30336 30337; do
-  nc -z 10.0.1.1 $port && echo "Port $port: OK" || echo "Port $port: CLOSED"
-done
-```
+## Stage 2
+Add:
 
-### Genesis Mismatch
-```bash
-sha256sum /var/lib/iona/*/genesis.json
-# All must match: 8e9b9a028f8afeb0d6332096212d77cb59c97738544bed87137b2c8c901b0255
-```
+- `val2`
+- `val3`
 
----
+Validate:
 
-## Scripts Reference
+- peer discovery
+- stable connectivity
+- expected network formation
+- normal block progression
 
-| Script | Description |
-|--------|-------------|
-| `deploy/scripts/run_5nodes_local.sh` | Launch 5-node local testnet |
-| `deploy/scripts/healthcheck.sh` | Node health monitoring |
-| `deploy/scripts/atomic_deploy.sh` | Zero-downtime binary upgrade |
-| `deploy/scripts/soak_restart.sh` | Soak test: random restarts |
-| `deploy/scripts/soak_partition.sh` | Soak test: network partitions |
-| `deploy/scripts/soak_rpc_load.sh` | Soak test: RPC load |
+## Stage 3
+Add:
+
+- `val4`
+
+Validate:
+
+- multi-validator stability
+- continued block production
+- no persistent network fragmentation
+- no obvious state divergence
+
+This staged approach reduces debugging complexity and makes failure isolation easier.
+
+## Validation Areas
+
+## 1. Genesis Consistency
+
+Checks:
+
+- identical genesis hash on all nodes
+- identical chain ID on all nodes
+- identical validator set initialization
+
+Failure in this area invalidates the testnet immediately.
+
+## 2. Binary Consistency
+
+Checks:
+
+- same build deployed on all nodes
+- binary hash matches across all nodes
+- no node runs an unintended local variant
+
+This prevents false divergence caused by build mismatch.
+
+## 3. Peer Connectivity
+
+Checks:
+
+- nodes discover peers correctly
+- nodes maintain connections over time
+- reconnect behavior is stable after temporary interruption
+- seed/bootstrap flow works as expected
+
+## 4. Block Production
+
+Checks:
+
+- block height increases consistently
+- validators remain active
+- no repeated block production failures appear
+- no long unexplained stalls occur
+
+## 5. State Progression
+
+Checks:
+
+- chain state advances consistently
+- no node diverges from canonical progression
+- state updates appear stable across validators
+
+This area becomes especially important once deterministic replay and upgrade validation are integrated more deeply.
+
+## 6. Restart and Recovery
+
+Checks:
+
+- stopped nodes restart cleanly
+- restarted nodes rejoin without corruption
+- persisted state loads successfully
+- node resumes expected execution after restart
+
+## 7. Sync Validation
+
+Checks:
+
+- a clean or lagging node can join and sync
+- synchronized node matches current network state
+- catch-up does not introduce divergence
+
+## 8. RPC Validation
+
+Checks:
+
+- status and chain queries respond correctly
+- block queries work on the observer node
+- transaction and receipt queries behave as expected
+- RPC reflects current network state
+
+## Acceptance Criteria
+
+A testnet run is considered successful only if:
+
+- all intended nodes start successfully
+- genesis is confirmed identical across all nodes
+- peer connectivity remains stable
+- blocks are produced consistently
+- validator restart does not corrupt local state
+- a joining or restarted node can sync correctly
+- RPC on the observer node works correctly
+- no state divergence is observed during the run
+
+## Operational Checks
+
+During each testnet run, monitor:
+
+- process health
+- block height
+- peer count
+- restart behavior
+- sync progress
+- persistent error logs
+- CPU, RAM, and disk usage
+- chain continuity after restarts
+
+Operational observation is part of test validation, not a separate concern.
+
+## Failure Conditions
+
+A testnet run should be considered failed if any of the following occurs:
+
+- mismatched genesis between nodes
+- mismatched binary versions
+- persistent peer connectivity failure
+- repeated block production stalls
+- corrupted state after restart
+- failed sync for a new node
+- unexplained divergence between nodes
+- observer/RPC node unable to reflect current state reliably
+
+## Logging and Evidence
+
+Each testnet run should produce enough evidence to support later review.
+
+Recommended evidence includes:
+
+- node list and role mapping
+- commit hash used for the build
+- binary hash
+- genesis hash
+- start/stop times
+- block height progression notes
+- restart test results
+- sync test results
+- relevant logs for failures or anomalies
+
+This documentation is useful for internal engineering review and external grant evaluation.
+
+## Relationship to Other Validation Work
+
+The testnet is only one part of the broader validation strategy.
+
+It should be used alongside:
+
+- deterministic build verification
+- state root reproducibility checks
+- structured logging improvements
+- storage corruption detection and recovery
+- network partition simulation
+- protocol upgrade simulation and rollback validation
+
+Together, these areas increase confidence that the protocol is not only functional, but also stable and safe to evolve.
+
+## Future Testnet Expansion
+
+Once the initial controlled testnet is stable, the next phases may include:
+
+- more validator nodes
+- more diverse infrastructure placement
+- stronger monitoring and metrics
+- staged upgrade testing
+- partition and fault simulation
+- more explicit state comparison workflows
+
+The early testnet is intended as a disciplined foundation, not the final operational shape.
+
+## Related Documentation
+
+- [`README.md`](../README.md) — repository overview and current priorities
+- [`docs/ARCHITECTURE.md`](ARCHITECTURE.md) — architectural direction
+- [`docs/testnet-plan.md`](testnet-plan.md) — initial deployment plan
+- [`docs/upgrade.md`](upgrade.md) — protocol upgrade safety process
+- [`docs/issue-map.md`](issue-map.md) — grouped engineering work
+
+## Status
+
+The current testnet effort should be understood as an active readiness phase.
+
+The immediate goal is to establish a clean, reproducible, and well-documented multi-node environment that validates:
+
+- deployment consistency
+- validator operation
+- connectivity stability
+- recovery safety
+- sync correctness
+
+This phase is a prerequisite for broader scaling, stronger automation, and future upgrade-oriented network validation.
