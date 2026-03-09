@@ -1,12 +1,14 @@
 # Ultra profile: aggressive safety defaults for open Internet.
 [security]
-max_message_size = 1048576          # 1 MiB
+max_message_size = 1048576                # 1 MiB
 max_inflight_requests_per_peer = 32
 request_timeout_ms = 5000
 handshake_timeout_ms = 3000
 idle_connection_timeout_ms = 30_000
-max_connections = 200
-max_connections_per_ip = 20
+max_connections = 200                     # total inbound + outbound
+max_connections_per_ip = 20                # prevent abuse from single IP
+max_inbound_connections = 150              # optional cap on inbound only
+max_outbound_connections = 50               # optional cap on outbound only
 
 [rpc]
 bind = "127.0.0.1:8080"
@@ -14,11 +16,20 @@ bind = "127.0.0.1:8080"
 # Or enable the in-app API key middleware (see docs).
 enable_api_key = true
 api_key_header = "x-api-key"
-api_key_value = "CHANGE_ME"
+api_key_value = "CHANGE_ME"                # MUST be changed to a strong secret
 cors_allowed_origins = ["http://localhost:3000"]
-max_body_bytes = 1048576
+max_body_bytes = 1048576                   # 1 MiB
+
+# Rate limiting for RPC endpoints (per IP)
+rate_limit_enabled = true
+rate_limit_requests_per_second = 100
+rate_limit_burst = 200
+
+# Optional: separate limits for authenticated vs. unauthenticated calls
+# rate_limit_authenticated_per_second = 200
+# rate_limit_unauthenticated_per_second = 20
 
 [netem]
-# default chaos profile used by scripts
+# default chaos profile used by scripts (comment out in production)
 delay = "200ms 50ms"
 loss = "5%"
