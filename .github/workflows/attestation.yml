@@ -1,0 +1,40 @@
+name: Release Attestation
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+  attestations: write
+  artifact-metadata: write
+
+jobs:
+  attest:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.85.0"
+
+      - name: Build release binary
+        run: cargo build --release --locked --bin iona-node
+
+      - name: Package release artifact
+        run: |
+          mkdir -p dist
+          cp target/release/iona-node dist/iona-node
+          tar -czf dist/iona-${GITHUB_REF_NAME}.tar.gz -C dist iona-node
+
+      - name: Generate build provenance attestation
+        uses: actions/attest-build-provenance@v3
+        with:
+          subject-path: dist/iona-${{ github.ref_name }}.tar.gz
