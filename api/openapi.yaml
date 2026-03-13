@@ -3,14 +3,27 @@ info:
   title: IONA Node API
   description: |
     Complete API documentation for the IONA blockchain node.
-    
+
     The node exposes two main interfaces:
     - **JSON-RPC** (Ethereum-compatible): Standard eth_* methods via POST /rpc
-    - **REST endpoints**: Health, status, metrics, VM operations
-    
+    - **REST endpoints**: Health, status, metrics, blocks, transactions, VM operations
+
     ## Rate Limiting
     Built-in rate limiting applies to P2P connections. RPC rate limiting should be
     configured via reverse proxy (nginx/caddy).
+
+    ## Hex Encoding
+    All addresses, hashes, and binary data are represented as hex strings with the
+    `0x` prefix (lowercase or uppercase accepted). Quantities (value, gas, gasPrice)
+    are also hex strings with **no leading zeros** (except "0x0").
+
+    ## Numbers
+    Block numbers, nonces, gas used, and similar integer values are represented as
+    native JSON numbers (decimal) for REST endpoints, unless otherwise specified.
+
+    **Note on gas values**: In REST requests, `gas` and `gasPrice` are hex strings
+    (`HexQuantity`). In responses (e.g., `Transaction` object), `gas` is a native
+    integer for easier consumption. This is intentional and documented.
   version: 27.0.0
   license:
     name: MIT
@@ -19,12 +32,20 @@ info:
 servers:
   - url: http://127.0.0.1:8080
     description: Local node (default)
+  - url: https://rpc.testnet.iona.io
+    description: IONA Testnet
+  - url: https://rpc.iona.io
+    description: IONA Mainnet (planned – not yet available)
 
 tags:
   - name: JSON-RPC
     description: Ethereum-compatible JSON-RPC methods
   - name: Node
     description: Node status and health endpoints
+  - name: Blocks
+    description: Block information (REST)
+  - name: Transactions
+    description: Transaction submission and query (REST)
   - name: VM
     description: IONA VM contract operations
   - name: Metrics
@@ -34,33 +55,17 @@ paths:
   /rpc:
     post:
       tags: [JSON-RPC]
-      summary: JSON-RPC endpoint (eth_* methods)
+      summary: JSON-RPC endpoint
+      operationId: rpcCall
       description: |
-        Standard Ethereum JSON-RPC endpoint supporting:
-        
-        **Chain State:** eth_chainId, eth_blockNumber, eth_getBalance, eth_getCode,
-        eth_getStorageAt, eth_getTransactionCount
-        
-        **Transactions:** eth_sendRawTransaction, eth_getTransactionByHash,
-        eth_getTransactionReceipt, eth_call, eth_estimateGas
-        
-        **Blocks:** eth_getBlockByNumber, eth_getBlockByHash,
-        eth_getBlockTransactionCountByNumber, eth_getBlockTransactionCountByHash,
-        eth_getTransactionByBlockHashAndIndex, eth_getTransactionByBlockNumberAndIndex
-        
-        **Logs & Filters:** eth_getLogs, eth_newFilter, eth_newBlockFilter,
-        eth_newPendingTransactionFilter, eth_getFilterChanges, eth_uninstallFilter
-        
-        **Network:** net_version, net_listening, net_peerCount, web3_clientVersion
-        
-        **Gas:** eth_gasPrice, eth_maxPriorityFeePerGas
-        
-        **Proof:** eth_getProof (Merkle proof for account state)
-        
-        **IONA-specific:** iona_mine (mine pending transactions in dev mode)
-        
-        **Misc:** eth_syncing, eth_mining, eth_accounts, eth_protocolVersion,
-        eth_hashrate, eth_getUncleCountByBlockHash, eth_getUncleCountByBlockNumber
+        Standard Ethereum JSON-RPC endpoint. Supports all common eth_* methods.
+
+        **HTTP 400** is returned only for malformed HTTP requests (e.g., invalid JSON,
+        wrong content type). All JSON-RPC errors (including method not found) are
+        returned with HTTP 200 and an error object in the response body.
+
+        For a complete list of supported methods, refer to the
+        [JSON-RPC documentation](https://iona.io/docs/rpc).
       requestBody:
         required: true
         content:
@@ -83,11 +88,11 @@ paths:
                   params: ["0x742d35Cc6634C0532925a3b844Bc9e7595f2bD28", "latest"]
                   id: 1
               eth_sendRawTransaction:
-                summary: Send signed transaction
+                summary: Send signed transaction (RLP-encoded hex)
                 value:
                   jsonrpc: "2.0"
                   method: "eth_sendRawTransaction"
-                  params: ["0xf86c...signed_tx_hex"]
+                  params: ["0xf86c01843b9aca0082520894742d35cc6634c0532925a3b844bc9e7595f2bd2880de0b6b3a76400008026a0f0e4c2f76c5898165a34be82a57cfe7a9b6c56c9e7b8d7b8e7b8d7b8e7b8d7b8"]
                   id: 1
               eth_call:
                 summary: Execute call (read-only)
@@ -96,37 +101,21 @@ paths:
                   method: "eth_call"
                   params:
                     - to: "0x742d35Cc6634C0532925a3b844Bc9e7595f2bD28"
-                      data: "0x70a08231000000000000000000000000..."
+                      data: "0x70a08231000000000000000000000000742d35cc6634c0532925a3b844bc9e7595f2bd28"
                     - "latest"
-                  id: 1
-              eth_getLogs:
-                summary: Get filtered logs
-                value:
-                  jsonrpc: "2.0"
-                  method: "eth_getLogs"
-                  params:
-                    - fromBlock: "0x1"
-                      toBlock: "latest"
-                      address: "0x742d35Cc6634C0532925a3b844Bc9e7595f2bD28"
-                      topics: [null]
-                  id: 1
-              eth_getProof:
-                summary: Get Merkle proof for account
-                value:
-                  jsonrpc: "2.0"
-                  method: "eth_getProof"
-                  params: ["0x742d35Cc6634C0532925a3b844Bc9e7595f2bD28", ["0x0"], "latest"]
                   id: 1
       responses:
         '200':
-          description: JSON-RPC response
+          description: JSON-RPC response (success or error)
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/JsonRpcResponse'
+                oneOf:
+                  - $ref: '#/components/schemas/JsonRpcSuccess'
+                  - $ref: '#/components/schemas/JsonRpcFailure'
               examples:
-                blockNumber:
-                  summary: Block number response
+                success:
+                  summary: Successful response
                   value:
                     jsonrpc: "2.0"
                     result: "0xa"
@@ -137,27 +126,71 @@ paths:
                     jsonrpc: "2.0"
                     error:
                       code: -32601
-                      message: "Method not found: eth_unsupported"
+                      message: "Method not found"
                     id: 1
+        '400':
+          description: Malformed HTTP request (invalid JSON, missing body, etc.)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error: "Invalid JSON"
+                code: "INVALID_REQUEST"
+        '429':
+          description: Too many requests (rate limited)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error: "Rate limit exceeded"
+                code: "RATE_LIMITED"
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error: "Internal error"
+                code: "INTERNAL_ERROR"
 
   /health:
     get:
       tags: [Node]
       summary: Health check
-      description: Returns HTTP 200 if the node is running and healthy.
+      operationId: getHealth
+      description: Returns 200 OK if the node is running and healthy.
       responses:
         '200':
           description: Node is healthy
           content:
-            text/plain:
+            application/json:
               schema:
-                type: string
-                example: "ok"
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum: [ok]
+                required: [status]
+                example:
+                  status: ok
+        '503':
+          description: Node is not healthy (e.g., syncing, shutting down)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error: "Node is syncing"
+                code: "UNAVAILABLE"
 
   /status:
     get:
       tags: [Node]
       summary: Node status
+      operationId: getStatus
       description: |
         Returns detailed node status including current block height,
         finalized height, peer count, protocol/schema versions, and sync status.
@@ -177,14 +210,21 @@ paths:
                 node_version: "27.0.0"
                 syncing: false
                 chain_id: 1
+        '503':
+          description: Node unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
 
   /metrics:
     get:
       tags: [Metrics]
       summary: Prometheus metrics
+      operationId: getMetrics
       description: |
         Returns all node metrics in Prometheus text exposition format.
-        
+
         Categories: consensus, finality, network, mempool, RPC, storage,
         protocol, migrations, snapshots, audit (70+ metrics total).
       responses:
@@ -206,11 +246,199 @@ paths:
                 finality_latency_ms_bucket{le="100"} 10
                 finality_latency_ms_bucket{le="1000"} 42
                 finality_latency_ms_bucket{le="+Inf"} 42
+                finality_latency_ms_sum 12345
+                finality_latency_ms_count 42
+        '503':
+          description: Metrics temporarily unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /blocks/{numberOrHash}:
+    get:
+      tags: [Blocks]
+      summary: Get block by number or hash
+      operationId: getBlock
+      description: |
+        Retrieve a block by its height (decimal or hex) or its 32-byte hash (0x-prefixed hex).
+
+        **Supported formats:**
+        - Decimal height: `12345`
+        - Hexadecimal height: `0x3039`
+        - Block hash: `0x1234...5678` (64 hex chars)
+      parameters:
+        - name: numberOrHash
+          in: path
+          required: true
+          schema:
+            type: string
+            pattern: '^(0x[a-fA-F0-9]{64}|0x[a-fA-F0-9]+|[0-9]+)$'
+          description: Block number (decimal or hex) or block hash
+        - name: full_transactions
+          in: query
+          schema:
+            type: boolean
+            default: false
+          description: If true, includes full transaction objects; otherwise returns transaction hashes only.
+      responses:
+        '200':
+          description: Block information
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Block'
+        '400':
+          description: Invalid block identifier format
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Block not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error: "Block not found"
+                code: "NOT_FOUND"
+        '503':
+          description: Node syncing or unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /transactions:
+    post:
+      tags: [Transactions]
+      summary: Submit a transaction (IONA native format)
+      operationId: submitTransaction
+      description: |
+        Submit a transaction using IONA's native JSON format.
+        For Ethereum compatibility, use `/rpc` with `eth_sendRawTransaction`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TransactionRequest'
+            example:
+              from: "0x742d35Cc6634C0532925a3b844Bc9e7595f2bD28"
+              to: "0x1234567890abcdef1234567890abcdef12345678"
+              value: "0xde0b6b3a7640000"
+              data: "0x"
+              nonce: 0
+              gas: "0x5208"
+              gasPrice: "0x3b9aca00"
+      responses:
+        '200':
+          description: Transaction accepted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  tx_hash:
+                    type: string
+                    pattern: '^0x[a-fA-F0-9]{64}$'
+                    description: Transaction hash (32 bytes, hex)
+                required: [tx_hash]
+                example:
+                  tx_hash: "0xabcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890"
+        '400':
+          description: Invalid transaction format
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '429':
+          description: Rate limited
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '503':
+          description: Node syncing or unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /transactions/{hash}:
+    get:
+      tags: [Transactions]
+      summary: Get transaction by hash
+      operationId: getTransaction
+      description: Retrieve a transaction by its 32-byte hash.
+      parameters:
+        - name: hash
+          in: path
+          required: true
+          schema:
+            type: string
+            pattern: '^0x[a-fA-F0-9]{64}$'
+          description: Transaction hash (32 bytes, 0x-prefixed hex)
+      responses:
+        '200':
+          description: Transaction details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Transaction'
+        '404':
+          description: Transaction not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '503':
+          description: Node syncing or unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /receipts/{hash}:
+    get:
+      tags: [Transactions]
+      summary: Get transaction receipt by hash
+      operationId: getReceipt
+      description: Retrieve the receipt for a transaction.
+      parameters:
+        - name: hash
+          in: path
+          required: true
+          schema:
+            type: string
+            pattern: '^0x[a-fA-F0-9]{64}$'
+          description: Transaction hash
+      responses:
+        '200':
+          description: Transaction receipt
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Receipt'
+        '404':
+          description: Receipt not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '503':
+          description: Node syncing or unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
 
   /vm/deploy:
     post:
       tags: [VM]
       summary: Deploy IONA VM contract
+      operationId: deployContract
       description: Deploy a new smart contract on the IONA VM.
       requestBody:
         required: true
@@ -222,12 +450,22 @@ paths:
               properties:
                 bytecode:
                   type: string
+                  pattern: '^0x[a-fA-F0-9]*$'
                   description: Hex-encoded contract bytecode
-                  example: "0x6080604052..."
                 constructor_args:
                   type: array
                   items:
                     type: string
+                    pattern: '^0x[a-fA-F0-9]*$'
+                  description: ABI-encoded constructor arguments (hex strings)
+                from:
+                  type: string
+                  pattern: '^0x[a-fA-F0-9]{40}$'
+                  description: Deployer address (optional, defaults to zero address)
+              example:
+                bytecode: "0x608060405234801561001057600080fd5b50610150806100206000396000f3fe608060405234801561001057600080fd5b50600436106100365760003560e01c80632e64cec11461003b5780636057361d14610059575b600080fd5b610043610075565b60405161005091906100a1565b60405180910390f35b610073600480360381019061006e91906100ed565b61007e565b005b60008054905090565b8060008190555050565b6000819050919050565b61009b81610088565b82525050565b60006020820190506100b66000830184610092565b92915050565b600080fd5b6100ca81610088565b81146100d557600080fd5b50565b6000813590506100e7816100c1565b92915050565b600060208284031215610103576101026100bc565b5b6000610111848285016100d8565b9150509291505056fea2646970667358221220123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef64736f6c63430008120033"
+                constructor_args: ["0x000000000000000000000000000000000000000000000000000000000000002a"]
+                from: "0x742d35Cc6634C0532925a3b844Bc9e7595f2bD28"
       responses:
         '200':
           description: Contract deployed
@@ -238,15 +476,34 @@ paths:
                 properties:
                   address:
                     type: string
-                    example: "0x1234567890abcdef1234567890abcdef12345678"
+                    pattern: '^0x[a-fA-F0-9]{40}$'
+                    description: Deployed contract address
                   tx_hash:
                     type: string
-                    example: "0xabc..."
+                    pattern: '^0x[a-fA-F0-9]{64}$'
+                    description: Deployment transaction hash
+                required: [address, tx_hash]
+                example:
+                  address: "0x1234567890abcdef1234567890abcdef12345678"
+                  tx_hash: "0xabcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890"
+        '400':
+          description: Invalid deployment request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '503':
+          description: Node syncing or unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
 
   /vm/call:
     post:
       tags: [VM]
-      summary: Call IONA VM contract
+      summary: Call IONA VM contract (read-only)
+      operationId: callContract
       description: Execute a read-only call on a deployed contract.
       requestBody:
         required: true
@@ -258,15 +515,20 @@ paths:
               properties:
                 to:
                   type: string
+                  pattern: '^0x[a-fA-F0-9]{40}$'
                   description: Contract address
-                  example: "0x1234567890abcdef1234567890abcdef12345678"
                 data:
                   type: string
-                  description: Hex-encoded call data
-                  example: "0x70a08231..."
+                  pattern: '^0x[a-fA-F0-9]*$'
+                  description: Hex-encoded call data (function selector + arguments)
                 from:
                   type: string
+                  pattern: '^0x[a-fA-F0-9]{40}$'
                   description: Caller address (optional)
+              example:
+                to: "0x1234567890abcdef1234567890abcdef12345678"
+                data: "0x70a08231000000000000000000000000742d35cc6634c0532925a3b844bc9e7595f2bd28"
+                from: "0x742d35Cc6634C0532925a3b844Bc9e7595f2bD28"
       responses:
         '200':
           description: Call result
@@ -277,52 +539,38 @@ paths:
                 properties:
                   result:
                     type: string
-                    example: "0x0000000000000000000000000000000000000000000000000000000000000001"
+                    pattern: '^0x[a-fA-F0-9]*$'
+                    description: Return value (hex)
                   gas_used:
                     type: integer
-                    example: 21000
-
-  /tx:
-    post:
-      tags: [JSON-RPC]
-      summary: Submit transaction (IONA native format)
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required: [from, to, value]
-              properties:
-                from:
-                  type: string
-                  example: "0xabc..."
-                to:
-                  type: string
-                  example: "0xdef..."
-                value:
-                  type: integer
-                  example: 1000000
-                data:
-                  type: string
-                  example: "0x"
-                nonce:
-                  type: integer
-                  example: 0
-      responses:
-        '200':
-          description: Transaction accepted
+                    minimum: 0
+                    description: Gas consumed by the call
+                required: [result, gas_used]
+                example:
+                  result: "0x0000000000000000000000000000000000000000000000000000000000000001"
+                  gas_used: 21000
+        '400':
+          description: Invalid call request
           content:
             application/json:
               schema:
-                type: object
-                properties:
-                  tx_hash:
-                    type: string
-                    example: "0x..."
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Contract not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '503':
+          description: Node syncing or unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
 
 components:
   schemas:
+    # ---------- JSON-RPC ----------
     JsonRpcRequest:
       type: object
       required: [jsonrpc, method, id]
@@ -344,18 +592,31 @@ components:
             - type: string
           example: 1
 
-    JsonRpcResponse:
+    JsonRpcSuccess:
       type: object
-      required: [jsonrpc, id]
+      required: [jsonrpc, result, id]
       properties:
         jsonrpc:
           type: string
           enum: ["2.0"]
         result:
-          description: Successful result (absent on error)
+          description: Successful result (any JSON value)
+        id:
+          oneOf:
+            - type: integer
+            - type: string
+
+    JsonRpcFailure:
+      type: object
+      required: [jsonrpc, error, id]
+      properties:
+        jsonrpc:
+          type: string
+          enum: ["2.0"]
         error:
           $ref: '#/components/schemas/JsonRpcError'
         id:
+          nullable: true
           oneOf:
             - type: integer
             - type: string
@@ -370,141 +631,339 @@ components:
         message:
           type: string
           example: "Method not found"
+        data:
+          description: Optional error data (any JSON value)
 
+    # ---------- Node ----------
     NodeStatus:
       type: object
+      required:
+        - height
+        - finalized_height
+        - peers
+        - protocol_version
+        - schema_version
+        - node_version
+        - syncing
+        - chain_id
       properties:
         height:
           type: integer
+          minimum: 0
+          description: Current block height
           example: 1000
         finalized_height:
           type: integer
+          minimum: 0
+          description: Last finalized block height
           example: 998
         peers:
           type: integer
+          minimum: 0
+          description: Number of connected peers
           example: 5
         protocol_version:
           type: integer
+          description: Current protocol version
           example: 1
         schema_version:
           type: integer
+          description: On-disk schema version
           example: 4
         node_version:
           type: string
+          description: Node software version (semver)
           example: "27.0.0"
         syncing:
           type: boolean
+          description: Whether the node is currently syncing
           example: false
         chain_id:
           type: integer
+          description: Chain identifier
           example: 1
 
+    # ---------- Error ----------
+    ErrorResponse:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+          description: Human-readable error message
+        code:
+          type: string
+          description: Machine-readable error code
+        details:
+          type: object
+          additionalProperties: true
+          description: Optional additional error details
+      example:
+        error: "Block not found"
+        code: "NOT_FOUND"
+
+    # ---------- Transactions (REST) ----------
+    HexQuantity:
+      type: string
+      pattern: '^0x(0|[1-9a-fA-F][0-9a-fA-F]*)$'
+      description: Hex string with no leading zeros (except "0x0").
+
+    TransactionRequest:
+      type: object
+      required: [from, value]
+      properties:
+        from:
+          type: string
+          pattern: '^0x[a-fA-F0-9]{40}$'
+          description: Sender address
+        to:
+          type: string
+          nullable: true
+          pattern: '^0x[a-fA-F0-9]{40}$'
+          description: Recipient address (null for contract creation)
+        value:
+          $ref: '#/components/schemas/HexQuantity'
+          description: Transfer value in wei
+        data:
+          type: string
+          pattern: '^0x[a-fA-F0-9]*$'
+          default: "0x"
+          description: Transaction data (hex)
+        nonce:
+          type: integer
+          minimum: 0
+          description: Account nonce
+        gas:
+          $ref: '#/components/schemas/HexQuantity'
+          description: Gas limit (hex string in request)
+        gasPrice:
+          $ref: '#/components/schemas/HexQuantity'
+          description: Gas price in wei (hex string in request)
+
+    # ---------- Blocks ----------
     Block:
       type: object
+      required:
+        - number
+        - hash
+        - parent_hash
+        - timestamp
+        - state_root
+        - transactions_root
+        - receipts_root
+        - gas_used
+        - gas_limit
       properties:
         number:
           type: integer
+          minimum: 0
+          description: Block height
           example: 100
         hash:
           type: string
-          example: "0xabc..."
+          pattern: '^0x[a-fA-F0-9]{64}$'
+          description: Block hash
+          example: "0xabcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890"
         parent_hash:
           type: string
-          example: "0xdef..."
+          pattern: '^0x[a-fA-F0-9]{64}$'
+          description: Parent block hash
+          example: "0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
         timestamp:
           type: integer
+          description: Unix timestamp (seconds)
           example: 1700000000
         state_root:
           type: string
+          pattern: '^0x[a-fA-F0-9]{64}$'
+          description: State root hash
+          example: "0xabcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890"
         transactions_root:
           type: string
+          pattern: '^0x[a-fA-F0-9]{64}$'
+          description: Transactions root hash
+          example: "0xabcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890"
         receipts_root:
           type: string
+          pattern: '^0x[a-fA-F0-9]{64}$'
+          description: Receipts root hash
+          example: "0xabcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890"
         gas_used:
           type: integer
+          minimum: 0
+          description: Total gas used in block
           example: 210000
         gas_limit:
           type: integer
+          minimum: 0
+          description: Block gas limit
           example: 30000000
         transactions:
           type: array
+          description: List of transactions in this block. If `full_transactions` query param is true, contains full transaction objects; otherwise contains transaction hashes (strings).
           items:
-            type: string
-          example: ["0x..."]
+            oneOf:
+              - type: string
+                pattern: '^0x[a-fA-F0-9]{64}$'
+              - $ref: '#/components/schemas/Transaction'
 
+    # ---------- Transactions ----------
     Transaction:
       type: object
+      required:
+        - hash
+        - from
+        - value
+        - nonce
+        - gas
+        - gas_price
+        - input
       properties:
         hash:
           type: string
-          example: "0xabc..."
+          pattern: '^0x[a-fA-F0-9]{64}$'
+          description: Transaction hash
+          example: "0xabcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890"
         from:
           type: string
+          pattern: '^0x[a-fA-F0-9]{40}$'
+          description: Sender address
+          example: "0x742d35Cc6634C0532925a3b844Bc9e7595f2bD28"
         to:
           type: string
+          nullable: true
+          pattern: '^0x[a-fA-F0-9]{40}$'
+          description: Recipient address (null for contract creation)
+          example: "0x1234567890abcdef1234567890abcdef12345678"
         value:
-          type: string
-          description: Transfer value in wei (hex)
-          example: "0xde0b6b3a7640000"
+          $ref: '#/components/schemas/HexQuantity'
+          description: Transfer value in wei
         nonce:
           type: integer
+          minimum: 0
+          example: 0
         gas:
           type: integer
+          description: Gas limit (native integer in response)
           example: 21000
         gas_price:
-          type: string
-          example: "0x3b9aca00"
+          $ref: '#/components/schemas/HexQuantity'
+          description: Gas price in wei (hex string in response)
         input:
           type: string
+          pattern: '^0x[a-fA-F0-9]*$'
+          description: Transaction data
           example: "0x"
         block_hash:
           type: string
+          pattern: '^0x[a-fA-F0-9]{64}$'
+          description: Block hash containing this transaction
         block_number:
           type: integer
+          description: Block number containing this transaction
         transaction_index:
           type: integer
+          description: Position in the block
 
     Receipt:
       type: object
+      required:
+        - transaction_hash
+        - block_hash
+        - block_number
+        - status
+        - gas_used
+        - cumulative_gas_used
+        - logs
+        - logs_bloom
       properties:
         transaction_hash:
           type: string
-          example: "0xabc..."
+          pattern: '^0x[a-fA-F0-9]{64}$'
+          description: Transaction hash
+          example: "0xabcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890"
         block_hash:
           type: string
+          pattern: '^0x[a-fA-F0-9]{64}$'
+          description: Block hash
+          example: "0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
         block_number:
           type: integer
+          description: Block number
+          example: 100
         status:
           type: integer
+          enum: [0, 1]
           description: "1 = success, 0 = failure"
           example: 1
         gas_used:
           type: integer
+          description: Gas used by this transaction
           example: 21000
         cumulative_gas_used:
           type: integer
+          description: Cumulative gas used in the block up to this transaction
+          example: 42000
         logs:
           type: array
           items:
             $ref: '#/components/schemas/Log'
+        logs_bloom:
+          type: string
+          pattern: '^0x[a-fA-F0-9]{512}$'
+          description: Bloom filter for logs (2048 bits, hex)
+          example: "0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
 
     Log:
       type: object
+      required:
+        - address
+        - topics
+        - data
+        - block_number
+        - transaction_hash
+        - log_index
       properties:
         address:
           type: string
-          example: "0x..."
+          pattern: '^0x[a-fA-F0-9]{40}$'
+          description: Contract address that emitted the log
+          example: "0x1234567890abcdef1234567890abcdef12345678"
         topics:
           type: array
           items:
             type: string
-          example: ["0xddf252ad..."]
+            pattern: '^0x[a-fA-F0-9]{64}$'
+          description: Array of event topics (hashes)
+          example:
+            - "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
+            - "0x000000000000000000000000742d35cc6634c0532925a3b844bc9e7595f2bd28"
         data:
           type: string
-          example: "0x..."
+          pattern: '^0x[a-fA-F0-9]*$'
+          description: Event data (hex)
+          example: "0x0000000000000000000000000000000000000000000000000de0b6b3a7640000"
         block_number:
           type: integer
+          description: Block number where the log was emitted
+          example: 100
         transaction_hash:
           type: string
+          pattern: '^0x[a-fA-F0-9]{64}$'
+          description: Transaction hash that emitted the log
+          example: "0xabcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890"
         log_index:
           type: integer
+          description: Position in the block
+          example: 0
+
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-API-Key
+      description: |
+        Optional API key for rate‑limit exemptions or private endpoints.
+        Not required for public testnet access.
+
+# No global security – endpoints are public by default
