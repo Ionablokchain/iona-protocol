@@ -16,9 +16,14 @@
 //! | ST-6 | Timestamp monotonic     | Block timestamp never decreases                       |
 //! | ST-7 | Tx uniqueness           | No duplicate tx_hash within the same block            |
 //! | ST-8 | Gas accounting          | Sum of per-tx gas == block header gas_used             |
+//! | ST-9 | Gas limit               | gas_used <= gas_limit                                   |
+//! | ST-10| Timestamp not too far   | timestamp not too far in the future                     |
+//! | ST-11| Receipts root           | receipts_root matches computed root                     |
 
-use crate::types::{Block, Hash32, Height, Receipt, tx_hash};
+use crate::types::{Block, Hash32, Height, Receipt, tx_hash, receipts_root};
+use crate::protocol::MAX_FUTURE_BLOCK_TIME_SECS;
 use std::collections::BTreeMap;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 // ─── ST-1: Balance non-negative ─────────────────────────────────────────────
 
@@ -177,6 +182,54 @@ pub fn check_gas_accounting(
     Ok(())
 }
 
+// ─── ST-9: Gas limit ────────────────────────────────────────────────────────
+
+/// Verify that gas_used does not exceed the block's gas limit.
+pub fn check_gas_limit(gas_used: u64, gas_limit: u64) -> Result<(), String> {
+    if gas_used > gas_limit {
+        return Err(format!(
+            "ST-9 VIOLATION: gas_used={gas_used} exceeds gas_limit={gas_limit}"
+        ));
+    }
+    Ok(())
+}
+
+// ─── ST-10: Timestamp not too far in the future ─────────────────────────────
+
+/// Verify that the block timestamp is not too far ahead of real time.
+/// Uses the same constant as consensus validation.
+pub fn check_timestamp_future(timestamp: u64) -> Result<(), String> {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    if timestamp > now + MAX_FUTURE_BLOCK_TIME_SECS {
+        return Err(format!(
+            "ST-10 VIOLATION: timestamp {} > now + {}",
+            timestamp, MAX_FUTURE_BLOCK_TIME_SECS
+        ));
+    }
+    Ok(())
+}
+
+// ─── ST-11: Receipts root ───────────────────────────────────────────────────
+
+/// Verify that the receipts_root in the block header matches the computed root.
+pub fn check_receipts_root(
+    header_root: Hash32,
+    receipts: &[Receipt],
+) -> Result<(), String> {
+    let computed = receipts_root(receipts);
+    if header_root != computed {
+        return Err(format!(
+            "ST-11 VIOLATION: header receipts_root={} != computed root={}",
+            hex::encode(header_root.0),
+            hex::encode(computed.0),
+        ));
+    }
+    Ok(())
+}
+
 // ─── Aggregate check ────────────────────────────────────────────────────────
 
 /// Result of running all state transition invariant checks.
@@ -207,6 +260,7 @@ impl std::fmt::Display for InvariantReport {
 }
 
 /// Run a subset of invariants that can be checked with minimal context.
+/// This function is typically called after block execution, before committing.
 pub fn check_block_invariants(
     block: &Block,
     prev_height: Height,
@@ -251,6 +305,33 @@ pub fn check_block_invariants(
         detail: g.err().unwrap_or_else(|| format!("gas_used={}", block.header.gas_used)),
     });
 
+    // ST-9: Gas limit
+    let gl = check_gas_limit(block.header.gas_used, block.header.gas_limit);
+    checks.push(InvariantCheck {
+        id: "ST-9".into(),
+        name: "Gas limit".into(),
+        passed: gl.is_ok(),
+        detail: gl.err().unwrap_or_else(|| format!("gas_used <= {}", block.header.gas_limit)),
+    });
+
+    // ST-10: Timestamp not too far
+    let tf = check_timestamp_future(block.header.timestamp);
+    checks.push(InvariantCheck {
+        id: "ST-10".into(),
+        name: "Timestamp not too far".into(),
+        passed: tf.is_ok(),
+        detail: tf.err().unwrap_or_else(|| "timestamp within allowed future window".into()),
+    });
+
+    // ST-11: Receipts root
+    let rr = check_receipts_root(block.header.receipts_root, receipts);
+    checks.push(InvariantCheck {
+        id: "ST-11".into(),
+        name: "Receipts root".into(),
+        passed: rr.is_ok(),
+        detail: rr.err().unwrap_or_else(|| "receipts root matches".into()),
+    });
+
     let all_passed = checks.iter().all(|c| c.passed);
     InvariantReport { checks, all_passed }
 }
@@ -260,6 +341,24 @@ pub fn check_block_invariants(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::{Block, BlockHeader, Receipt, Hash32};
+
+    fn dummy_receipt(gas: u64) -> Receipt {
+        Receipt {
+            tx_hash: Hash32::zero(),
+            success: true,
+            gas_used: gas,
+            intrinsic_gas_used: gas,
+            exec_gas_used: 0,
+            vm_gas_used: 0,
+            evm_gas_used: 0,
+            effective_gas_price: 100,
+            burned: 0,
+            tip: 0,
+            error: None,
+            data: None,
+        }
+    }
 
     #[test]
     fn test_balances_non_negative_ok() {
@@ -366,64 +465,63 @@ mod tests {
 
     #[test]
     fn test_gas_accounting_ok() {
-        let receipts = vec![
-            Receipt {
-                tx_hash: Hash32::zero(),
-                success: true,
-                gas_used: 21000,
-                intrinsic_gas_used: 21000,
-                exec_gas_used: 0,
-                vm_gas_used: 0,
-                evm_gas_used: 0,
-                effective_gas_price: 100,
-                burned: 0,
-                tip: 0,
-                error: None,
-                data: None,
-            },
-            Receipt {
-                tx_hash: Hash32::zero(),
-                success: true,
-                gas_used: 42000,
-                intrinsic_gas_used: 42000,
-                exec_gas_used: 0,
-                vm_gas_used: 0,
-                evm_gas_used: 0,
-                effective_gas_price: 100,
-                burned: 0,
-                tip: 0,
-                error: None,
-                data: None,
-            },
-        ];
+        let receipts = vec![dummy_receipt(21000), dummy_receipt(42000)];
         assert!(check_gas_accounting(63000, &receipts).is_ok());
     }
 
     #[test]
     fn test_gas_accounting_violation() {
-        let receipts = vec![
-            Receipt {
-                tx_hash: Hash32::zero(),
-                success: true,
-                gas_used: 21000,
-                intrinsic_gas_used: 21000,
-                exec_gas_used: 0,
-                vm_gas_used: 0,
-                evm_gas_used: 0,
-                effective_gas_price: 100,
-                burned: 0,
-                tip: 0,
-                error: None,
-                data: None,
-            },
-        ];
+        let receipts = vec![dummy_receipt(21000)];
         assert!(check_gas_accounting(99999, &receipts).is_err());
     }
 
     #[test]
-    fn test_block_invariants_report() {
-        use crate::types::{Block, BlockHeader};
+    fn test_gas_limit_ok() {
+        assert!(check_gas_limit(50000, 100000).is_ok());
+        assert!(check_gas_limit(100000, 100000).is_ok());
+    }
 
+    #[test]
+    fn test_gas_limit_violation() {
+        assert!(check_gas_limit(150000, 100000).is_err());
+    }
+
+    #[test]
+    fn test_timestamp_future_ok() {
+        // This test might be flaky if run exactly at the boundary, but we use a small constant.
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        assert!(check_timestamp_future(now + 100).is_ok()); // 100s in future, less than MAX
+    }
+
+    #[test]
+    fn test_timestamp_future_violation() {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let far = now + MAX_FUTURE_BLOCK_TIME_SECS + 1;
+        assert!(check_timestamp_future(far).is_err());
+    }
+
+    #[test]
+    fn test_receipts_root_ok() {
+        let receipts = vec![dummy_receipt(21000), dummy_receipt(42000)];
+        let root = receipts_root(&receipts);
+        assert!(check_receipts_root(root, &receipts).is_ok());
+    }
+
+    #[test]
+    fn test_receipts_root_violation() {
+        let receipts = vec![dummy_receipt(21000)];
+        let root = Hash32([1u8; 32]); // wrong root
+        assert!(check_receipts_root(root, &receipts).is_err());
+    }
+
+    #[test]
+    fn test_block_invariants_report() {
         let block = Block {
             header: BlockHeader {
                 height: 2,
@@ -434,7 +532,8 @@ mod tests {
                 receipts_root: Hash32::zero(),
                 state_root: Hash32::zero(),
                 base_fee_per_gas: 1,
-                gas_used: 0,
+                gas_used: 63000,
+                gas_limit: 100000,
                 intrinsic_gas_used: 0,
                 exec_gas_used: 0,
                 vm_gas_used: 0,
@@ -445,9 +544,10 @@ mod tests {
             },
             txs: vec![],
         };
-        let report = check_block_invariants(&block, 1, 1000, &[]);
+        let receipts = vec![dummy_receipt(21000), dummy_receipt(42000)];
+        let report = check_block_invariants(&block, 1, 1000, &receipts);
         assert!(report.all_passed, "report: {report}");
-        assert_eq!(report.checks.len(), 4);
+        assert_eq!(report.checks.len(), 7); // now 7 checks (ST-5,6,7,8,9,10,11)
     }
 
     #[test]
