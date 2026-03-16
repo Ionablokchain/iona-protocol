@@ -1,20 +1,34 @@
 [package]
 name = "iona-fuzz"
 version = "0.0.1"
-publish = false
-edition = "2021"
+publish = false      # Prevents accidental publication to crates.io
+edition = "2021"     # Rust 2021 edition
+description = "Fuzzing targets for the Iona blockchain node"
+authors = ["Your Name <your.email@example.com>"]   # Add if needed
+license = "MIT OR Apache-2.0"                      # Adjust as appropriate
 
 [package.metadata]
-cargo-fuzz = true
+cargo-fuzz = true    # Required for cargo-fuzz integration
+
+# Profile settings for faster and more debuggable fuzzing builds
+[profile.fuzz]
+inherits = "release"   # Start from release profile
+debug = 1              # Preserve line numbers in backtraces
+lto = false            # Disable link-time optimization for faster compile
+opt-level = 3          # Keep maximum runtime optimizations
 
 [dependencies]
-libfuzzer-sys = "0.4"
-arbitrary = { version = "1", features = ["derive"] }
-
+# Core fuzzing framework
+libfuzzer-sys = "0.4.8"                # Latest as of writing
+# Support for generating arbitrary structured data
+arbitrary = { version = "1.3.2", features = ["derive"] }
+# Iona node library (local path dependency)
 iona = { path = ".." }
-bincode = "1"
-serde_json = "1"
+# Serialization/deserialization for fuzzing inputs
+bincode = "1.3.3"
+serde_json = "1.0.128"                  # For JSON fuzzing targets
 
+# Fuzz targets - each one is a separate binary that cargo-fuzz will run
 [[bin]]
 name = "consensus_msg"
 path = "fuzz_targets/consensus_msg.rs"
