@@ -1,10 +1,35 @@
 {
   "compilerOptions": {
-    "target": "ES2020",
-    "module": "ES2020",
-    "declaration": true,
-    "outDir": "dist",
-    "strict": true
+    /* Language and Environment */
+    "target": "ES2020",                          // Target modern ECMAScript (Node 14+, modern browsers)
+    "module": "ES2020",                          // Use ES2020 modules for better tree-shaking
+    "lib": ["ES2020", "DOM"],                     // Include standard ES2020 libraries and DOM APIs (for browser use)
+    "moduleResolution": "node",                    // Resolve modules using Node.js algorithm
+    "esModuleInterop": true,                       // Allow default imports from CommonJS modules
+    "allowSyntheticDefaultImports": true,          // Same, for compatibility
+
+    /* Output Configuration */
+    "declaration": true,                           // Generate .d.ts declaration files
+    "declarationMap": true,                         // Generate source maps for declarations (easier debugging)
+    "sourceMap": true,                              // Generate source maps for debugging
+    "outDir": "dist",                               // Output directory for compiled files
+    "rootDir": "./src",                              // Root directory of source files
+    "removeComments": true,                          // Remove comments from output (optional, but reduces bundle size)
+
+    /* Type Checking and Code Quality */
+    "strict": true,                                 // Enable all strict type-checking options
+    "noUnusedLocals": true,                          // Error on unused local variables
+    "noUnusedParameters": true,                       // Error on unused function parameters
+    "noImplicitReturns": true,                        // Ensure all code paths return a value
+    "noFallthroughCasesInSwitch": true,                // Prevent fallthrough in switch statements
+    "forceConsistentCasingInFileNames": true,          // Ensure consistent casing in imports
+
+    /* Additional Features */
+    "skipLibCheck": true,                            // Skip type checking of declaration files (faster builds)
+    "resolveJsonModule": true,                        // Allow importing JSON modules
+    "isolatedModules": true,                           // Required for certain tools (like Babel)
+    "noEmitOnError": true                              // Don't emit output if there are type errors
   },
-  "include": ["src/**/*.ts"]
+  "include": ["src/**/*.ts"],                        // Include all TypeScript files under src
+  "exclude": ["node_modules", "dist"]                // Exclude node_modules and output directory
 }
