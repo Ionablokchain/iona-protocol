@@ -1,64 +1,186 @@
-# IONA v28 — Validator 3 (producer + bootnode)
-# Topology: val2, val3, val4 = producers; val1 = follower; rpc = public endpoint
-# Chain: iona-testnet-1 (chain_id=6126151), launch=2026-03-01T12:00:00Z
+# IONA v28 — Validator 3 Configuration (producer + bootnode)
+# 
+# Topology: val2, val3, val4 = block producers; val1 = follower; rpc = public endpoint
+# Chain: iona-testnet-1 (chain_id = 6126151), launch = 2026-03-01T12:00:00Z
 # BOOTNODE: /ip4/10.0.1.3/tcp/30335/p2p/val3
+#
+# This node actively participates in consensus (produces blocks) and also serves
+# as a bootnode for peer discovery. RPC is bound to localhost only — do NOT expose publicly.
 
+# ------------------------------
+# Node identity and basic settings
+# ------------------------------
 [node]
-data_dir  = "/var/lib/iona/val3"
-seed      = 3
-chain_id  = 6126151
-log_level = "info"
-keystore  = "encrypted"
-keystore_password     = ""  # set via env (IONA_KEYSTORE_PASSWORD) or local config
-keystore_password_env = "IONA_KEYSTORE_PASSWORD"
+data_dir  = "/var/lib/iona/val3"                # Directory for chain data and snapshots
+seed      = 3                                   # Deterministic seed for node identity
+chain_id  = 6126151                              # Must match genesis chain_id
+log_level = "info"                               # Log verbosity (debug, info, warn, error)
+keystore  = "encrypted"                           # Encrypted keystore for validator key
+# Provide password via environment variable (recommended) or leave empty and use env var
+keystore_password     = ""                        # Not set here – use IONA_KEYSTORE_PASSWORD env
+keystore_password_env = "IONA_KEYSTORE_PASSWORD"  # Environment variable name for password
 
+# ------------------------------
+# Consensus engine (active producer)
+# ------------------------------
 [consensus]
-propose_timeout_ms   = 300
-prevote_timeout_ms   = 200
-precommit_timeout_ms = 200
-max_txs_per_block    = 4096
-gas_target           = 43000000
-fast_quorum          = true
-initial_base_fee     = 1
-stake_each           = 1000
-simple_producer      = true          # val3 IS a producer
-validator_seeds      = [2, 3, 4]    # consensus participants (must match all nodes)
+propose_timeout_ms   = 300                  # Timeout for proposal step (ms)
+prevote_timeout_ms   = 200                  # Timeout for prevote step (ms)
+precommit_timeout_ms = 200                  # Timeout for precommit step (ms)
+max_txs_per_block    = 4096                 # Maximum transactions per block
+gas_target           = 43000000              # Target gas per block
+fast_quorum          = true                  # Enable fast quorum (skip rounds)
+initial_base_fee     = 1                     # Initial base fee per gas
+stake_each           = 1000                  # Stake per validator (for fee calculations)
+simple_producer      = true                   # val3 IS a producer (actively proposes blocks)
+validator_seeds      = [2, 3, 4]              # Seeds of the consensus participants (must match all nodes)
 
+# ------------------------------
+# P2P networking
+# ------------------------------
 [network]
-listen = "/ip4/0.0.0.0/tcp/30335"
-# Peers: other producers + follower (NOT self)
+listen = "/ip4/0.0.0.0/tcp/30335"            # P2P listen address (as bootnode)
+
+# Static peers: other producers + follower (excluding self)
 peers = [
-  "/ip4/10.0.1.2/tcp/30334",
-  "/ip4/10.0.1.4/tcp/30336",
-  "/ip4/10.0.1.1/tcp/30333",
+  "/ip4/10.0.1.2/tcp/30334",                  # val2
+  "/ip4/10.0.1.4/tcp/30336",                  # val4
+  "/ip4/10.0.1.1/tcp/30333",                  # val1 (follower)
 ]
+
+# Bootnodes for initial peer discovery (other producers, optionally self)
 bootnodes = [
-  "/ip4/10.0.1.2/tcp/30334",
+  "/ip4/10.0.1.2/tcp/30334",                  # val2 (as secondary bootnode)
 ]
-enable_mdns = false
-enable_kad  = true
-reconnect_s = 30
 
-max_connections_total    = 200
-max_connections_per_peer = 8
+enable_mdns = false                            # Disable local multicast discovery
+enable_kad  = true                              # Enable Kademlia DHT for peer discovery
+reconnect_s = 30                                # Reconnect interval to known peers (seconds)
 
+# Connection limits
+max_connections_total    = 200                  # Total inbound + outbound connections
+max_connections_per_peer = 8                    # Max connections from same IP
+
+# P2P state sync (fast bootstrap from peers)
+enable_p2p_state_sync    = true                  # Enable state sync (useful for catching up)
+state_sync_chunk_bytes   = 1048576               # Chunk size (1 MiB)
+state_sync_timeout_s     = 15                    # Timeout per chunk request (seconds)
+
+# Peer scoring (optional, helps avoid bad peers)
+[network.scoring]
+enable = true
+decay_interval_s = 60                            # Score decay interval (seconds)
+trust_threshold = 0.8                             # Minimum score to trust a peer
+ban_threshold = -100                               # Score below which peer is banned
+
+# ------------------------------
+# Mempool configuration
+# ------------------------------
 [mempool]
-capacity = 200000
+capacity = 200000                                 # Maximum number of pending transactions
+max_tx_size_bytes = 1048576                        # Maximum transaction size (1 MiB)
+cache_size = 10000                                 # Recently seen transactions cache (to avoid duplicates)
+max_replace_tips = 100                             # Number of replacement candidates for RBF
 
+# ------------------------------
+# RPC server (local only – for internal tools)
+# ------------------------------
 [rpc]
-listen        = "127.0.0.1:9003"     # local only, not public
-enable_faucet = false
+listen        = "127.0.0.1:9003"                  # Localhost only – do not expose publicly
+enable_faucet = false                               # Faucet disabled (not a public node)
 
+# Rate limiting (still useful even on localhost)
+[rpc.rate_limit]
+enabled = true
+requests_per_second = 100                           # Higher limit for internal use
+burst = 200
+trusted_proxies = ["127.0.0.1", "::1"]              # Only localhost proxy
+
+# CORS settings – disable or restrict to internal tools
+[rpc.cors]
+allowed_origins = []                                 # Empty = no CORS (only same-origin)
+allowed_methods = ["GET", "POST"]
+allowed_headers = ["Content-Type"]
+max_age_seconds = 600
+
+# Timeouts
+[rpc.timeouts]
+read_timeout_s = 30                                   # Maximum duration for reading request
+write_timeout_s = 30                                  # Maximum duration for writing response
+idle_timeout_s = 120                                  # Maximum idle time for keep-alive connections
+max_body_bytes = 10485760                              # Max request body size (10 MiB)
+
+# ------------------------------
+# Storage (block and state persistence)
+# ------------------------------
 [storage]
-enable_snapshots         = true
-snapshot_every_n_blocks  = 500
-snapshot_keep            = 10
-snapshot_zstd_level      = 3
+enable_snapshots         = true                        # Enable periodic snapshots
+snapshot_every_n_blocks  = 500                         # Take snapshot every N blocks
+snapshot_keep            = 10                           # Number of snapshots to retain
+snapshot_zstd_level      = 3                            # Compression level (1-22)
 
+# Database tuning (RocksDB/LevelDB style)
+[storage.db]
+max_open_files = 1000                                   # Maximum open file descriptors
+write_buffer_size_mb = 64                               # Memtable size (MB)
+block_cache_size_mb = 128                                # Block cache size (MB)
+compression = "snappy"                                   # Compression algorithm (none, snappy, zstd)
+
+# ------------------------------
+# Observability (metrics and tracing)
+# ------------------------------
 [observability]
-enable_otel    = false
-otel_endpoint  = "http://127.0.0.1:4317"
-service_name   = "iona-val3"
+enable_otel    = false                                   # OpenTelemetry tracing (disabled by default)
+otel_endpoint  = "http://127.0.0.1:4317"                 # OTLP gRPC endpoint
+service_name   = "iona-val3"                              # Service name for traces/metrics
 
+# Prometheus metrics endpoint (internal, for monitoring)
+[observability.prometheus]
+enabled = true
+listen = "127.0.0.1:9104"                                # Internal metrics endpoint (not exposed)
+namespace = "iona"
+
+# Health check endpoint (for orchestration, e.g., Kubernetes)
+[observability.health]
+enabled = true
+listen = "127.0.0.1:8084"                                # Internal health endpoint
+path = "/health"
+
+# ------------------------------
+# Signing (encrypted keystore)
+# ------------------------------
 [signing]
-mode = "local"
+mode = "local"                                           # Use local keystore (encrypted)
+# Additional signing options if needed (e.g., key name)
+# key_name = "val3"
+
+# ------------------------------
+# Logging (advanced)
+# ------------------------------
+[logging]
+# Log to file (optional, but recommended for production)
+file_enabled = true
+file_path = "/var/log/iona/val3.log"
+file_max_size_mb = 100                                    # Rotate after 100 MB
+file_max_age_days = 7                                     # Keep logs for 7 days
+file_max_backups = 10
+
+# Structured logging (JSON) for easier ingestion
+format = "json"                                            # "json" or "plain"
+level = "info"                                             # Overrides node.log_level
+
+# ------------------------------
+# Backup (optional, for automated backups of chain data)
+# ------------------------------
+[backup]
+enabled = false
+schedule_cron = "0 2 * * *"                               # Daily at 2 AM
+target_dir = "/backup/iona"
+keep_days = 30
+
+# ------------------------------
+# Performance profiling (pprof) – enable only for debugging
+# ------------------------------
+[pprof]
+enabled = false
+listen = "127.0.0.1:6064"
