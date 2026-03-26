@@ -1,116 +1,259 @@
-//! Minimal encrypted keystore for validator/node keys.
+//! Keystore for managing cryptographic keys.
 //!
-//! This is intentionally simple: it encrypts the 32-byte seed used to derive an ed25519 keypair.
-//!
-//! Format (JSON):
-//! { "v": 1, "salt": "..b64..", "nonce": "..b64..", "ct": "..b64.." }
-//!
-//! Derivation: PBKDF2-HMAC-SHA256 (100_000 iterations) -> 32-byte key
-//! Encryption: AES-256-GCM
+//! Supports:
+//! - Plaintext keystore (keys.json)
+//! - Encrypted keystore (keys.enc) using AES-256-GCM
+//! - Password derivation via Argon2id
+//! - Atomic writes with temporary files
 
-use aes_gcm::{aead::{Aead, KeyInit}, Aes256Gcm, Nonce};
-use base64::Engine;
-use pbkdf2::pbkdf2_hmac;
-use rand::{rngs::OsRng, RngCore};
+use crate::crypto::ed25519::Ed25519Signer;
+use crate::crypto::PublicKeyBytes;
+use aes_gcm::aead::{Aead, KeyInit};
+use aes_gcm::{Aes256Gcm, Nonce};
+use argon2::{
+    password_hash::{rand_core::OsRng, PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
+    Argon2,
+};
+use rand::Rng;
 use serde::{Deserialize, Serialize};
-use sha2::Sha256;
-use std::{fs, io, path::Path};
-use zeroize::Zeroize;
+use std::fs;
+use std::path::{Path, PathBuf};
+use zeroize::Zeroizing;
 
-const V: u32 = 1;
-const PBKDF2_ITERS: u32 = 100_000;
-
-#[derive(Debug, Serialize, Deserialize)]
-struct KeystoreFile {
-    v: u32,
-    salt: String,
-    nonce: String,
-    ct: String,
+/// Key type stored in the keystore.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum KeyEntry {
+    /// Ed25519 key pair, stored as seed (32 bytes).
+    Ed25519(#[serde(with = "serde_bytes")] Vec<u8>),
+    // Future: other key types (e.g., secp256k1) can be added here.
 }
 
-fn derive_key(pass: &str, salt: &[u8]) -> [u8; 32] {
-    let mut key = [0u8; 32];
-    pbkdf2_hmac::<Sha256>(pass.as_bytes(), salt, PBKDF2_ITERS, &mut key);
-    key
+impl KeyEntry {
+    /// Create an Ed25519 key entry from a signer.
+    pub fn from_ed25519(signer: &Ed25519Signer) -> Self {
+        KeyEntry::Ed25519(signer.to_seed().to_vec())
+    }
+
+    /// Convert into an Ed25519 signer (if applicable).
+    pub fn into_ed25519(self) -> Option<Ed25519Signer> {
+        match self {
+            KeyEntry::Ed25519(seed) => {
+                let mut seed_arr = [0u8; 32];
+                seed_arr.copy_from_slice(&seed);
+                Some(Ed25519Signer::from_seed(seed_arr))
+            }
+        }
+    }
 }
 
-pub fn encrypt_seed32_to_file(path: &str, seed32: [u8; 32], pass: &str) -> io::Result<()> {
-    let mut salt = [0u8; 16];
-    let mut nonce_bytes = [0u8; 12];
-    OsRng.fill_bytes(&mut salt);
-    OsRng.fill_bytes(&mut nonce_bytes);
-
-    let mut key = derive_key(pass, &salt);
-    let cipher = Aes256Gcm::new_from_slice(&key)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, format!("aes key: {e}")))?;
-
-    let ct = cipher
-        .encrypt(Nonce::from_slice(&nonce_bytes), seed32.as_slice())
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("encrypt: {e}")))?;
-
-    // Zero secrets as best-effort.
-    key.zeroize();
-
-    let out = KeystoreFile {
-        v: V,
-        salt: base64::engine::general_purpose::STANDARD.encode(salt),
-        nonce: base64::engine::general_purpose::STANDARD.encode(nonce_bytes),
-        ct: base64::engine::general_purpose::STANDARD.encode(ct),
-    };
-
-    let s = serde_json::to_string_pretty(&out)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("keystore encode: {e}")))?;
-    fs::write(path, s)?;
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o600));
-    }
-
-    Ok(())
+/// The keystore structure that is serialized.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct KeystoreContent {
+    version: u32,
+    keys: Vec<KeyEntry>,
 }
 
-pub fn decrypt_seed32_from_file(path: &str, pass: &str) -> io::Result<[u8; 32]> {
-    let s = fs::read_to_string(path)?;
-    let k: KeystoreFile = serde_json::from_str(&s)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("keystore parse: {e}")))?;
-    if k.v != V {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, format!("unsupported keystore version {}", k.v)));
-    }
+const KEYSTORE_VERSION: u32 = 1;
 
-    let salt = base64::engine::general_purpose::STANDARD
-        .decode(k.salt)
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "bad salt"))?;
-    let nonce_bytes = base64::engine::general_purpose::STANDARD
-        .decode(k.nonce)
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "bad nonce"))?;
-    let ct = base64::engine::general_purpose::STANDARD
-        .decode(k.ct)
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "bad ct"))?;
-
-    if nonce_bytes.len() != 12 {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "nonce len"));
-    }
-
-    let mut key = derive_key(pass, &salt);
-    let cipher = Aes256Gcm::new_from_slice(&key)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, format!("aes key: {e}")))?;
-
-    let pt = cipher
-        .decrypt(Nonce::from_slice(&nonce_bytes), ct.as_ref())
-        .map_err(|_| io::Error::new(io::ErrorKind::PermissionDenied, "wrong password or corrupted keystore"))?;
-
-    key.zeroize();
-
-    if pt.len() != 32 {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "seed len"));
-    }
-    let mut seed32 = [0u8; 32];
-    seed32.copy_from_slice(&pt);
-    Ok(seed32)
+/// A keystore that can be persisted to disk, with optional encryption.
+pub struct Keystore {
+    path: PathBuf,
+    encrypted: bool,
+    keys: Vec<KeyEntry>,
 }
 
-pub fn keystore_exists(path: &str) -> bool {
-    Path::new(path).exists()
+impl Keystore {
+    /// Open or create a keystore at the given path.
+    ///
+    /// If `encrypted` is true, the keystore will be encrypted on disk.
+    /// You must provide a password (via `set_password` or environment) when reading/writing.
+    pub fn new(path: impl AsRef<Path>, encrypted: bool) -> Self {
+        Self {
+            path: path.as_ref().to_path_buf(),
+            encrypted,
+            keys: Vec::new(),
+        }
+    }
+
+    /// Load the keystore from disk, using the provided password if encrypted.
+    pub fn load(&mut self, password: Option<&str>) -> Result<(), String> {
+        if !self.path.exists() {
+            // No file yet – start empty.
+            self.keys = Vec::new();
+            return Ok(());
+        }
+
+        let data = fs::read(&self.path).map_err(|e| format!("failed to read keystore: {e}"))?;
+
+        let content: KeystoreContent = if self.encrypted {
+            let password = password.ok_or("password required for encrypted keystore")?;
+            let decrypted = Self::decrypt(&data, password)?;
+            serde_json::from_slice(&decrypted)
+                .map_err(|e| format!("failed to parse keystore JSON: {e}"))?
+        } else {
+            serde_json::from_slice(&data)
+                .map_err(|e| format!("failed to parse keystore JSON: {e}"))?
+        };
+
+        if content.version != KEYSTORE_VERSION {
+            return Err(format!(
+                "unsupported keystore version: {} (expected {})",
+                content.version, KEYSTORE_VERSION
+            ));
+        }
+        self.keys = content.keys;
+        Ok(())
+    }
+
+    /// Save the keystore to disk atomically.
+    pub fn save(&self, password: Option<&str>) -> Result<(), String> {
+        let content = KeystoreContent {
+            version: KEYSTORE_VERSION,
+            keys: self.keys.clone(),
+        };
+        let json = serde_json::to_string_pretty(&content)
+            .map_err(|e| format!("failed to serialize keystore: {e}"))?;
+
+        let data = if self.encrypted {
+            let password = password.ok_or("password required for encrypted keystore")?;
+            Self::encrypt(json.as_bytes(), password)?
+        } else {
+            json.into_bytes()
+        };
+
+        // Atomic write: write to a temporary file, then rename.
+        let tmp_path = self.path.with_extension("tmp");
+        fs::write(&tmp_path, &data).map_err(|e| format!("failed to write temporary file: {e}"))?;
+        fs::rename(&tmp_path, &self.path).map_err(|e| format!("failed to rename keystore: {e}"))?;
+        Ok(())
+    }
+
+    /// Add a key entry.
+    pub fn add_key(&mut self, entry: KeyEntry) {
+        self.keys.push(entry);
+    }
+
+    /// Remove a key entry by index.
+    pub fn remove_key(&mut self, index: usize) -> Option<KeyEntry> {
+        if index < self.keys.len() {
+            Some(self.keys.remove(index))
+        } else {
+            None
+        }
+    }
+
+    /// Get all key entries.
+    pub fn keys(&self) -> &[KeyEntry] {
+        &self.keys
+    }
+
+    /// Return the first Ed25519 signer found (if any).
+    pub fn first_ed25519(&self) -> Option<Ed25519Signer> {
+        for key in &self.keys {
+            if let KeyEntry::Ed25519(seed) = key {
+                let mut seed_arr = [0u8; 32];
+                seed_arr.copy_from_slice(seed);
+                return Some(Ed25519Signer::from_seed(seed_arr));
+            }
+        }
+        None
+    }
+
+    // -------------------------------------------------------------------------
+    // Encryption helpers (AES-256-GCM with Argon2id key derivation)
+    // -------------------------------------------------------------------------
+
+    /// Derive a 32‑byte key from a password using Argon2id.
+    fn derive_key(password: &str, salt: &[u8]) -> [u8; 32] {
+        let argon2 = Argon2::default();
+        let salt_str = SaltString::encode_b64(salt).unwrap();
+        let hash = argon2
+            .hash_password(password.as_bytes(), &salt_str)
+            .expect("password hashing failed");
+        let hash_bytes = hash.hash.unwrap().as_bytes();
+        let mut key = [0u8; 32];
+        key.copy_from_slice(&hash_bytes[..32]);
+        key
+    }
+
+    /// Encrypt data with a password. Returns (salt + nonce + ciphertext).
+    fn encrypt(plaintext: &[u8], password: &str) -> Result<Vec<u8>, String> {
+        let mut salt = [0u8; 16];
+        OsRng.fill_bytes(&mut salt);
+        let key = Self::derive_key(password, &salt);
+        let cipher = Aes256Gcm::new_from_slice(&key)
+            .map_err(|e| format!("failed to create cipher: {e}"))?;
+        let nonce_bytes: [u8; 12] = OsRng.gen();
+        let nonce = Nonce::from_slice(&nonce_bytes);
+        let ciphertext = cipher
+            .encrypt(nonce, plaintext)
+            .map_err(|e| format!("encryption failed: {e}"))?;
+        let mut out = Vec::with_capacity(16 + 12 + ciphertext.len());
+        out.extend_from_slice(&salt);
+        out.extend_from_slice(&nonce_bytes);
+        out.extend_from_slice(&ciphertext);
+        Ok(out)
+    }
+
+    /// Decrypt data with a password. Input format: salt (16) + nonce (12) + ciphertext.
+    fn decrypt(data: &[u8], password: &str) -> Result<Vec<u8>, String> {
+        if data.len() < 16 + 12 {
+            return Err("invalid encrypted keystore format".into());
+        }
+        let salt = &data[0..16];
+        let nonce_bytes = &data[16..28];
+        let ciphertext = &data[28..];
+        let key = Self::derive_key(password, salt);
+        let cipher = Aes256Gcm::new_from_slice(&key)
+            .map_err(|e| format!("failed to create cipher: {e}"))?;
+        let nonce = Nonce::from_slice(nonce_bytes);
+        let plaintext = cipher
+            .decrypt(nonce, ciphertext)
+            .map_err(|e| format!("decryption failed (wrong password?): {e}"))?;
+        Ok(plaintext)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn test_keystore_plain() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("keys.json");
+        let mut ks = Keystore::new(&path, false);
+        let signer = Ed25519Signer::random();
+        ks.add_key(KeyEntry::from_ed25519(&signer));
+        ks.save(None).unwrap();
+
+        let mut ks2 = Keystore::new(&path, false);
+        ks2.load(None).unwrap();
+        assert_eq!(ks2.keys().len(), 1);
+        let loaded_signer = ks2.first_ed25519().unwrap();
+        assert_eq!(loaded_signer.public_key().0, signer.public_key().0);
+    }
+
+    #[test]
+    fn test_keystore_encrypted() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("keys.enc");
+        let mut ks = Keystore::new(&path, true);
+        let signer = Ed25519Signer::random();
+        ks.add_key(KeyEntry::from_ed25519(&signer));
+        let password = "testpassword";
+        ks.save(Some(password)).unwrap();
+
+        let mut ks2 = Keystore::new(&path, true);
+        ks2.load(Some(password)).unwrap();
+        assert_eq!(ks2.keys().len(), 1);
+        let loaded_signer = ks2.first_ed25519().unwrap();
+        assert_eq!(loaded_signer.public_key().0, signer.public_key().0);
+
+        // Wrong password should fail
+        let mut ks3 = Keystore::new(&path, true);
+        assert!(ks3.load(Some("wrong")).is_err());
+    }
 }
