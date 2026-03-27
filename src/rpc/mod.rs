@@ -1,5 +1,10 @@
-// RPC module — core Ethereum-compatible JSON-RPC and supporting types.
-// All sub-modules listed here; middleware was added in v28 security hardening.
+//! RPC module — core Ethereum‑compatible JSON‑RPC and supporting types.
+//!
+//! This module provides:
+//! - Ethereum‑compatible JSON‑RPC server (`server::serve`)
+//! - Types and utilities for RPC responses
+//! - Storage backends for blocks, receipts, and state
+//! - Middleware for security, logging, and rate limiting
 
 pub mod auth_api_key;
 pub mod basefee;
@@ -19,3 +24,11 @@ pub mod state_trie;
 pub mod tx_decode;
 pub mod txpool;
 pub mod withdrawals;
+
+// Re‑export the main server entry point
+pub use router::serve;
+
+// Re‑export commonly used types for convenience
+pub use eth_rpc::{EthRpcState, Block, Receipt, TxRecord, Log};
+pub use txpool::TxPool;
+pub use withdrawals::Withdrawal;
