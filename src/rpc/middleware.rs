@@ -14,6 +14,7 @@
 //!
 //! Router setup (iona-node.rs):
 //! ```ignore
+//! let limiter = Arc::new(RpcLimiter::new(config));
 //! let router = Router::new()
 //!     /* … routes … */
 //!     .with_state(app.clone())
@@ -21,7 +22,7 @@
 //!     .layer(middleware::from_fn(body_limit_middleware))
 //!     .layer(middleware::from_fn(concurrency_middleware))
 //!     .layer(middleware::from_fn(read_limit_middleware))
-//!     .layer(Extension(app.limiter.clone()))
+//!     .layer(Extension(limiter.clone()))
 //!     .layer(middleware::from_fn(header_size_middleware))
 //!     .layer(middleware::from_fn(request_id_middleware))
 //!     .layer(CorsLayer::…);
@@ -29,23 +30,47 @@
 
 use axum::{
     body::Body,
-    extract::Request,
+    extract::{ConnectInfo, Extension, Request},
     http::{header, HeaderValue, Method, StatusCode},
     middleware::Next,
     response::{IntoResponse, Response},
 };
 use bytes::Bytes;
+use std::net::SocketAddr;
 use std::sync::Arc;
+use tracing::warn;
 
 use crate::rpc_limits::{new_request_id, RpcLimitResult, RpcLimiter, MAX_BODY_BYTES};
 
-/// Maximum total byte size of all request headers combined (8 KiB).
-pub const MAX_HEADER_BYTES: usize = 8_192;
+// -----------------------------------------------------------------------------
+// Constants (can be overridden by config)
+// -----------------------------------------------------------------------------
+
+/// Maximum total byte size of all request headers combined.
+pub const DEFAULT_MAX_HEADER_BYTES: usize = 8_192;
 
 /// Maximum JSON object/array nesting depth accepted in POST bodies.
-pub const MAX_JSON_DEPTH: usize = 32;
+pub const DEFAULT_MAX_JSON_DEPTH: usize = 32;
 
-// ── X-Request-ID middleware ────────────────────────────────────────────────
+/// Configuration for the middleware.
+#[derive(Debug, Clone)]
+pub struct RpcMiddlewareConfig {
+    pub max_header_bytes: usize,
+    pub max_json_depth: usize,
+}
+
+impl Default for RpcMiddlewareConfig {
+    fn default() -> Self {
+        Self {
+            max_header_bytes: DEFAULT_MAX_HEADER_BYTES,
+            max_json_depth: DEFAULT_MAX_JSON_DEPTH,
+        }
+    }
+}
+
+// -----------------------------------------------------------------------------
+// X-Request-ID middleware
+// -----------------------------------------------------------------------------
 
 /// Middleware that injects a unique `X-Request-ID` into every request/response.
 /// Also creates a tracing span so all log lines inside the handler carry the ID.
@@ -70,26 +95,41 @@ pub async fn request_id_middleware(mut req: Request, next: Next) -> Response {
     response
 }
 
-// ── Header-size guard middleware ──────────────────────────────────────────
+// -----------------------------------------------------------------------------
+// Header-size guard middleware
+// -----------------------------------------------------------------------------
 
-/// Middleware that rejects requests whose combined header block exceeds MAX_HEADER_BYTES.
-/// Runs before the limiter is consulted to avoid per-IP state for malformed requests.
-pub async fn header_size_middleware(req: Request, next: Next) -> Response {
+/// Middleware that rejects requests whose combined header block exceeds the configured limit.
+pub async fn header_size_middleware(
+    Extension(config): Extension<Arc<RpcMiddlewareConfig>>,
+    req: Request,
+    next: Next,
+) -> Response {
     let total: usize = req
         .headers()
         .iter()
         .map(|(k, v)| k.as_str().len() + v.len() + 4) // name + ": " + value + "\r\n"
         .sum();
 
-    if total > MAX_HEADER_BYTES {
+    if total > config.max_header_bytes {
         let req_id = req
             .headers()
             .get("x-request-id")
             .and_then(|v| v.to_str().ok())
             .unwrap_or("unknown")
             .to_string();
-        tracing::warn!(%req_id, header_bytes = total, max = MAX_HEADER_BYTES,
-            "rpc::middleware: header block too large");
+        warn!(
+            req_id = %req_id,
+            header_bytes = total,
+            max = config.max_header_bytes,
+            "rpc::middleware: header block too large"
+        );
+
+        // Increment metric
+        if let Some(limiter) = req.extensions().get::<Arc<RpcLimiter>>() {
+            limiter.metric_headers_too_large.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+
         return (
             StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE,
             [("x-request-id", req_id.as_str())],
@@ -101,13 +141,34 @@ pub async fn header_size_middleware(req: Request, next: Next) -> Response {
     next.run(req).await
 }
 
-// ── Read rate-limit middleware ─────────────────────────────────────────────
+// -----------------------------------------------------------------------------
+// Read rate-limit middleware
+// -----------------------------------------------------------------------------
+
+/// Extract the client IP address from the request (X-Forwarded-For or ConnectInfo).
+fn get_client_ip(req: &Request) -> Option<std::net::IpAddr> {
+    // Try X-Forwarded-For (first IP in the list)
+    if let Some(ips) = req.headers().get("x-forwarded-for") {
+        if let Ok(ips_str) = ips.to_str() {
+            if let Some(first) = ips_str.split(',').next() {
+                if let Ok(ip) = first.trim().parse() {
+                    return Some(ip);
+                }
+            }
+        }
+    }
+
+    // Fallback to ConnectInfo (axum's built-in)
+    if let Some(ci) = req.extensions().get::<ConnectInfo<SocketAddr>>() {
+        return Some(ci.0.ip());
+    }
+
+    None
+}
 
 /// Middleware that applies `check_read()` to every GET/HEAD request.
-/// POST requests are rate-limited separately via `check_submit()` inside each handler.
-/// If the client IP is unavailable (e.g. in tests), the request is allowed through.
 pub async fn read_limit_middleware(
-    limiter: axum::extract::Extension<Arc<RpcLimiter>>,
+    limiter: Extension<Arc<RpcLimiter>>,
     req: Request,
     next: Next,
 ) -> Response {
@@ -119,16 +180,11 @@ pub async fn read_limit_middleware(
             .unwrap_or("unknown")
             .to_string();
 
-        // Extract IP injected by axum's ConnectInfo extension.
-        if let Some(ci) = req
-            .extensions()
-            .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
-        {
-            let ip = ci.0.ip();
+        if let Some(ip) = get_client_ip(&req) {
             match limiter.check_read(ip, &req_id) {
                 RpcLimitResult::Allowed => {}
                 _ => {
-                    tracing::warn!(%req_id, %ip, "rpc::middleware: read rate limit exceeded");
+                    warn!(req_id = %req_id, %ip, "rpc::middleware: read rate limit exceeded");
                     return (
                         StatusCode::TOO_MANY_REQUESTS,
                         [
@@ -146,12 +202,13 @@ pub async fn read_limit_middleware(
     next.run(req).await
 }
 
-// ── Global concurrency cap middleware ─────────────────────────────────────
+// -----------------------------------------------------------------------------
+// Global concurrency cap middleware
+// -----------------------------------------------------------------------------
 
 /// Middleware that enforces the global concurrent-request cap.
-/// Returns HTTP 503 when the cap is reached.
 pub async fn concurrency_middleware(
-    limiter: axum::extract::Extension<Arc<RpcLimiter>>,
+    limiter: Extension<Arc<RpcLimiter>>,
     req: Request,
     next: Next,
 ) -> Response {
@@ -165,6 +222,7 @@ pub async fn concurrency_middleware(
     let _ticket = match limiter.try_concurrency_slot(&req_id) {
         Some(t) => t,
         None => {
+            warn!(req_id = %req_id, "rpc::middleware: concurrency limit reached");
             return (
                 StatusCode::SERVICE_UNAVAILABLE,
                 [
@@ -180,13 +238,13 @@ pub async fn concurrency_middleware(
     next.run(req).await
 }
 
-// ── Body-size guard middleware ────────────────────────────────────────────
+// -----------------------------------------------------------------------------
+// Body-size guard middleware
+// -----------------------------------------------------------------------------
 
-/// Middleware that enforces MAX_BODY_BYTES via the Content-Length header (cheap check).
-/// If the body is oversized, returns 413 with a structured error.
-/// Actual streaming bodies are bounded by the json_depth_middleware below.
+/// Middleware that enforces MAX_BODY_BYTES via the Content-Length header.
 pub async fn body_limit_middleware(
-    limiter: axum::extract::Extension<Arc<RpcLimiter>>,
+    limiter: Extension<Arc<RpcLimiter>>,
     req: Request,
     next: Next,
 ) -> Response {
@@ -197,7 +255,6 @@ pub async fn body_limit_middleware(
         .unwrap_or("unknown")
         .to_string();
 
-    // Check Content-Length header first (cheap).
     if let Some(cl) = req
         .headers()
         .get(header::CONTENT_LENGTH)
@@ -208,8 +265,8 @@ pub async fn body_limit_middleware(
             limiter
                 .metric_payload_too_large
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            tracing::warn!(
-                %req_id,
+            warn!(
+                req_id = %req_id,
                 content_length = cl,
                 max = MAX_BODY_BYTES,
                 "rpc::middleware: body too large (content-length check)"
@@ -226,14 +283,18 @@ pub async fn body_limit_middleware(
     next.run(req).await
 }
 
-// ── JSON nesting-depth guard middleware ───────────────────────────────────
+// -----------------------------------------------------------------------------
+// JSON nesting-depth guard middleware
+// -----------------------------------------------------------------------------
 
 /// Middleware that collects the request body (bounded by MAX_BODY_BYTES + 1)
-/// and rejects it if the JSON nesting depth exceeds MAX_JSON_DEPTH.
-/// The body is re-assembled and passed to the next handler unchanged.
-///
-/// Only applied to requests with `Content-Type: application/json` bodies (POST/PUT/PATCH).
-pub async fn json_depth_middleware(req: Request, next: Next) -> Response {
+/// and rejects it if the JSON nesting depth exceeds the configured limit.
+pub async fn json_depth_middleware(
+    Extension(config): Extension<Arc<RpcMiddlewareConfig>>,
+    limiter: Extension<Arc<RpcLimiter>>,
+    req: Request,
+    next: Next,
+) -> Response {
     let is_json_post = {
         let method_ok = matches!(
             req.method(),
@@ -264,6 +325,7 @@ pub async fn json_depth_middleware(req: Request, next: Next) -> Response {
     let bytes: Bytes = match axum::body::to_bytes(body, MAX_BODY_BYTES + 1).await {
         Ok(b) => b,
         Err(_) => {
+            limiter.metric_payload_too_large.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             return (
                 StatusCode::PAYLOAD_TOO_LARGE,
                 [("x-request-id", req_id.as_str())],
@@ -274,11 +336,11 @@ pub async fn json_depth_middleware(req: Request, next: Next) -> Response {
     };
 
     let depth = json_nesting_depth(&bytes);
-    if depth > MAX_JSON_DEPTH {
-        tracing::warn!(
-            %req_id,
+    if depth > config.max_json_depth {
+        warn!(
+            req_id = %req_id,
             json_depth = depth,
-            max = MAX_JSON_DEPTH,
+            max = config.max_json_depth,
             "rpc::middleware: JSON nesting depth exceeded"
         );
         return (
@@ -334,7 +396,9 @@ pub fn json_nesting_depth(bytes: &[u8]) -> usize {
     max_depth
 }
 
-// ── Safe error response helper ────────────────────────────────────────────
+// -----------------------------------------------------------------------------
+// Safe error response helper
+// -----------------------------------------------------------------------------
 
 /// Build a structured, opaque error response with no internal details.
 pub fn error_response(status: StatusCode, code: &str, req_id: &str) -> Response {
@@ -348,4 +412,106 @@ pub fn error_response(status: StatusCode, code: &str, req_id: &str) -> Response 
         body,
     )
         .into_response()
+}
+
+// -----------------------------------------------------------------------------
+// Tests
+// -----------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::{Router, routing::get, Extension};
+    use http::{Request, StatusCode};
+    use std::sync::Arc;
+    use tower::ServiceExt;
+
+    // Dummy handler for testing.
+    async fn dummy_handler() -> &'static str {
+        "ok"
+    }
+
+    #[test]
+    fn test_json_nesting_depth() {
+        // Simple object
+        let json = br#"{"a":1}"#;
+        assert_eq!(json_nesting_depth(json), 1);
+
+        // Nested object
+        let json = br#"{"a":{"b":2}}"#;
+        assert_eq!(json_nesting_depth(json), 2);
+
+        // Array inside object
+        let json = br#"{"a":[1,2,3]}"#;
+        assert_eq!(json_nesting_depth(json), 2);
+
+        // Deep nesting
+        let json = br#"{"a":{"b":{"c":{"d":4}}}}"#;
+        assert_eq!(json_nesting_depth(json), 4);
+
+        // Strings with braces should be ignored
+        let json = br#"{"a":"{\"b\":2}"}"#;
+        assert_eq!(json_nesting_depth(json), 1);
+
+        // Empty input
+        assert_eq!(json_nesting_depth(b""), 0);
+
+        // Non‑JSON
+        assert_eq!(json_nesting_depth(b"hello"), 0);
+    }
+
+    #[tokio::test]
+    async fn test_request_id_middleware() {
+        let app = Router::new()
+            .route("/", get(dummy_handler))
+            .layer(axum::middleware::from_fn(request_id_middleware));
+
+        let response = app
+            .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(response.headers().contains_key("x-request-id"));
+    }
+
+    #[tokio::test]
+    async fn test_header_size_middleware() {
+        let config = Arc::new(RpcMiddlewareConfig::default());
+        let app = Router::new()
+            .route("/", get(dummy_handler))
+            .layer(axum::middleware::from_fn(header_size_middleware))
+            .layer(Extension(config));
+
+        // Create a request with oversized headers.
+        let mut req = Request::builder().uri("/").body(Body::empty()).unwrap();
+        let large_header = "x".repeat(DEFAULT_MAX_HEADER_BYTES + 1);
+        req.headers_mut().insert("x-large", HeaderValue::from_str(&large_header).unwrap());
+
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE);
+    }
+
+    #[tokio::test]
+    async fn test_json_depth_middleware() {
+        let config = Arc::new(RpcMiddlewareConfig::default());
+        let limiter = Arc::new(RpcLimiter::new()); // must be defined elsewhere
+        let app = Router::new()
+            .route("/", get(dummy_handler))
+            .layer(axum::middleware::from_fn(json_depth_middleware))
+            .layer(Extension(config))
+            .layer(Extension(limiter));
+
+        // Deep JSON (max depth 32, we send 33)
+        let deep_json = format!("{}", "{\"a\":".repeat(33) + "1" + "}".repeat(33));
+        let req = Request::builder()
+            .method("POST")
+            .uri("/")
+            .header("content-type", "application/json")
+            .body(Body::from(deep_json))
+            .unwrap();
+
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
 }
