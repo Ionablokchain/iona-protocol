@@ -88,7 +88,7 @@ mod tests {
         b2.0[1] = 0x02;
         let result = bloom_or_hex(&[b1, b2]);
         // Expect hex of a bloom where first byte = 0x01, second = 0x02, rest zero.
-        let expected_hex = "0x".to_string() + &hex::encode(&[0x01, 0x02, 0u8; 254].concat());
+        let expected_hex = "0x".to_string() + &hex::encode(&[0x01, 0x02, 0u8; 254]);
         assert_eq!(result, expected_hex);
     }
 
