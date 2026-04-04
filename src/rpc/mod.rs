@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used)]
 //! RPC module — core Ethereum‑compatible JSON‑RPC and supporting types.
 //!
 //! This module provides:
