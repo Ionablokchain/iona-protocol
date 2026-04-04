@@ -1,7 +1,34 @@
 [build]
-# NOTE: The upstream project used `-Dwarnings` (treat warnings as errors).
-# That is great for CI, but it frequently breaks student/lab environments
-# where dependency versions differ slightly (causing new warnings/deprecations).
-#
-# Keep builds resilient by allowing warnings here.
+# Allow warnings to keep builds resilient across dependency versions.
+# For CI, you can override with RUSTFLAGS="-Dwarnings" env var.
 rustflags = ["-Awarnings"]
+
+# Number of parallel codegen units (default = 16, reduce for faster compile but slower runtime)
+# Uncomment if you have a slower build machine:
+# codegen-units = 256
+
+# Use LLD linker for faster linking (if installed)
+# [target.x86_64-unknown-linux-gnu]
+# linker = "clang"
+# rustflags = ["-C", "link-arg=-fuse-ld=lld"]
+
+# Use mold for even faster linking (Linux only)
+# [target.x86_64-unknown-linux-gnu]
+# linker = "clang"
+# rustflags = ["-C", "link-arg=-fuse-ld=mold"]
+
+# Enable incremental compilation (speeds up rebuilds, but increases disk usage)
+# [build]
+# incremental = true
+
+# Set a custom target directory to keep build artifacts separate from source
+# Useful if you have multiple workspaces or limited disk space on the system drive.
+# target-dir = "./target"
+
+# For macOS, you may want to use the system linker
+# [target.x86_64-apple-darwin]
+# rustflags = ["-C", "link-arg=-Wl,-dead_strip_dylibs"]
+
+# For Windows, you can use the GNU toolchain (if you have it installed)
+# [target.x86_64-pc-windows-gnu]
+# linker = "gcc"
