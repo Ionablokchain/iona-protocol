@@ -1,4 +1,4 @@
-# IONA v24 node configuration — enhanced version
+# IONA v28 node configuration — production‑ready
 # All values shown are defaults. Adjust according to your deployment.
 
 [node]
@@ -38,7 +38,7 @@ precommit_timeout_ms = 200
 max_txs_per_block = 4096
 
 # EIP-1559 target gas per block
-gas_target = 43000000
+gas_target = 43_000_000
 
 # If true, advance to next round as soon as 2/3+ votes are received (faster finality).
 # In unstable networks, consider setting to false to avoid premature commits.
@@ -55,6 +55,20 @@ max_evidence_age_s = 3600
 
 # Minimum number of validators required to produce a block (safety threshold)
 min_validator_count = 4
+
+# Maximum rounds before giving up (avoids infinite loops)
+max_rounds = 50
+
+# Protocol version activation schedule (see UPGRADE_SPEC.md)
+[[consensus.protocol_activations]]
+protocol_version = 1
+activation_height = 0
+grace_blocks = 0
+
+[[consensus.protocol_activations]]
+protocol_version = 2
+activation_height = 2_000_000
+grace_blocks = 1000
 
 
 [network]
@@ -82,7 +96,7 @@ reconnect_s = 30
 
 # Connection limits
 max_connections_total = 200               # total inbound + outbound
-max_connections_per_peer = 8               # prevent sybil from single IP
+max_connections_per_peer = 8              # prevent sybil from single IP
 
 # Request-response protocol limits (per-peer, per-protocol)
 [network.rr_limits]
@@ -181,6 +195,16 @@ max_gas_price = 1_000_000
 # Maximum priority fee per gas
 max_priority_fee_per_gas = 100
 
+# MEV protection (commit-reveal, threshold encryption, fair ordering)
+[mev]
+enable_commit_reveal = true
+enable_threshold_encryption = true
+enable_fair_ordering = true
+ordering_jitter_ms = 50
+commit_ttl_blocks = 20
+backrun_delay_blocks = 1
+max_pending_commits = 100_000
+
 
 [rpc]
 # SECURITY: bind to loopback by default.
@@ -193,6 +217,9 @@ enable_faucet = false
 # CORS policy: false = restrictive (no cross-origin), true = allow-all (dev only)
 cors_allow_all = false
 
+# List of allowed origins when CORS is restricted (e.g., ["https://myexplorer.com"])
+allowed_origins = []
+
 # Rate limiting for RPC calls (requests per second, per IP)
 rate_limit_per_ip = 100
 rate_limit_burst = 200
@@ -202,6 +229,9 @@ max_request_size = 10_485_760                # 10 MiB
 
 # Timeout for RPC calls (seconds)
 timeout_s = 30
+
+# Maximum JSON nesting depth (prevents DoS via deep structures)
+max_json_depth = 32
 
 
 [storage]
@@ -225,6 +255,12 @@ max_concurrent_tasks = 256
 
 # Path to the block store (if separate from data_dir)
 # block_store_path = "./data/node1/blocks"
+
+# WAL (Write-Ahead Log) configuration
+[storage.wal]
+max_segment_bytes = 67_108_864              # 64 MiB
+keep_segments = 3
+fsync_every_write = true
 
 
 [observability]
@@ -254,3 +290,64 @@ remote_tls_client_cert_pem = "./deploy/tls/client.crt.pem"
 remote_tls_client_key_pem  = "./deploy/tls/client.key.pem"
 remote_tls_ca_cert_pem     = "./deploy/tls/ca.crt.pem"
 remote_tls_server_name     = "iona-remote-signer"
+
+
+[governance]
+# Minimum deposit required to submit a governance proposal (in base units)
+min_deposit = 1_000_000
+
+# Number of epochs for the voting period
+voting_epochs = 100
+
+# Quorum required (in basis points, 10000 = 100%)
+quorum_bps = 3340        # 33.4%
+
+# Threshold for passing (in basis points)
+threshold_bps = 5000     # 50%
+
+
+[economics]
+# Annual inflation rate (basis points, 10000 = 100%)
+base_inflation_bps = 500      # 5%
+
+# Minimum stake required to become a validator (in base units)
+min_stake = 10_000_000_000    # 10 billion
+
+# Slashing percentage for double‑signing (basis points)
+slash_double_sign_bps = 5000  # 50%
+
+# Slashing percentage for downtime (basis points)
+slash_downtime_bps = 100      # 1%
+
+# Unbonding period (in epochs)
+unbonding_epochs = 14
+
+# Treasury share of block rewards (basis points)
+treasury_bps = 500            # 5%
+
+
+[protocol]
+# Current protocol version (set by binary, not configurable)
+# current_version = 2
+
+# Supported protocol versions (set by binary)
+# supported_versions = [1, 2]
+
+
+[audit]
+# Path to the audit log file (JSONL)
+log_path = "./data/node/audit.jsonl"
+# Maximum file size before rotation (bytes)
+max_file_size_bytes = 104_857_600   # 100 MiB
+# Number of rotated files to keep
+rotate_count = 5
+# Whether to also emit audit events via tracing
+emit_to_tracing = true
+
+
+# Optional: backup configuration
+[backup]
+enabled = false
+schedule_cron = "0 2 * * *"           # daily at 2 AM
+target_dir = "/backup/iona"
+keep_days = 30
