@@ -846,7 +846,7 @@ mod tests {
     fn test_validators_hash_hex() {
         let pks = vec!["02".into(), "01".into()];
         let hash = validators_hash_hex(&pks);
-        let hash2 = validators_hash_hex(&vec!["01".into(), "02".into()]);
+        let hash2 = validators_hash_hex(&["01".into(), "02".into()]);
         assert_eq!(hash, hash2);
     }
 }
