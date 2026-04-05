@@ -51,7 +51,9 @@ pub struct ProtocolActivation {
     pub grace_blocks: u64,
 }
 
-fn default_grace_blocks() -> u64 { 1000 }
+fn default_grace_blocks() -> u64 {
+    1000
+}
 
 /// Default activation schedule: v1 active from genesis.
 pub fn default_activations() -> Vec<ProtocolActivation> {
@@ -203,7 +205,9 @@ pub fn is_in_grace_window(
     };
 
     // We must be strictly inside the grace window.
-    if height < activation_height || height >= activation_height.saturating_add(current_activation.grace_blocks) {
+    if height < activation_height
+        || height >= activation_height.saturating_add(current_activation.grace_blocks)
+    {
         return false;
     }
 
@@ -223,7 +227,10 @@ pub fn is_supported(version: u32) -> bool {
 }
 
 /// Returns the next activation after the given height (if any).
-pub fn next_activation(height: u64, activations: &[ProtocolActivation]) -> Option<&ProtocolActivation> {
+pub fn next_activation(
+    height: u64,
+    activations: &[ProtocolActivation],
+) -> Option<&ProtocolActivation> {
     activations
         .iter()
         .filter(|a| a.activation_height.map(|ah| ah > height).unwrap_or(false))

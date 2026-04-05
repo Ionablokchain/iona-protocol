@@ -48,16 +48,10 @@ pub enum VmError {
     // Invalid program / bytecode
     // ---------------------------------------------------------------------
     #[error("invalid opcode {opcode:#x} at pc {pc}")]
-    InvalidOpcode {
-        opcode: u8,
-        pc: usize,
-    },
+    InvalidOpcode { opcode: u8, pc: usize },
 
     #[error("invalid jump destination {dest} at pc {pc}")]
-    InvalidJump {
-        pc: usize,
-        dest: usize,
-    },
+    InvalidJump { pc: usize, dest: usize },
 
     // ---------------------------------------------------------------------
     // Stack errors
@@ -70,15 +64,14 @@ pub enum VmError {
     },
 
     #[error("stack overflow at pc {pc}: limit {limit}")]
-    StackOverflow {
-        pc: usize,
-        limit: usize,
-    },
+    StackOverflow { pc: usize, limit: usize },
 
     // ---------------------------------------------------------------------
     // Memory / data access errors
     // ---------------------------------------------------------------------
-    #[error("memory access out of bounds at pc {pc}: offset {offset}, size {size}, memory len {len}")]
+    #[error(
+        "memory access out of bounds at pc {pc}: offset {offset}, size {size}, memory len {len}"
+    )]
     MemoryOob {
         pc: usize,
         offset: usize,
@@ -86,7 +79,9 @@ pub enum VmError {
         len: usize,
     },
 
-    #[error("invalid calldata access at pc {pc}: offset {offset}, size {size}, calldata len {len}")]
+    #[error(
+        "invalid calldata access at pc {pc}: offset {offset}, size {size}, calldata len {len}"
+    )]
     CalldataOob {
         pc: usize,
         offset: usize,
@@ -113,53 +108,34 @@ pub enum VmError {
     // State / account / balance errors
     // ---------------------------------------------------------------------
     #[error("insufficient balance: needed {needed}, available {available}")]
-    InsufficientBalance {
-        needed: u128,
-        available: u128,
-    },
+    InsufficientBalance { needed: u128, available: u128 },
 
     #[error("create collision at pc {pc}: address {address:?}")]
-    CreateCollision {
-        pc: usize,
-        address: [u8; 20],
-    },
+    CreateCollision { pc: usize, address: [u8; 20] },
 
     #[error("code too large: {size} bytes (max {max})")]
-    CodeTooLarge {
-        size: usize,
-        max: usize,
-    },
+    CodeTooLarge { size: usize, max: usize },
 
     // ---------------------------------------------------------------------
     // Permissions / execution context
     // ---------------------------------------------------------------------
     #[error("write protection at pc {pc}")]
-    WriteProtection {
-        pc: usize,
-    },
+    WriteProtection { pc: usize },
 
     #[error("reentrancy detected at pc {pc}")]
-    Reentrancy {
-        pc: usize,
-    },
+    Reentrancy { pc: usize },
 
     // ---------------------------------------------------------------------
     // Precompile / state backend / internal errors
     // ---------------------------------------------------------------------
     #[error("precompile error: {message}")]
-    Precompile {
-        message: String,
-    },
+    Precompile { message: String },
 
     #[error("state error: {message}")]
-    State {
-        message: String,
-    },
+    State { message: String },
 
     #[error("internal VM error: {message}")]
-    Internal {
-        message: String,
-    },
+    Internal { message: String },
 }
 
 impl VmError {
@@ -239,47 +215,28 @@ pub enum TxValidationError {
     InvalidSignature,
 
     #[error("invalid chain id: expected {expected}, got {got}")]
-    InvalidChainId {
-        expected: u64,
-        got: u64,
-    },
+    InvalidChainId { expected: u64, got: u64 },
 
     #[error("invalid nonce: expected {expected}, got {got}")]
-    InvalidNonce {
-        expected: u64,
-        got: u64,
-    },
+    InvalidNonce { expected: u64, got: u64 },
 
     #[error("invalid access list: {reason}")]
-    InvalidAccessList {
-        reason: String,
-    },
+    InvalidAccessList { reason: String },
 
     #[error("intrinsic gas too low: required {required}, provided {provided}")]
-    IntrinsicGasTooLow {
-        required: u64,
-        provided: u64,
-    },
+    IntrinsicGasTooLow { required: u64, provided: u64 },
 
     #[error("max fee per gas less than max priority fee per gas")]
     InvalidFeeCapRelation,
 
     #[error("tx sender has insufficient balance: needed {needed}, available {available}")]
-    InsufficientBalance {
-        needed: u128,
-        available: u128,
-    },
+    InsufficientBalance { needed: u128, available: u128 },
 
     #[error("transaction size too large: {size} bytes (max {max})")]
-    TxTooLarge {
-        size: usize,
-        max: usize,
-    },
+    TxTooLarge { size: usize, max: usize },
 
     #[error("transaction error: {message}")]
-    Other {
-        message: String,
-    },
+    Other { message: String },
 }
 
 impl TxValidationError {

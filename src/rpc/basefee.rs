@@ -62,7 +62,7 @@ pub fn next_base_fee_from_header(prev: &BlockHeader, next_gas_limit: u64) -> u64
 
 #[cfg(test)]
 mod tests {
-use super::*;
+    use super::*;
 
     #[test]
     fn test_next_base_fee_equal() {

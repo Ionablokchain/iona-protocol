@@ -25,11 +25,11 @@
 //! 5. **Resource control**: Parallelism is limited by `ParallelConfig.max_parallel_groups`
 //!    to avoid oversubscription in containerized environments.
 
-use crate::execution::{apply_tx, intrinsic_gas, verify_tx_signature, KvState};
+use crate::execution::{apply_tx, verify_tx_signature, KvState};
 use crate::types::{Hash32, Receipt, Tx};
 use rayon::prelude::*;
 use rayon::ThreadPoolBuilder;
-use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeSet, HashMap};
 
 // -----------------------------------------------------------------------------
 // Access sets (read/write) – used for conflict detection
@@ -61,12 +61,16 @@ impl AccessSets {
     pub fn merge(&mut self, other: &AccessSets) {
         self.kv_writes.extend(other.kv_writes.iter().cloned());
         self.kv_reads.extend(other.kv_reads.iter().cloned());
-        self.balance_writes.extend(other.balance_writes.iter().cloned());
-        self.balance_reads.extend(other.balance_reads.iter().cloned());
+        self.balance_writes
+            .extend(other.balance_writes.iter().cloned());
+        self.balance_reads
+            .extend(other.balance_reads.iter().cloned());
         self.vm_writes.extend(other.vm_writes.iter().cloned());
         self.vm_reads.extend(other.vm_reads.iter().cloned());
-        self.vm_code_writes.extend(other.vm_code_writes.iter().cloned());
-        self.vm_code_reads.extend(other.vm_code_reads.iter().cloned());
+        self.vm_code_writes
+            .extend(other.vm_code_writes.iter().cloned());
+        self.vm_code_reads
+            .extend(other.vm_code_reads.iter().cloned());
     }
 }
 
@@ -117,9 +121,7 @@ impl Default for ParallelConfig {
 /// Partition transactions by sender address, preserving per-sender order.
 /// Returns a map from sender to list of (global_index, &Tx) and a list of senders
 /// in order of first appearance.
-fn partition_by_sender(
-    txs: &[Tx],
-) -> (HashMap<String, Vec<(usize, &Tx)>>, Vec<String>) {
+fn partition_by_sender(txs: &[Tx]) -> (HashMap<String, Vec<(usize, &Tx)>>, Vec<String>) {
     let mut groups: HashMap<String, Vec<(usize, &Tx)>> = HashMap::new();
     let mut sender_order: Vec<String> = Vec::new();
 
@@ -192,7 +194,7 @@ fn execute_group(
 
     GroupResult {
         sender: sender.to_string(),
-                receipts,
+        receipts,
         final_state: state,
         access,
         global_indices,
@@ -271,7 +273,9 @@ fn groups_conflict(a: &GroupResult, b: &GroupResult) -> bool {
 
     // Balance conflicts (ignore the sender's own address, as it's unique per group)
     for addr in &a.access.balance_writes {
-        if addr != &a.sender && (b.access.balance_writes.contains(addr) || b.access.balance_reads.contains(addr)) {
+        if addr != &a.sender
+            && (b.access.balance_writes.contains(addr) || b.access.balance_reads.contains(addr))
+        {
             return true;
         }
     }
@@ -315,11 +319,7 @@ fn groups_conflict(a: &GroupResult, b: &GroupResult) -> bool {
 /// Merge non‑conflicting group results into a single state.
 /// The merge applies deltas from each group onto the base state,
 /// in the original sender order, to maintain determinism.
-fn merge_states(
-    base_state: &KvState,
-    groups: &[GroupResult],
-    proposer_addr: &str,
-) -> KvState {
+fn merge_states(base_state: &KvState, groups: &[GroupResult], proposer_addr: &str) -> KvState {
     let mut merged = base_state.clone();
 
     for group in groups {
@@ -341,7 +341,9 @@ fn merge_states(
                 let base_bal = base_state.balances.get(addr).copied().unwrap_or(0);
                 let delta = new_bal.saturating_sub(base_bal);
                 let current = merged.balances.get(addr).copied().unwrap_or(base_bal);
-                merged.balances.insert(addr.clone(), current.saturating_add(delta));
+                merged
+                    .balances
+                    .insert(addr.clone(), current.saturating_add(delta));
             } else {
                 merged.balances.insert(addr.clone(), *new_bal);
             }
@@ -378,10 +380,7 @@ fn merge_states(
 /// Builds a conflict graph between groups and returns groups grouped by connected
 /// components. Each component must be executed sequentially (in order of first
 /// appearance), but components can run in parallel.
-fn conflict_components(
-    groups: &[GroupResult],
-    sender_order: &[String],
-) -> Vec<Vec<usize>> {
+fn conflict_components(groups: &[GroupResult], sender_order: &[String]) -> Vec<Vec<usize>> {
     let n = groups.len();
     let mut adjacency = vec![vec![]; n];
     for i in 0..n {
@@ -414,7 +413,10 @@ fn conflict_components(
             // Sort component indices in order of first appearance (by sender_order)
             comp.sort_by_key(|&idx| {
                 let sender = &groups[idx].sender;
-                sender_order.iter().position(|s| s == sender).unwrap_or(usize::MAX)
+                sender_order
+                    .iter()
+                    .position(|s| s == sender)
+                    .unwrap_or(usize::MAX)
             });
             components.push(comp);
         }
@@ -435,9 +437,9 @@ fn execute_component_sequential(
     base_state: &KvState,
     groups: &[GroupResult],
     group_indices: &[usize],
-    proposer_addr: &str,
+    _proposer_addr: &str,
 ) -> (KvState, u64, Vec<(usize, Receipt)>) {
-    let mut state = base_state.clone();
+    let state = base_state.clone();
     let mut total_gas = 0u64;
     let mut all_receipts = Vec::new();
 
@@ -475,8 +477,7 @@ pub fn execute_block_parallel(
 ) -> (KvState, u64, Vec<Receipt>) {
     // Fall back to sequential for small batches
     let (groups_map, sender_order) = partition_by_sender(txs);
-    if txs.len() < config.min_txs_for_parallel
-        || groups_map.len() < config.min_senders_for_parallel
+    if txs.len() < config.min_txs_for_parallel || groups_map.len() < config.min_senders_for_parallel
     {
         return execute_sequential_fallback(prev_state, txs, base_fee_per_gas, proposer_addr);
     }
@@ -497,7 +498,13 @@ pub fn execute_block_parallel(
         group_entries
             .par_iter()
             .map(|(sender, txs_in_group)| {
-                execute_group(prev_state, txs_in_group, base_fee_per_gas, proposer_addr, sender)
+                execute_group(
+                    prev_state,
+                    txs_in_group,
+                    base_fee_per_gas,
+                    proposer_addr,
+                    sender,
+                )
             })
             .collect()
     });
@@ -600,11 +607,11 @@ impl ParallelExecStats {
 mod tests {
     use super::*;
     use crate::crypto::ed25519::Ed25519Keypair;
-    use crate::crypto::Signer;
     use crate::crypto::tx::{derive_address, tx_sign_bytes};
+    use crate::crypto::Signer;
     use crate::types::Tx;
 
-    fn make_signed_tx(seed: u64, nonce: u64, payload: &str, to: Option<String>) -> Tx {
+    fn make_signed_tx(seed: u64, nonce: u64, payload: &str, _to: Option<String>) -> Tx {
         let mut seed32 = [0u8; 32];
         seed32[..8].copy_from_slice(&seed.to_le_bytes());
         let kp = Ed25519Keypair::from_seed(seed32);
@@ -654,9 +661,9 @@ mod tests {
             max_parallel_groups: 256,
         };
 
-        let (par_state, par_gas, par_receipts) =
+        let (_par_state, par_gas, par_receipts) =
             execute_block_parallel(&state, &txs, base_fee, proposer_addr, &config);
-        let (seq_state, seq_gas, seq_receipts) =
+        let (_seq_state, seq_gas, seq_receipts) =
             execute_sequential_fallback(&state, &txs, base_fee, proposer_addr);
 
         assert_eq!(par_gas, seq_gas);

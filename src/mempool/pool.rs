@@ -30,7 +30,7 @@ const RBF_BUMP_PERCENT: u64 = 10;
 #[derive(Clone, Debug)]
 struct PendingTx {
     tx: Tx,
-    score: u128,              // higher is better
+    score: u128, // higher is better
     inserted_height: Height,
 }
 
@@ -43,7 +43,8 @@ impl PendingTx {
         let gas = intrinsic_gas(&tx) as u128;
         // Effective tip = min(max_priority_fee, max_fee - base_fee)   (EIP‑1559)
         let tip = if tx.max_fee_per_gas > base_fee {
-            tx.max_priority_fee_per_gas.min(tx.max_fee_per_gas - base_fee) as u128
+            tx.max_priority_fee_per_gas
+                .min(tx.max_fee_per_gas - base_fee) as u128
         } else {
             0
         };
@@ -204,9 +205,8 @@ impl Mempool {
         // RBF check
         if let Some(existing) = queue.get(&tx.nonce) {
             let existing_tip = existing.tx.max_priority_fee_per_gas;
-            let required = existing_tip.saturating_add(
-                (existing_tip.saturating_mul(RBF_BUMP_PERCENT) / 100).max(1),
-            );
+            let required = existing_tip
+                .saturating_add((existing_tip.saturating_mul(RBF_BUMP_PERCENT) / 100).max(1));
             if tx.max_priority_fee_per_gas < required {
                 self.metrics.rejected_dup += 1;
                 return Err(MempoolError::RbfTooLow {
@@ -215,10 +215,7 @@ impl Mempool {
                 });
             }
             // Replace
-            queue.insert(
-                tx.nonce,
-                PendingTx::new(tx, self.current_height, base_fee),
-            );
+            queue.insert(tx.nonce, PendingTx::new(tx, self.current_height, base_fee));
             self.metrics.rbf_replaced += 1;
             return Ok(false);
         }
@@ -463,8 +460,10 @@ mod tests {
     fn test_remove_confirmed() {
         let mut pool = Mempool::new(10);
         let base_fee = 0;
-        pool.push_with_base_fee(dummy_tx("alice", 0, 100, 200, "tx0"), base_fee).unwrap();
-        pool.push_with_base_fee(dummy_tx("alice", 1, 100, 200, "tx1"), base_fee).unwrap();
+        pool.push_with_base_fee(dummy_tx("alice", 0, 100, 200, "tx0"), base_fee)
+            .unwrap();
+        pool.push_with_base_fee(dummy_tx("alice", 1, 100, 200, "tx1"), base_fee)
+            .unwrap();
 
         pool.remove_confirmed("alice", 1);
         assert_eq!(pool.len(), 1);

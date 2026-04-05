@@ -1,6 +1,5 @@
-//! HTTP and WebSocket router for the JSON‑RPC server.
+//! HTTP and WebSocket router for the JSON-RPC server.
 
-use prometheus::Encoder;
 use axum::{
     extract::{State, WebSocketUpgrade},
     http::{header, Method, StatusCode},
@@ -8,21 +7,15 @@ use axum::{
     routing::{get, post},
     Router,
 };
+use prometheus::Encoder;
 use std::net::SocketAddr;
-use std::sync::Arc;
-use std::time::Duration;
-use tower::ServiceBuilder;
 use tower_governor::{governor::GovernorConfigBuilder, GovernorLayer};
 use tower_http::{
-    compression::CompressionLayer,
-    cors::{Any, CorsLayer},
-    limit::RequestBodyLimitLayer,
-    trace::TraceLayer,
+    compression::CompressionLayer, cors::CorsLayer, limit::RequestBodyLimitLayer, trace::TraceLayer,
 };
 use tracing::info;
 
 use crate::rpc::eth_rpc::{handle_rpc, EthRpcState};
-use crate::rpc::middleware::auth_api_key;
 
 /// Configuration for the RPC server.
 #[derive(Debug, Clone)]
@@ -50,7 +43,7 @@ impl Default for RpcConfig {
             cors_allow_all: false,
             allowed_origins: vec![],
             api_key: None,
-            max_body_bytes: 10 * 1024 * 1024, // 10 MiB
+            max_body_bytes: 10 * 1024 * 1024,
             requests_per_second: 50,
             burst_size: 100,
         }
@@ -59,44 +52,43 @@ impl Default for RpcConfig {
 
 /// Build the Axum router with all middleware and routes.
 pub fn build_router(state: EthRpcState, config: &RpcConfig) -> Router {
-    // CORS configuration
     let cors = if config.cors_allow_all {
         CorsLayer::permissive()
     } else {
         let mut cors = CorsLayer::new()
             .allow_methods([Method::POST, Method::GET])
             .allow_headers([header::CONTENT_TYPE]);
+
         if !config.allowed_origins.is_empty() {
-            cors = cors.allow_origin(config.allowed_origins.iter()
-                .filter_map(|s| s.parse::<http::HeaderValue>().ok())
-                .collect::<Vec<_>>());
+            cors = cors.allow_origin(
+                config
+                    .allowed_origins
+                    .iter()
+                    .filter_map(|s| s.parse::<http::HeaderValue>().ok())
+                    .collect::<Vec<_>>(),
+            );
         }
+
         cors
     };
 
-    // Rate limiting (Governor) – uses IP address as key
     let governor_conf = GovernorConfigBuilder::default()
         .per_second(config.requests_per_second)
         .burst_size(config.burst_size)
         .finish()
         .expect("invalid rate limit configuration");
+
     let governor_layer = GovernorLayer {
         config: std::sync::Arc::new(governor_conf),
     };
 
-    // Build the router with shared state
     let router = Router::new()
-        // Main RPC endpoint
         .route("/rpc", post(handle_rpc))
-        // Health check
         .route("/health", get(health_handler))
-        // Prometheus metrics
         .route("/metrics", get(metrics_handler))
-        // Optional WebSocket endpoint for subscriptions
         .route("/ws", get(ws_handler))
         .with_state(state);
 
-    // Apply middleware in order (from outer to inner)
     let router = router
         .layer(cors)
         .layer(governor_layer)
@@ -104,8 +96,7 @@ pub fn build_router(state: EthRpcState, config: &RpcConfig) -> Router {
         .layer(CompressionLayer::new())
         .layer(TraceLayer::new_for_http());
 
-    // If an API key is configured, protect the /faucet endpoint
-    if let Some(key) = &config.api_key {
+    if config.api_key.is_some() {
         let auth = axum::middleware::from_fn(crate::rpc::middleware::auth_api_key);
         router.route("/faucet", post(faucet_handler).layer(auth))
     } else {
@@ -123,7 +114,11 @@ async fn metrics_handler() -> String {
     let encoder = prometheus::TextEncoder::new();
     let metric_families = prometheus::gather();
     let mut buffer = vec![];
-    encoder.encode(&metric_families, &mut buffer).expect("prometheus encode failed");
+
+    encoder
+        .encode(&metric_families, &mut buffer)
+        .expect("prometheus encode failed");
+
     String::from_utf8(buffer).unwrap_or_else(|_| String::from("invalid utf8"))
 }
 
@@ -132,15 +127,12 @@ async fn ws_handler(ws: WebSocketUpgrade, State(state): State<EthRpcState>) -> R
     ws.on_upgrade(|socket| handle_websocket(socket, state))
 }
 
-async fn handle_websocket(socket: axum::extract::ws::WebSocket, state: EthRpcState) {
-    // TODO: implement actual WebSocket subscription handling
-    // This is a placeholder.
+async fn handle_websocket(_socket: axum::extract::ws::WebSocket, _state: EthRpcState) {
     info!("WebSocket connection opened");
 }
 
 /// Faucet handler (example protected endpoint).
 async fn faucet_handler() -> impl IntoResponse {
-    // Placeholder implementation.
     (StatusCode::OK, "Faucet not implemented")
 }
 
@@ -148,11 +140,13 @@ async fn faucet_handler() -> impl IntoResponse {
 pub async fn run_server(state: EthRpcState, config: RpcConfig) -> anyhow::Result<()> {
     let app = build_router(state, &config);
     let listener = tokio::net::TcpListener::bind(config.listen_addr).await?;
+
     info!("RPC server listening on {}", config.listen_addr);
 
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
         .await?;
+
     Ok(())
 }
 
@@ -167,8 +161,9 @@ async fn shutdown_signal() {
     #[cfg(unix)]
     let terminate = async {
         use tokio::signal::unix::{signal, SignalKind};
-        let mut signal = signal(SignalKind::terminate())
-            .expect("failed to install SIGTERM handler");
+
+        let mut signal =
+            signal(SignalKind::terminate()).expect("failed to install SIGTERM handler");
         signal.recv().await;
     };
 
@@ -181,6 +176,20 @@ async fn shutdown_signal() {
     }
 
     info!("Shutting down RPC server");
+}
+
+/// Simple compatibility wrapper used elsewhere in the codebase.
+pub async fn serve(
+    state: crate::rpc::eth_rpc::EthRpcState,
+    addr: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let app = Router::new()
+        .route("/", post(crate::rpc::eth_rpc::handle_rpc))
+        .with_state(state);
+
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    axum::serve(listener, app).await?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -197,35 +206,33 @@ mod tests {
         let app = build_router(state, &config);
 
         let mut req = Request::builder()
-                    .uri("/health")
-                    .body(Body::empty())
-                    .unwrap();
+            .uri("/health")
+            .body(Body::empty())
+            .expect("RPC error");
+
         req.extensions_mut().insert(axum::extract::ConnectInfo(
-            "127.0.0.1:12345".parse::<SocketAddr>().unwrap()
+            "127.0.0.1:12345".parse::<SocketAddr>().expect("RPC error"),
         ));
-        let response = app.oneshot(req).await.unwrap();
+
+        let response = app.oneshot(req).await.expect("RPC error");
 
         assert_eq!(response.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(response.into_body(), 1024*1024).await.unwrap();
+
+        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .expect("RPC error");
+
         assert_eq!(body, "ok");
     }
 
     #[test]
     fn test_build_router_with_api_key() {
         let state = EthRpcState::default();
-        let mut config = RpcConfig::default();
-        config.api_key = Some("secret".into());
-        let app = build_router(state, &config);
-        // We can't easily test the route in a unit test, but at least it compiles.
-        assert!(true);
-    }
-}
+        let config = RpcConfig {
+            api_key: Some("secret".into()),
+            ..Default::default()
+        };
 
-pub async fn serve(state: crate::rpc::eth_rpc::EthRpcState, addr: &str) -> Result<(), Box<dyn std::error::Error>> {
-    use axum::Router;
-    use axum::routing::post;
-    let app = Router::new().route("/", post(crate::rpc::eth_rpc::handle_rpc)).with_state(state);
-    let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, app).await?;
-    Ok(())
+        let _app = build_router(state, &config);
+    }
 }

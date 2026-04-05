@@ -17,14 +17,14 @@
 //! them to this module. Validators sign governance proposals like any tx,
 //! and the proposer applies the change if they hold a GovCertificate.
 
-use std::collections::BTreeMap;
-use std::collections::HashMap;
-use crate::crypto::PublicKeyBytes;
 use crate::consensus::ValidatorSet;
+use crate::crypto::PublicKeyBytes;
+use crate::execution::KvState;
 use crate::slashing::StakeLedger;
 use crate::types::Height;
-use crate::execution::KvState;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
+use std::collections::HashMap;
 use tracing::{info, warn};
 
 // -----------------------------------------------------------------------------
@@ -61,10 +61,10 @@ pub const GOV_PARAM_KEYS: &[&str] = &[
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub enum GovAction {
-    AddValidator    { pk_hex: String, stake: u64 },
+    AddValidator { pk_hex: String, stake: u64 },
     RemoveValidator { pk_hex: String },
-    Unjail          { pk_hex: String },
-    SetParam        { key: String, value: String },
+    Unjail { pk_hex: String },
+    SetParam { key: String, value: String },
 }
 
 impl GovAction {
@@ -72,7 +72,11 @@ impl GovAction {
     pub fn validate(&self) -> Result<(), String> {
         match self {
             Self::AddValidator { pk_hex, stake } => {
-                if hex::decode(pk_hex).map_err(|e| format!("invalid pubkey hex: {e}"))?.len() != 32 {
+                if hex::decode(pk_hex)
+                    .map_err(|e| format!("invalid pubkey hex: {e}"))?
+                    .len()
+                    != 32
+                {
                     return Err("public key must be 32 bytes".into());
                 }
                 if *stake == 0 {
@@ -81,13 +85,21 @@ impl GovAction {
                 Ok(())
             }
             Self::RemoveValidator { pk_hex } => {
-                if hex::decode(pk_hex).map_err(|e| format!("invalid pubkey hex: {e}"))?.len() != 32 {
+                if hex::decode(pk_hex)
+                    .map_err(|e| format!("invalid pubkey hex: {e}"))?
+                    .len()
+                    != 32
+                {
                     return Err("public key must be 32 bytes".into());
                 }
                 Ok(())
             }
             Self::Unjail { pk_hex } => {
-                if hex::decode(pk_hex).map_err(|e| format!("invalid pubkey hex: {e}"))?.len() != 32 {
+                if hex::decode(pk_hex)
+                    .map_err(|e| format!("invalid pubkey hex: {e}"))?
+                    .len()
+                    != 32
+                {
                     return Err("public key must be 32 bytes".into());
                 }
                 Ok(())
@@ -98,10 +110,19 @@ impl GovAction {
                 }
                 // Additional type‑specific validation
                 match key.as_str() {
-                    "propose_timeout_ms" | "prevote_timeout_ms" | "precommit_timeout_ms"
-                    | "gas_target" | "max_txs_per_block" | "base_fee_per_gas"
-                    | "slash_double_sign_bps" | "slash_downtime_bps" | "unbonding_epochs"
-                    | "epoch_length" | "min_stake" | "treasury_bps" | "base_inflation_bps" => {
+                    "propose_timeout_ms"
+                    | "prevote_timeout_ms"
+                    | "precommit_timeout_ms"
+                    | "gas_target"
+                    | "max_txs_per_block"
+                    | "base_fee_per_gas"
+                    | "slash_double_sign_bps"
+                    | "slash_downtime_bps"
+                    | "unbonding_epochs"
+                    | "epoch_length"
+                    | "min_stake"
+                    | "treasury_bps"
+                    | "base_inflation_bps" => {
                         if value.parse::<u64>().is_err() {
                             return Err(format!("parameter {key} must be a positive integer"));
                         }
@@ -120,11 +141,11 @@ impl GovAction {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct GovProposal {
-    pub action:   GovAction,
-    pub proposer: String,           // address
-    pub height:   Height,
-    pub deposit:  u64,
-    pub votes:    HashMap<String, bool>, // addr -> yes/no
+    pub action: GovAction,
+    pub proposer: String, // address
+    pub height: Height,
+    pub deposit: u64,
+    pub votes: HashMap<String, bool>, // addr -> yes/no
 }
 
 impl GovProposal {
@@ -146,11 +167,14 @@ impl GovProposal {
 
     /// Compute the total voting power of yes votes.
     pub fn yes_power(&self, stakes: &StakeLedger) -> u64 {
-        self.votes.iter()
+        self.votes
+            .iter()
             .filter(|(_, &yes)| yes)
             .filter_map(|(addr, _)| {
                 // Find validator by address (derived from pubkey)
-                stakes.validators.iter()
+                stakes
+                    .validators
+                    .iter()
                     .find(|(pk, _)| address_of(pk) == *addr)
                     .map(|(_, r)| r.stake)
             })
@@ -161,8 +185,10 @@ impl GovProposal {
     pub fn has_quorum(&self, stakes: &StakeLedger) -> bool {
         let yes = self.yes_power(stakes);
         let total = stakes.total_power();
-        if total == 0 { return false; }
-        yes * 3 > total * 2   // yes > 2/3 total
+        if total == 0 {
+            return false;
+        }
+        yes * 3 > total * 2 // yes > 2/3 total
     }
 }
 
@@ -174,7 +200,7 @@ impl GovProposal {
 pub struct GovernanceState {
     pub pending: BTreeMap<u64, GovProposal>, // proposal_id -> proposal
     pub next_id: u64,
-    pub params:  BTreeMap<String, String>,
+    pub params: BTreeMap<String, String>,
 }
 
 impl GovernanceState {
@@ -228,14 +254,18 @@ impl GovernanceState {
         vset: &mut ValidatorSet,
         current_height: Height,
     ) -> Vec<GovAction> {
-        let ready: Vec<u64> = self.pending.iter()
+        let ready: Vec<u64> = self
+            .pending
+            .iter()
             .filter(|(_, p)| p.has_quorum(stakes))
             .map(|(id, _)| *id)
             .collect();
 
         let mut applied = Vec::new();
         for id in ready {
-            let Some(proposal) = self.pending.remove(&id) else { continue; };
+            let Some(proposal) = self.pending.remove(&id) else {
+                continue;
+            };
             if let Err(e) = self.apply_action(&proposal.action, stakes, vset, current_height) {
                 warn!(proposal_id = id, error = %e, "governance action failed");
                 continue;
@@ -244,7 +274,9 @@ impl GovernanceState {
         }
 
         // Remove expired proposals
-        let expired: Vec<u64> = self.pending.iter()
+        let expired: Vec<u64> = self
+            .pending
+            .iter()
             .filter(|(_, p)| current_height.saturating_sub(p.height) >= GOV_PROPOSAL_TTL_BLOCKS)
             .map(|(id, _)| *id)
             .collect();
@@ -272,11 +304,14 @@ impl GovernanceState {
                 }
                 let pk = PublicKeyBytes(bytes);
                 use crate::slashing::ValidatorRecord;
-                let entry = stakes.validators.entry(pk.clone())
+                let entry = stakes
+                    .validators
+                    .entry(pk.clone())
                     .or_insert_with(|| ValidatorRecord::new(0));
                 entry.stake += stake;
                 if !vset.vals.iter().any(|v| v.pk == pk) {
-                    vset.vals.push(crate::consensus::Validator { pk, power: *stake });
+                    vset.vals
+                        .push(crate::consensus::Validator { pk, power: *stake });
                 }
                 info!(%pk_hex, stake, "validator added via governance");
                 Ok(())
@@ -298,7 +333,8 @@ impl GovernanceState {
                     return Err("public key must be 32 bytes".into());
                 }
                 let pk = PublicKeyBytes(bytes);
-                stakes.unjail(&pk, current_height)
+                stakes
+                    .unjail(&pk, current_height)
                     .map_err(|e| format!("unjail failed: {e}"))?;
                 info!(%pk_hex, "validator unjailed via governance");
                 Ok(())
@@ -313,7 +349,10 @@ impl GovernanceState {
 
     /// Retrieve a governance parameter, or a default if not set.
     pub fn get_param(&self, key: &str, default: &str) -> String {
-        self.params.get(key).cloned().unwrap_or_else(|| default.to_string())
+        self.params
+            .get(key)
+            .cloned()
+            .unwrap_or_else(|| default.to_string())
     }
 
     /// Get all current parameters (for node to apply).
@@ -343,18 +382,25 @@ pub enum GovPayloadAction {
     Vote { id: u64, voter: String, yes: bool },
 }
 
-pub fn parse_gov_payload(payload: &str, from: &str, height: Height) -> Option<GovPayloadAction> {
+pub fn parse_gov_payload(payload: &str, from: &str, _height: Height) -> Option<GovPayloadAction> {
     let parts: Vec<&str> = payload.split_whitespace().collect();
-    if parts.first() != Some(&"gov") { return None; }
+    if parts.first() != Some(&"gov") {
+        return None;
+    }
     match parts.get(1)? {
         &"add_validator" if parts.len() >= 4 => {
             let pk_hex = parts[2].to_string();
             let stake: u64 = parts[3].parse().ok()?;
-            Some(GovPayloadAction::Submit(GovAction::AddValidator { pk_hex, stake }))
+            Some(GovPayloadAction::Submit(GovAction::AddValidator {
+                pk_hex,
+                stake,
+            }))
         }
         &"remove_validator" if parts.len() >= 3 => {
             let pk_hex = parts[2].to_string();
-            Some(GovPayloadAction::Submit(GovAction::RemoveValidator { pk_hex }))
+            Some(GovPayloadAction::Submit(GovAction::RemoveValidator {
+                pk_hex,
+            }))
         }
         &"unjail" if parts.len() >= 3 => {
             let pk_hex = parts[2].to_string();
@@ -368,7 +414,11 @@ pub fn parse_gov_payload(payload: &str, from: &str, height: Height) -> Option<Go
         &"vote" if parts.len() >= 4 => {
             let id: u64 = parts[2].parse().ok()?;
             let yes = parts[3] == "yes";
-            Some(GovPayloadAction::Vote { id, voter: from.to_string(), yes })
+            Some(GovPayloadAction::Vote {
+                id,
+                voter: from.to_string(),
+                yes,
+            })
         }
         _ => None,
     }
@@ -386,17 +436,15 @@ pub fn process_gov_tx(
     height: Height,
     kv_state: &mut KvState,
     gov_state: &mut GovernanceState,
-    stakes: &mut StakeLedger,
-    vset: &mut ValidatorSet,
+    _stakes: &mut StakeLedger,
+    _vset: &mut ValidatorSet,
 ) -> Result<(), String> {
     match parse_gov_payload(payload, from, height) {
         Some(GovPayloadAction::Submit(action)) => {
             gov_state.submit(action, from.to_string(), height, kv_state)?;
             Ok(())
         }
-        Some(GovPayloadAction::Vote { id, voter, yes }) => {
-            gov_state.vote(id, voter, yes)
-        }
+        Some(GovPayloadAction::Vote { id, voter, yes }) => gov_state.vote(id, voter, yes),
         None => Err("not a governance payload".into()),
     }
 }
@@ -412,13 +460,22 @@ mod tests {
 
     #[test]
     fn test_validate_action() {
-        let valid = GovAction::AddValidator { pk_hex: "00".repeat(32), stake: 100 };
+        let valid = GovAction::AddValidator {
+            pk_hex: "00".repeat(32),
+            stake: 100,
+        };
         assert!(valid.validate().is_ok());
 
-        let invalid_pk = GovAction::AddValidator { pk_hex: "1234".into(), stake: 100 };
+        let invalid_pk = GovAction::AddValidator {
+            pk_hex: "1234".into(),
+            stake: 100,
+        };
         assert!(invalid_pk.validate().is_err());
 
-        let zero_stake = GovAction::AddValidator { pk_hex: "00".repeat(32), stake: 0 };
+        let zero_stake = GovAction::AddValidator {
+            pk_hex: "00".repeat(32),
+            stake: 0,
+        };
         assert!(zero_stake.validate().is_err());
     }
 
@@ -434,7 +491,10 @@ mod tests {
         stakes.validators.insert(pk1, ValidatorRecord::new(100));
         stakes.validators.insert(pk2, ValidatorRecord::new(50));
 
-        let action = GovAction::SetParam { key: "gas_target".into(), value: "1000000".into() };
+        let action = GovAction::SetParam {
+            key: "gas_target".into(),
+            value: "1000000".into(),
+        };
         let mut proposal = GovProposal::new(action, addr1.clone(), 10, MIN_GOV_DEPOSIT);
         // Only proposer voted (stake 100). Total = 150, 2/3 = 100. yes = 100 -> not > 100, so false
         assert!(!proposal.has_quorum(&stakes));
@@ -449,7 +509,10 @@ mod tests {
         let mut gov = GovernanceState::default();
         let mut kv = KvState::default();
         kv.balances.insert("alice".into(), MIN_GOV_DEPOSIT + 100);
-        let action = GovAction::SetParam { key: "gas_target".into(), value: "5000000".into() };
+        let action = GovAction::SetParam {
+            key: "gas_target".into(),
+            value: "5000000".into(),
+        };
         let result = gov.submit(action, "alice".into(), 1, &mut kv);
         assert!(result.is_ok());
         assert_eq!(kv.balances.get("alice").unwrap(), &100);
@@ -461,7 +524,10 @@ mod tests {
         let mut gov = GovernanceState::default();
         let mut kv = KvState::default();
         kv.balances.insert("alice".into(), MIN_GOV_DEPOSIT - 1);
-        let action = GovAction::SetParam { key: "gas_target".into(), value: "5000000".into() };
+        let action = GovAction::SetParam {
+            key: "gas_target".into(),
+            value: "5000000".into(),
+        };
         let result = gov.submit(action, "alice".into(), 1, &mut kv);
         assert!(result.is_err());
     }
@@ -475,22 +541,36 @@ mod tests {
         let addr = address_of(&pk);
         kv.balances.insert(addr.clone(), MIN_GOV_DEPOSIT);
         use crate::slashing::ValidatorRecord;
-        stakes.validators.insert(pk.clone(), ValidatorRecord::new(100));
+        stakes
+            .validators
+            .insert(pk.clone(), ValidatorRecord::new(100));
         // Add a second validator so proposer alone doesn't have quorum
         let pk2 = PublicKeyBytes([2u8; 32].to_vec());
         let addr2 = address_of(&pk2);
-        stakes.validators.insert(pk2.clone(), ValidatorRecord::new(100));
+        stakes
+            .validators
+            .insert(pk2.clone(), ValidatorRecord::new(100));
         let mut vset = ValidatorSet { vals: vec![] };
-        vset.vals.push(crate::consensus::Validator { pk: pk.clone(), power: 100 });
-        vset.vals.push(crate::consensus::Validator { pk: pk2.clone(), power: 100 });
+        vset.vals.push(crate::consensus::Validator {
+            pk: pk.clone(),
+            power: 100,
+        });
+        vset.vals.push(crate::consensus::Validator {
+            pk: pk2.clone(),
+            power: 100,
+        });
 
-        let action = GovAction::AddValidator { pk_hex: "00".repeat(32), stake: 200 };
-        gov.submit(action.clone(), addr.clone(), 1, &mut kv).unwrap();
+        let action = GovAction::AddValidator {
+            pk_hex: "00".repeat(32),
+            stake: 200,
+        };
+        gov.submit(action.clone(), addr.clone(), 1, &mut kv)
+            .unwrap();
 
         // Vote for it (proposer already voted yes)
         let yes_power = gov.pending.get(&0).unwrap().yes_power(&stakes);
         assert_eq!(yes_power, 100); // auto-vote by proposer
-        // total=200, yes=100: 100*3=300 > 200*2=400? No → no quorum
+                                    // total=200, yes=100: 100*3=300 > 200*2=400? No → no quorum
         assert!(!gov.pending.get(&0).unwrap().has_quorum(&stakes));
 
         // Apply ready (no quorum)

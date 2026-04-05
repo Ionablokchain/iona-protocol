@@ -127,7 +127,9 @@ pub async fn header_size_middleware(
 
         // Increment metric
         if let Some(limiter) = req.extensions().get::<Arc<RpcLimiter>>() {
-            limiter.metric_payload_too_large.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            limiter
+                .metric_payload_too_large
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
 
         return (
@@ -187,10 +189,7 @@ pub async fn read_limit_middleware(
                     warn!(req_id = %req_id, %ip, "rpc::middleware: read rate limit exceeded");
                     return (
                         StatusCode::TOO_MANY_REQUESTS,
-                        [
-                            ("x-request-id", req_id.as_str()),
-                            ("retry-after", "1"),
-                        ],
+                        [("x-request-id", req_id.as_str()), ("retry-after", "1")],
                         r#"{"error":{"code":"RATE_LIMITED","message":"read rate limit exceeded"}}"#,
                     )
                         .into_response();
@@ -225,10 +224,7 @@ pub async fn concurrency_middleware(
             warn!(req_id = %req_id, "rpc::middleware: concurrency limit reached");
             return (
                 StatusCode::SERVICE_UNAVAILABLE,
-                [
-                    ("x-request-id", req_id.as_str()),
-                    ("retry-after", "1"),
-                ],
+                [("x-request-id", req_id.as_str()), ("retry-after", "1")],
                 r#"{"error":{"code":"OVERLOADED","message":"server at capacity"}}"#,
             )
                 .into_response();
@@ -296,10 +292,7 @@ pub async fn json_depth_middleware(
     next: Next,
 ) -> Response {
     let is_json_post = {
-        let method_ok = matches!(
-            req.method(),
-            &Method::POST | &Method::PUT | &Method::PATCH
-        );
+        let method_ok = matches!(req.method(), &Method::POST | &Method::PUT | &Method::PATCH);
         let ct_ok = req
             .headers()
             .get(header::CONTENT_TYPE)
@@ -325,7 +318,9 @@ pub async fn json_depth_middleware(
     let bytes: Bytes = match axum::body::to_bytes(body, MAX_BODY_BYTES + 1).await {
         Ok(b) => b,
         Err(_) => {
-            limiter.metric_payload_too_large.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            limiter
+                .metric_payload_too_large
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             return (
                 StatusCode::PAYLOAD_TOO_LARGE,
                 [("x-request-id", req_id.as_str())],
@@ -421,7 +416,7 @@ pub fn error_response(status: StatusCode, code: &str, req_id: &str) -> Response 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::{Router, routing::get, Extension};
+    use axum::{routing::get, Extension, Router};
     use http::{Request, StatusCode};
     use std::sync::Arc;
     use tower::ServiceExt;
@@ -467,9 +462,14 @@ mod tests {
             .layer(axum::middleware::from_fn(request_id_middleware));
 
         let response = app
-            .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/")
+                    .body(Body::empty())
+                    .expect("RPC error"),
+            )
             .await
-            .unwrap();
+            .expect("RPC error");
 
         assert_eq!(response.status(), StatusCode::OK);
         assert!(response.headers().contains_key("x-request-id"));
@@ -484,12 +484,21 @@ mod tests {
             .layer(Extension(config));
 
         // Create a request with oversized headers.
-        let mut req = Request::builder().uri("/").body(Body::empty()).unwrap();
+        let mut req = Request::builder()
+            .uri("/")
+            .body(Body::empty())
+            .expect("RPC error");
         let large_header = "x".repeat(DEFAULT_MAX_HEADER_BYTES + 1);
-        req.headers_mut().insert("x-large", HeaderValue::from_str(&large_header).unwrap());
+        req.headers_mut().insert(
+            "x-large",
+            HeaderValue::from_str(&large_header).expect("RPC error"),
+        );
 
-        let response = app.oneshot(req).await.unwrap();
-        assert_eq!(response.status(), StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE);
+        let response = app.oneshot(req).await.expect("RPC error");
+        assert_eq!(
+            response.status(),
+            StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE
+        );
     }
 
     #[tokio::test]
@@ -509,13 +518,16 @@ mod tests {
             .uri("/")
             .header("content-type", "application/json")
             .body(Body::from(deep_json))
-            .unwrap();
+            .expect("RPC error");
 
-        let response = app.oneshot(req).await.unwrap();
+        let response = app.oneshot(req).await.expect("RPC error");
         assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
     }
 }
 
-pub async fn auth_api_key(req: axum::extract::Request, next: axum::middleware::Next) -> axum::response::Response {
+pub async fn auth_api_key(
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
     next.run(req.map(axum::body::Body::new)).await
 }

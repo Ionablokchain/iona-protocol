@@ -31,21 +31,26 @@ fn to_addr(a: [u8; 20]) -> Address {
 
 /// Builds a REVM `Env` from the current block context and chain configuration.
 ///
-/// - `block_header` – Iona block header (provides height, timestamp, base fee, chain ID).
-/// - `spec_id` – The EVM specification to use (e.g., `SpecId::LATEST`).
+/// - `block_height` – block height.
+/// - `block_timestamp` – block timestamp.
+/// - `block_base_fee` – optional base fee (EIP-1559).
+/// - `chain_id` – chain ID.
+/// - `spec_id` – EVM specification to use (e.g., `SpecId::CANCUN`).
 pub fn build_evm_env(
     block_height: u64,
     block_timestamp: u64,
     block_base_fee: Option<u64>,
     chain_id: u64,
-    spec_id: SpecId,
+    _spec_id: SpecId,
 ) -> Env {
     let mut cfg = CfgEnv::default();
     cfg.chain_id = chain_id;
-    
-    let mut block = BlockEnv::default();
-    block.number = U256::from(block_height);
-    block.timestamp = U256::from(block_timestamp);
+
+    let mut block = BlockEnv {
+        number: U256::from(block_height),
+        timestamp: U256::from(block_timestamp),
+        ..Default::default()
+    };
     if let Some(base_fee) = block_base_fee {
         block.basefee = U256::from(base_fee);
     }
@@ -82,7 +87,8 @@ where
         .build();
 
     // Build the transaction environment based on the transaction type.
-    { let tx_env = &mut evm.context.evm.inner.env.tx;
+    {
+        let tx_env = &mut evm.context.evm.inner.env.tx;
         match tx {
             EvmTx::Eip2930 {
                 from,
@@ -110,7 +116,8 @@ where
                     .into_iter()
                     .map(|item| {
                         let address = to_addr(item.address);
-                        let slots = item.storage_keys
+                        let slots = item
+                            .storage_keys
                             .into_iter()
                             .map(U256::from_be_bytes)
                             .collect();
@@ -166,7 +173,8 @@ where
                     .into_iter()
                     .map(|item| {
                         let address = to_addr(item.address);
-                        let slots = item.storage_keys
+                        let slots = item
+                            .storage_keys
                             .into_iter()
                             .map(U256::from_be_bytes)
                             .collect();
@@ -188,7 +196,9 @@ where
     }
 
     // Execute the transaction and commit state changes.
-    let res = evm.transact_commit().map_err(|e| format!("REVM error: {:?}", e))?;
+    let res = evm
+        .transact_commit()
+        .map_err(|e| format!("REVM error: {:?}", e))?;
 
     // Map the REVM execution result to our output type.
     Ok(match res {
@@ -231,7 +241,7 @@ where
 mod tests {
     use super::*;
     use crate::evm::db::MemDb;
-    use crate::types::tx_evm::{AccessListItem, EvmTx};
+    use crate::types::tx_evm::EvmTx;
 
     fn make_test_address(seed: u8) -> [u8; 20] {
         let mut addr = [0u8; 20];
@@ -251,10 +261,10 @@ mod tests {
         let init_code = vec![
             0x60, 0x2a, // PUSH1 0x2a
             0x60, 0x00, // PUSH1 0x00
-            0x52,       // MSTORE
+            0x52, // MSTORE
             0x60, 0x20, // PUSH1 0x20
             0x60, 0x00, // PUSH1 0x00
-            0xf3,       // RETURN
+            0xf3, // RETURN
         ];
         let tx = EvmTx::Legacy {
             from: deployer,
@@ -270,8 +280,15 @@ mod tests {
         let block_env = build_evm_env(1, 1_600_000_000, Some(1), 1, SpecId::CANCUN);
         let output = execute_evm_tx(&mut db, block_env, tx).unwrap();
         assert!(output.success, "Deployment failed");
-        assert!(output.created_address.is_some(), "No contract address returned");
-        assert!(output.gas_used > 0 && output.gas_used < 200_000, "unexpected gas: {}", output.gas_used);
+        assert!(
+            output.created_address.is_some(),
+            "No contract address returned"
+        );
+        assert!(
+            output.gas_used > 0 && output.gas_used < 200_000,
+            "unexpected gas: {}",
+            output.gas_used
+        );
     }
 
     #[test]
@@ -284,10 +301,10 @@ mod tests {
         let init_code = vec![
             0x60, 0x2a, // PUSH1 0x2a
             0x60, 0x00, // PUSH1 0x00
-            0x52,       // MSTORE
+            0x52, // MSTORE
             0x60, 0x20, // PUSH1 0x20
             0x60, 0x00, // PUSH1 0x00
-            0xf3,       // RETURN
+            0xf3, // RETURN
         ];
         // We'll deploy by creating a temporary transaction; for simplicity, we'll manually
         // simulate a deployment. But we can also create a dummy deployment via a call.

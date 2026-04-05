@@ -10,7 +10,7 @@ pub mod tx;
 pub mod hsm;
 
 pub use ed25519::{Ed25519Signer, Ed25519Verifier};
-pub use keystore::{Keystore, KeyEntry};
+pub use keystore::{KeyEntry, Keystore};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -28,7 +28,9 @@ pub enum CryptoError {
 pub struct PublicKeyBytes(pub Vec<u8>);
 
 impl PublicKeyBytes {
-    pub fn as_bytes(&self) -> &[u8] { &self.0 }
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
 }
 
 impl std::fmt::Display for PublicKeyBytes {
@@ -59,8 +61,7 @@ impl<'de> Deserialize<'de> for PublicKeyBytes {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-#[derive(Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SignatureBytes(pub Vec<u8>);
 
 /// Trait for signing messages.

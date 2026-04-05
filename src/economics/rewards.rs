@@ -37,11 +37,11 @@ pub const TREASURY_ADDR: &str = "treasury";
 /// Epoch reward summary emitted on each epoch boundary.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EpochReward {
-    pub epoch:             u64,
-    pub height:            u64,
-    pub total_staked:      u128,
-    pub inflation_minted:  u128,
-    pub treasury_share:    u128,
+    pub epoch: u64,
+    pub height: u64,
+    pub total_staked: u128,
+    pub inflation_minted: u128,
+    pub treasury_share: u128,
     pub validator_rewards: BTreeMap<String, u128>, // validator_addr -> reward
 }
 
@@ -65,15 +65,17 @@ pub fn epoch_at(height: u64) -> u64 {
 ///
 /// Called from `after_commit` when `is_epoch_boundary(height)`.
 pub fn distribute_epoch_rewards(
-    height:      u64,
-    kv_state:    &mut KvState,
-    staking:     &mut StakingState,
-    params:      &EconomicsParams,
+    height: u64,
+    kv_state: &mut KvState,
+    staking: &mut StakingState,
+    params: &EconomicsParams,
 ) -> EpochReward {
     let epoch = epoch_at(height);
 
     // ── 1. Compute total staked across all active (non-jailed) validators ──
-    let total_staked: u128 = staking.validators.values()
+    let total_staked: u128 = staking
+        .validators
+        .values()
         .filter(|v| !v.jailed)
         .map(|v| v.total_stake)
         .sum();
@@ -91,19 +93,20 @@ pub fn distribute_epoch_rewards(
 
     // ── 2. Inflation reward for this epoch ──────────────────────────────────
     // epoch_inflation = total_staked * base_inflation_bps / 10_000 / epochs_per_year
-    let inflation_minted: u128 = total_staked
-        .saturating_mul(params.base_inflation_bps as u128)
+    let inflation_minted: u128 = total_staked.saturating_mul(params.base_inflation_bps as u128)
         / 10_000
         / EPOCHS_PER_YEAR as u128;
 
     // ── 3. Treasury cut ─────────────────────────────────────────────────────
-    let treasury_share: u128 = inflation_minted
-        .saturating_mul(params.treasury_bps as u128)
-        / 10_000;
+    let treasury_share: u128 =
+        inflation_minted.saturating_mul(params.treasury_bps as u128) / 10_000;
     let distributable: u128 = inflation_minted.saturating_sub(treasury_share);
 
     // Credit treasury balance
-    let tb = kv_state.balances.entry(TREASURY_ADDR.to_string()).or_insert(0);
+    let tb = kv_state
+        .balances
+        .entry(TREASURY_ADDR.to_string())
+        .or_insert(0);
     *tb = tb.saturating_add(treasury_share as u64);
 
     // ── 4. Per-validator distribution ────────────────────────────────────────
@@ -113,23 +116,23 @@ pub fn distribute_epoch_rewards(
 
     let mut validator_rewards: BTreeMap<String, u128> = BTreeMap::new();
 
-    let active_validators: Vec<(String, u128, u64)> = staking.validators.iter()
+    let active_validators: Vec<(String, u128, u64)> = staking
+        .validators
+        .iter()
         .filter(|(_, v)| !v.jailed)
         .map(|(addr, v)| (addr.clone(), v.total_stake, v.commission_bps))
         .collect();
 
     for (val_addr, val_stake, commission_bps) in &active_validators {
-        if *val_stake == 0 { continue; }
+        if *val_stake == 0 {
+            continue;
+        }
 
         // Validator's share of the distributable pool
-        let val_total_reward: u128 = distributable
-            .saturating_mul(*val_stake)
-            / total_staked;
+        let val_total_reward: u128 = distributable.saturating_mul(*val_stake) / total_staked;
 
         // Commission to operator
-        let commission: u128 = val_total_reward
-            .saturating_mul(*commission_bps as u128)
-            / 10_000;
+        let commission: u128 = val_total_reward.saturating_mul(*commission_bps as u128) / 10_000;
         let delegator_pool: u128 = val_total_reward.saturating_sub(commission);
 
         // Credit commission to validator operator balance
@@ -142,7 +145,9 @@ pub fn distribute_epoch_rewards(
         }
 
         // Distribute delegator_pool to delegators proportionally
-        let delegations_for_val: Vec<(String, u128)> = staking.delegations.iter()
+        let delegations_for_val: Vec<(String, u128)> = staking
+            .delegations
+            .iter()
             .filter(|((_, v), _)| v == val_addr)
             .map(|((d, _), del)| (d.clone(), del.amount))
             .collect();
@@ -151,9 +156,7 @@ pub fn distribute_epoch_rewards(
 
         if total_delegated > 0 {
             for (delegator, del_amount) in &delegations_for_val {
-                let del_reward: u128 = delegator_pool
-                    .saturating_mul(*del_amount)
-                    / total_delegated;
+                let del_reward: u128 = delegator_pool.saturating_mul(*del_amount) / total_delegated;
 
                 // Credit delegator's balance
                 let db = kv_state.balances.entry(delegator.clone()).or_insert(0);
@@ -161,12 +164,15 @@ pub fn distribute_epoch_rewards(
 
                 // Auto-compound: add reward back to delegation stake
                 let k = (delegator.clone(), val_addr.clone());
-                staking.delegations.entry(k).and_modify(|d| d.amount += del_reward);
+                staking
+                    .delegations
+                    .entry(k)
+                    .and_modify(|d| d.amount += del_reward);
             }
         }
 
         // Also credit the validator's self-stake (as if they delegated to themselves)
-        let self_reward = val_total_reward;  // total already tracked; commission already credited
+        let self_reward = val_total_reward; // total already tracked; commission already credited
         validator_rewards.insert(val_addr.clone(), self_reward);
 
         // Grow total stake for the validator (including delegations)
@@ -197,23 +203,26 @@ pub fn distribute_epoch_rewards(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::economics::params::EconomicsParams;
     use crate::economics::staking::{StakingState, Validator as EconValidator};
     use crate::execution::KvState;
-    use crate::economics::params::EconomicsParams;
 
     fn make_state(validators: &[(&str, u128, u64)]) -> StakingState {
         let mut s = StakingState::default();
         for (addr, stake, commission_bps) in validators {
-            s.validators.insert(addr.to_string(), EconValidator {
-                operator: addr.to_string(),
-                self_stake: *stake,
-                total_stake: *stake,
-                jailed: false,
-                commission_bps: *commission_bps,
-                jailed_until: None,
-                pubkey: vec![],
-                tombstoned: false,
-            });
+            s.validators.insert(
+                addr.to_string(),
+                EconValidator {
+                    operator: addr.to_string(),
+                    self_stake: *stake,
+                    total_stake: *stake,
+                    jailed: false,
+                    commission_bps: *commission_bps,
+                    jailed_until: None,
+                    pubkey: vec![],
+                    tombstoned: false,
+                },
+            );
         }
         s
     }
@@ -232,7 +241,7 @@ mod tests {
         let mut kv = KvState::default();
         let mut staking = make_state(&[
             ("alice", 10_000_000_000, 1000), // 10% commission
-            ("bob",   10_000_000_000, 500),  // 5% commission
+            ("bob", 10_000_000_000, 500),    // 5% commission
         ]);
         let params = EconomicsParams::default();
 
@@ -241,7 +250,10 @@ mod tests {
         assert_eq!(reward.epoch, 1);
         assert!(reward.inflation_minted > 0, "Should mint inflation");
         assert!(reward.treasury_share > 0, "Treasury should receive share");
-        assert!(reward.treasury_share < reward.inflation_minted, "Treasury < total");
+        assert!(
+            reward.treasury_share < reward.inflation_minted,
+            "Treasury < total"
+        );
 
         // Validator balances should have increased
         let alice_bal = *kv.balances.get("alice").unwrap_or(&0);
@@ -250,7 +262,10 @@ mod tests {
         assert!(bob_bal > 0, "Bob should receive commission");
 
         // Alice has higher commission so should have higher operator reward
-        assert!(alice_bal >= bob_bal, "Higher commission = more operator reward");
+        assert!(
+            alice_bal >= bob_bal,
+            "Higher commission = more operator reward"
+        );
     }
 
     #[test]
@@ -258,7 +273,13 @@ mod tests {
         let mut kv = KvState::default();
         let mut staking = make_state(&[("alice", 10_000_000_000, 1000)]);
         // carol delegates to alice
-        staking.delegations.insert(("carol".to_string(), "alice".to_string()), crate::economics::staking::Delegation { amount: 5_000_000_000, unbondings: vec![] });
+        staking.delegations.insert(
+            ("carol".to_string(), "alice".to_string()),
+            crate::economics::staking::Delegation {
+                amount: 5_000_000_000,
+                unbondings: vec![],
+            },
+        );
         let params = EconomicsParams::default();
 
         let _reward = distribute_epoch_rewards(100, &mut kv, &mut staking, &params);
@@ -277,7 +298,10 @@ mod tests {
         let reward = distribute_epoch_rewards(100, &mut kv, &mut staking, &params);
 
         assert_eq!(reward.inflation_minted, 0, "Jailed-only set: no inflation");
-        assert!(kv.balances.get("alice").unwrap_or(&0) == &0, "Jailed validator gets no reward");
+        assert!(
+            kv.balances.get("alice").unwrap_or(&0) == &0,
+            "Jailed validator gets no reward"
+        );
     }
 
     #[test]
@@ -297,16 +321,30 @@ mod tests {
 
 /// Convenience alias for distribute_epoch_rewards.
 pub fn distribute_rewards(
-    height: u64, kv_state: &mut crate::execution::KvState,
+    height: u64,
+    kv_state: &mut crate::execution::KvState,
     staking: &mut crate::economics::staking::StakingState,
     params: &crate::economics::params::EconomicsParams,
-) -> EpochReward { distribute_epoch_rewards(height, kv_state, staking, params) }
+) -> EpochReward {
+    distribute_epoch_rewards(height, kv_state, staking, params)
+}
 
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
-pub struct RewardState { pub last_epoch: u64, pub total_distributed: u128 }
+pub struct RewardState {
+    pub last_epoch: u64,
+    pub total_distributed: u128,
+}
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct RewardConfig { pub epoch_blocks: u64, pub treasury_bps: u64 }
+pub struct RewardConfig {
+    pub epoch_blocks: u64,
+    pub treasury_bps: u64,
+}
 impl Default for RewardConfig {
-    fn default() -> Self { Self { epoch_blocks: EPOCH_BLOCKS, treasury_bps: 1000 } }
+    fn default() -> Self {
+        Self {
+            epoch_blocks: EPOCH_BLOCKS,
+            treasury_bps: 1000,
+        }
+    }
 }

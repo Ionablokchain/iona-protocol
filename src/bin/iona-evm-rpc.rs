@@ -3,15 +3,15 @@
 //! Provides an Ethereum‑compatible JSON‑RPC endpoint with optional block production
 //! (automine or periodic mining) and persistence to disk.
 
-use tracing::debug;
 use clap::Parser;
-use iona::rpc::router::build_router;
 use iona::rpc::eth_rpc::EthRpcState;
+use iona::rpc::router::build_router;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio::signal;
 use tokio::time::{sleep, Duration};
+use tracing::debug;
 use tracing::{error, info, warn};
 
 // -----------------------------------------------------------------------------
@@ -20,7 +20,10 @@ use tracing::{error, info, warn};
 
 /// IONA EVM RPC server
 #[derive(Parser, Debug)]
-#[command(name = "iona-evm-rpc", about = "Ethereum‑compatible JSON‑RPC server for IONA")]
+#[command(
+    name = "iona-evm-rpc",
+    about = "Ethereum‑compatible JSON‑RPC server for IONA"
+)]
 struct Args {
     /// Data directory for state snapshot persistence.
     #[arg(long)]
@@ -67,7 +70,10 @@ async fn main() -> anyhow::Result<()> {
     // Initialize logging with structured output.
     init_logging(&args.log_level)?;
 
-    info!("Starting IONA EVM RPC server (version {})", env!("CARGO_PKG_VERSION"));
+    info!(
+        "Starting IONA EVM RPC server (version {})",
+        env!("CARGO_PKG_VERSION")
+    );
 
     // Create RPC state.
     let mut st = EthRpcState::default();
@@ -117,7 +123,10 @@ async fn main() -> anyhow::Result<()> {
         let block_time = Duration::from_millis(args.block_time_ms);
         let max_txs = args.max_txs as usize;
         tokio::spawn(async move {
-            info!(block_time_ms = args.block_time_ms, max_txs, "starting periodic block production");
+            info!(
+                block_time_ms = args.block_time_ms,
+                max_txs, "starting periodic block production"
+            );
             loop {
                 sleep(block_time).await;
                 let txpool_len = st2.txpool.lock().expect("txpool mutex poisoned").len();
@@ -138,8 +147,7 @@ async fn main() -> anyhow::Result<()> {
     info!("listening on http://{}", addr);
 
     // Run server with graceful shutdown.
-    let server = axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal());
+    let server = axum::serve(listener, app).with_graceful_shutdown(shutdown_signal());
 
     if let Err(e) = server.await {
         error!("server error: {}", e);
@@ -158,11 +166,9 @@ async fn main() -> anyhow::Result<()> {
 fn init_logging(level: &str) -> anyhow::Result<()> {
     use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new(level));
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(level));
 
     let subscriber = fmt::Subscriber::builder()
-        
         .with_target(true)
         .with_thread_ids(false)
         .with_env_filter(filter)
@@ -187,8 +193,8 @@ async fn shutdown_signal() {
     #[cfg(unix)]
     let terminate = async {
         use signal::unix::{signal, SignalKind};
-        let mut signal = signal(SignalKind::terminate())
-            .expect("failed to install SIGTERM handler");
+        let mut signal =
+            signal(SignalKind::terminate()).expect("failed to install SIGTERM handler");
         signal.recv().await;
     };
 

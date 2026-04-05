@@ -3,18 +3,18 @@
 //! Implements a Tendermint‑style BFT consensus with fast quorum, double‑sign protection,
 //! and proper handling of `valid_round` and `locked_round`.
 
-use std::collections::{HashMap, BTreeMap};
+use crate::consensus::double_sign::DoubleSignGuard;
 use crate::consensus::messages::*;
 use crate::consensus::quorum::*;
 use crate::consensus::validator_set::*;
-use crate::consensus::double_sign::DoubleSignGuard;
-use crate::crypto::{Signer, Verifier, PublicKeyBytes};
+use crate::crypto::{PublicKeyBytes, Signer, Verifier};
 use crate::evidence::Evidence;
 use crate::execution::{build_block, next_base_fee, verify_block_with_vset, KvState};
 use crate::slashing::StakeLedger;
-use crate::types::{Block, Hash32, Height, Round, Tx, Receipt};
+use crate::types::{Block, Hash32, Height, Receipt, Round, Tx};
+use std::collections::{BTreeMap, HashMap};
 use thiserror::Error;
-use tracing::{info, warn, debug};
+use tracing::{info, warn};
 
 // -----------------------------------------------------------------------------
 // Errors
@@ -205,7 +205,10 @@ impl<V: Verifier> Engine<V> {
 
     /// Whether the given public key belongs to the proposer for the current height/round.
     pub fn is_proposer(&self, pk: &PublicKeyBytes) -> bool {
-        self.vset.proposer_for(self.state.height, self.state.round).pk == *pk
+        self.vset
+            .proposer_for(self.state.height, self.state.round)
+            .pk
+            == *pk
     }
 
     /// Human‑readable address for a public key.
@@ -282,14 +285,17 @@ impl<V: Verifier> Engine<V> {
 
         // Decide which block to propose: if we have a valid_value (from a previous round)
         // we must propose that block. Otherwise, build a new block from the mempool.
-        let (block, block_id) = if let Some(valid_value) = &self.state.valid_value {
+        let (block, _block_id) = if let Some(valid_value) = &self.state.valid_value {
             // Try to fetch the block from store (should exist because we voted for it)
             if let Some(block) = store.get(valid_value) {
                 (block, valid_value.clone())
             } else {
                 // Should not happen, but fall back to building a new block.
-                warn!(height = self.state.height, round = self.state.round,
-                    "valid_value not found in store – falling back to new block");
+                warn!(
+                    height = self.state.height,
+                    round = self.state.round,
+                    "valid_value not found in store – falling back to new block"
+                );
                 self.build_new_block(signer, mempool_drain)
             }
         } else {
@@ -298,9 +304,19 @@ impl<V: Verifier> Engine<V> {
 
         let proposer_addr = self.proposer_addr_string(&signer.public_key());
         // Verify block (should pass, but we check anyway)
-        if verify_block_with_vset(&self.app_state, &block, &proposer_addr, &signer.public_key()).is_none() {
-            warn!(height = self.state.height, round = self.state.round,
-                "self‑proposed block invalid – skipping proposal");
+        if verify_block_with_vset(
+            &self.app_state,
+            &block,
+            &proposer_addr,
+            &signer.public_key(),
+        )
+        .is_none()
+        {
+            warn!(
+                height = self.state.height,
+                round = self.state.round,
+                "self‑proposed block invalid – skipping proposal"
+            );
             return;
         }
 
@@ -335,7 +351,11 @@ impl<V: Verifier> Engine<V> {
             round: self.state.round,
             proposer: signer.public_key(),
             block_id: bid,
-            block: if self.cfg.include_block_in_proposal { Some(block.clone()) } else { None },
+            block: if self.cfg.include_block_in_proposal {
+                Some(block.clone())
+            } else {
+                None
+            },
             pol_round: self.state.valid_round,
             signature: sig,
         };
@@ -344,7 +364,11 @@ impl<V: Verifier> Engine<V> {
         self.state.proposal_block = Some(block);
 
         out.broadcast(ConsensusMsg::Proposal(prop));
-        info!(height = self.state.height, round = self.state.round, "proposal broadcast");
+        info!(
+            height = self.state.height,
+            round = self.state.round,
+            "proposal broadcast"
+        );
     }
 
     /// Build a fresh block from the mempool.
@@ -470,7 +494,7 @@ impl<V: Verifier> Engine<V> {
         signer: &S,
         store: &B,
         out: &mut O,
-        mut p: Proposal,
+        p: Proposal,
     ) -> Result<(), ConsensusError> {
         if self.state.decided.is_some() {
             return Ok(());
@@ -546,7 +570,9 @@ impl<V: Verifier> Engine<V> {
                 });
             }
         } else {
-            self.state.vote_index.insert(key, (v.block_id.clone(), v.clone()));
+            self.state
+                .vote_index
+                .insert(key, (v.block_id.clone(), v.clone()));
         }
         None
     }
@@ -608,7 +634,8 @@ impl<V: Verifier> Engine<V> {
                                 // Commit block.
                                 let block = store.get(&bid).ok_or(ConsensusError::Exec)?;
                                 let proposer_pk = PublicKeyBytes(block.header.proposer_pk.clone());
-                                let expected_proposer = &self.vset.proposer_for(self.state.height, v.round).pk;
+                                let expected_proposer =
+                                    &self.vset.proposer_for(self.state.height, v.round).pk;
                                 let proposer_addr = self.proposer_addr_string(&proposer_pk);
                                 let (new_state, receipts) = verify_block_with_vset(
                                     &self.app_state,
@@ -618,7 +645,8 @@ impl<V: Verifier> Engine<V> {
                                 )
                                 .ok_or(ConsensusError::Exec)?;
 
-                                let precommits = self.collect_votes(v.round, VoteType::Precommit, Some(&bid));
+                                let precommits =
+                                    self.collect_votes(v.round, VoteType::Precommit, Some(&bid));
                                 let cert = CommitCertificate {
                                     height: self.state.height,
                                     block_id: bid.clone(),
@@ -759,7 +787,9 @@ impl<V: Verifier> Engine<V> {
             if prop.block_id == block.id() && self.state.proposal_block.is_none() {
                 // Block now available – verify and proceed.
                 let proposer_addr = self.proposer_addr_string(&prop.proposer);
-                if verify_block_with_vset(&self.app_state, &block, &proposer_addr, &prop.proposer).is_none() {
+                if verify_block_with_vset(&self.app_state, &block, &proposer_addr, &prop.proposer)
+                    .is_none()
+                {
                     // Invalid block – still vote nil.
                     self.state.step = Step::Prevote;
                     self.step_elapsed_ms = 0;

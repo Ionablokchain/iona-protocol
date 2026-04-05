@@ -31,7 +31,9 @@ fn h32_hex(id: &Hash32) -> String {
 }
 
 fn opt_h32_hex(id: &Option<Hash32>) -> String {
-    id.as_ref().map(h32_hex).unwrap_or_else(|| "nil".to_string())
+    id.as_ref()
+        .map(h32_hex)
+        .unwrap_or_else(|| "nil".to_string())
 }
 
 fn proposal_guard_key(height: Height, round: Round) -> String {
@@ -231,8 +233,7 @@ impl GuardIndex {
 
 fn ensure_parent_dir(path: &Path) -> Result<(), String> {
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|e| format!("double-sign guard mkdir error: {e}"))?;
+        fs::create_dir_all(parent).map_err(|e| format!("double-sign guard mkdir error: {e}"))?;
     }
     Ok(())
 }
@@ -242,11 +243,10 @@ fn load_journal(path: &Path) -> Result<GuardJournal, String> {
         return Ok(GuardJournal::default());
     }
 
-    let raw = fs::read_to_string(path)
-        .map_err(|e| format!("double-sign guard read error: {e}"))?;
+    let raw = fs::read_to_string(path).map_err(|e| format!("double-sign guard read error: {e}"))?;
 
-    let journal: GuardJournal = serde_json::from_str(&raw)
-        .map_err(|e| format!("double-sign guard parse error: {e}"))?;
+    let journal: GuardJournal =
+        serde_json::from_str(&raw).map_err(|e| format!("double-sign guard parse error: {e}"))?;
 
     Ok(journal)
 }
@@ -265,11 +265,9 @@ fn save_journal_atomic(path: &Path, journal: &GuardJournal) -> Result<(), String
             .unwrap_or_default()
     ));
 
-    fs::write(&tmp_path, json)
-        .map_err(|e| format!("double-sign guard write tmp error: {e}"))?;
+    fs::write(&tmp_path, json).map_err(|e| format!("double-sign guard write tmp error: {e}"))?;
 
-    fs::rename(&tmp_path, path)
-        .map_err(|e| format!("double-sign guard rename error: {e}"))?;
+    fs::rename(&tmp_path, path).map_err(|e| format!("double-sign guard rename error: {e}"))?;
 
     Ok(())
 }
@@ -312,9 +310,7 @@ impl DoubleSignGuard {
         match Self::new(data_dir, pk) {
             Ok(g) => g,
             Err(e) => {
-                tracing::error!(
-                    "double-sign guard load failed: {e}; starting fresh (DEV ONLY)"
-                );
+                tracing::error!("double-sign guard load failed: {e}; starting fresh (DEV ONLY)");
 
                 let pk_hex = hex::encode(&pk.0);
                 let path = PathBuf::from(format!("{data_dir}/doublesign_{pk_hex}.json"));
@@ -544,8 +540,7 @@ mod tests {
     fn test_guard() -> (DoubleSignGuard, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
         let pk = PublicKeyBytes(vec![0u8; 32]);
-        let g = DoubleSignGuard::new(dir.path().to_str().unwrap(), &pk)
-            .expect("guard should load");
+        let g = DoubleSignGuard::new(dir.path().to_str().unwrap(), &pk).expect("guard should load");
         (g, dir)
     }
 
@@ -585,7 +580,8 @@ mod tests {
     #[test]
     fn test_double_vote_refused() {
         let (g, _dir) = test_guard();
-        g.record_vote(VoteType::Prevote, 1, 0, &Some(hash(1))).unwrap();
+        g.record_vote(VoteType::Prevote, 1, 0, &Some(hash(1)))
+            .unwrap();
 
         let result = g.check_vote(VoteType::Prevote, 1, 0, &Some(hash(2)));
         assert!(result.is_err());
@@ -595,7 +591,8 @@ mod tests {
     #[test]
     fn test_nil_vote_differs_from_block_vote() {
         let (g, _dir) = test_guard();
-        g.record_vote(VoteType::Prevote, 1, 0, &Some(hash(1))).unwrap();
+        g.record_vote(VoteType::Prevote, 1, 0, &Some(hash(1)))
+            .unwrap();
 
         let result = g.check_vote(VoteType::Prevote, 1, 0, &None);
         assert!(result.is_err());
@@ -615,8 +612,10 @@ mod tests {
         let (g, _dir) = test_guard();
 
         g.record_proposal(1, 0, &hash(1)).unwrap();
-        g.record_vote(VoteType::Prevote, 1, 0, &Some(hash(1))).unwrap();
-        g.record_vote(VoteType::Precommit, 1, 0, &Some(hash(1))).unwrap();
+        g.record_vote(VoteType::Prevote, 1, 0, &Some(hash(1)))
+            .unwrap();
+        g.record_vote(VoteType::Precommit, 1, 0, &Some(hash(1)))
+            .unwrap();
 
         let (p, v) = g.record_count();
         assert_eq!(p, 1);
@@ -646,7 +645,8 @@ mod tests {
         {
             let g = DoubleSignGuard::new(path, &pk).unwrap();
             g.record_proposal(1, 0, &hash(1)).unwrap();
-            g.record_vote(VoteType::Prevote, 1, 0, &Some(hash(1))).unwrap();
+            g.record_vote(VoteType::Prevote, 1, 0, &Some(hash(1)))
+                .unwrap();
             assert!(g.verify_integrity().is_ok());
         }
 
@@ -693,7 +693,8 @@ mod tests {
         {
             let g = DoubleSignGuard::new(path_str, &pk).unwrap();
             g.record_proposal(1, 0, &hash(1)).unwrap();
-            g.record_vote(VoteType::Prevote, 1, 0, &Some(hash(1))).unwrap();
+            g.record_vote(VoteType::Prevote, 1, 0, &Some(hash(1)))
+                .unwrap();
         }
 
         let guard_path = format!("{path_str}/doublesign_{}.json", hex::encode([3u8; 32]));

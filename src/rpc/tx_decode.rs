@@ -15,17 +15,14 @@
 
 use crate::types::tx_evm::EvmTx;
 use k256::ecdsa::Signature;
-use k256::elliptic_curve::sec1::ToEncodedPoint;
 use rlp::Rlp;
 use sha3::{Digest, Keccak256};
 use thiserror::Error;
 
 /// Maximum value for s in canonical low-s signatures (secp256k1 order / 2)
 const SECP256K1_N_HALF: [u8; 32] = [
-    0x7f, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
-    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
-    0x5d, 0x57, 0x6e, 0x73, 0x57, 0xa4, 0x50, 0x1d,
-    0xdf, 0xe9, 0x2f, 0x46, 0x68, 0x1b, 0x20, 0xa0,
+    0x7f, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+    0x5d, 0x57, 0x6e, 0x73, 0x57, 0xa4, 0x50, 0x1d, 0xdf, 0xe9, 0x2f, 0x46, 0x68, 0x1b, 0x20, 0xa0,
 ];
 
 /// Error types for transaction decoding.
@@ -145,7 +142,9 @@ pub fn decode_legacy_signed_tx(raw: &[u8]) -> Result<LegacySignedTx, TxDecodeErr
     let s_vec: Vec<u8> = rlp.val_at(8)?;
 
     if r_vec.len() > 32 || s_vec.len() > 32 {
-        return Err(TxDecodeError::Signature("r or s length exceeds 32 bytes".into()));
+        return Err(TxDecodeError::Signature(
+            "r or s length exceeds 32 bytes".into(),
+        ));
     }
     let mut r = [0u8; 32];
     let mut s = [0u8; 32];
@@ -155,7 +154,9 @@ pub fn decode_legacy_signed_tx(raw: &[u8]) -> Result<LegacySignedTx, TxDecodeErr
     validate_signature_scalars(&r, &s)?;
 
     let chain_id = if v >= 35 { Some((v - 35) / 2) } else { None };
-    let sighash = keccak256(&raw_for_sig(nonce, gas_price, gas_limit, &to, value, &data, v));
+    let sighash = keccak256(&raw_for_sig(
+        nonce, gas_price, gas_limit, &to, value, &data, v,
+    ));
     let from = recover_sender(&sighash, v, r, s)?;
 
     Ok(LegacySignedTx {
@@ -191,8 +192,12 @@ fn raw_for_sig(
     stream.append(&gas_price);
     stream.append(&gas_limit);
     match to {
-        Some(addr) => { stream.append(&addr.as_slice()); },
-        None => { stream.append(&""); },
+        Some(addr) => {
+            stream.append(&addr.as_slice());
+        }
+        None => {
+            stream.append(&"");
+        }
     };
     stream.append(&value);
     stream.append(&data);
@@ -207,7 +212,12 @@ fn raw_for_sig(
 }
 
 /// Recover sender address from signature and message hash (legacy recovery).
-fn recover_sender(msg_hash: &[u8; 32], v: u64, r: [u8; 32], s: [u8; 32]) -> Result<[u8; 20], TxDecodeError> {
+fn recover_sender(
+    msg_hash: &[u8; 32],
+    v: u64,
+    r: [u8; 32],
+    s: [u8; 32],
+) -> Result<[u8; 20], TxDecodeError> {
     let recid = if v == 27 || v == 28 {
         (v - 27) as u8
     } else if v >= 35 {
@@ -216,8 +226,10 @@ fn recover_sender(msg_hash: &[u8; 32], v: u64, r: [u8; 32], s: [u8; 32]) -> Resu
         return Err(TxDecodeError::Signature(format!("invalid v value: {}", v)));
     };
 
-    let sig = Signature::from_scalars(r, s).map_err(|_| TxDecodeError::Signature("invalid r/s scalars".into()))?;
-    let rec_id = k256::ecdsa::RecoveryId::from_byte(recid as u8).ok_or_else(|| TxDecodeError::Signature("invalid recovery id".into()))?;
+    let sig = Signature::from_scalars(r, s)
+        .map_err(|_| TxDecodeError::Signature("invalid r/s scalars".into()))?;
+    let rec_id = k256::ecdsa::RecoveryId::from_byte(recid as u8)
+        .ok_or_else(|| TxDecodeError::Signature("invalid recovery id".into()))?;
     let rec_sig = Signature::from_slice(&sig.to_bytes())
         .map_err(|_| TxDecodeError::Signature("failed to create recoverable signature".into()))?;
 
@@ -287,7 +299,10 @@ pub fn decode_eip1559_signed_tx(payload: &[u8]) -> Result<Eip1559SignedTx, TxDec
 
     let item_count = rlp.item_count()?;
     if item_count != 12 {
-        return Err(TxDecodeError::Rlp(format!("expected 12 items, got {}", item_count)));
+        return Err(TxDecodeError::Rlp(format!(
+            "expected 12 items, got {}",
+            item_count
+        )));
     }
 
     let chain_id: u64 = rlp.val_at(0)?;
@@ -349,8 +364,12 @@ pub fn decode_eip1559_signed_tx(payload: &[u8]) -> Result<Eip1559SignedTx, TxDec
     stream.append(&max_fee_per_gas);
     stream.append(&gas_limit);
     match &to {
-        Some(addr) => { stream.append(&addr.as_slice()); },
-        None => { stream.append(&""); },
+        Some(addr) => {
+            stream.append(&addr.as_slice());
+        }
+        None => {
+            stream.append(&"");
+        }
     };
     stream.append(&value);
     stream.append(&data);
@@ -441,7 +460,10 @@ pub fn decode_eip2930_signed_tx(payload: &[u8]) -> Result<Eip2930SignedTx, TxDec
 
     let item_count = rlp.item_count()?;
     if item_count != 11 {
-        return Err(TxDecodeError::Rlp(format!("expected 11 items, got {}", item_count)));
+        return Err(TxDecodeError::Rlp(format!(
+            "expected 11 items, got {}",
+            item_count
+        )));
     }
 
     let chain_id: u64 = rlp.val_at(0)?;
@@ -495,8 +517,12 @@ pub fn decode_eip2930_signed_tx(payload: &[u8]) -> Result<Eip2930SignedTx, TxDec
     stream.append(&gas_price);
     stream.append(&gas_limit);
     match &to {
-        Some(addr) => { stream.append(&addr.as_slice()); },
-        None => { stream.append(&""); },
+        Some(addr) => {
+            stream.append(&addr.as_slice());
+        }
+        None => {
+            stream.append(&"");
+        }
     };
     stream.append(&value);
     stream.append(&data);
@@ -539,7 +565,9 @@ pub fn decode_eip2930_signed_tx(payload: &[u8]) -> Result<Eip2930SignedTx, TxDec
 /// Decode an RLP-encoded access list.
 /// The input must be an RLP list. Each entry must be a list of exactly 2 items:
 /// address (20 bytes) and a list of storage keys (each 32 bytes).
-fn decode_access_list(rlp_item: &rlp::Rlp) -> Result<Vec<([u8; 20], Vec<[u8; 32]>)>, TxDecodeError> {
+fn decode_access_list(
+    rlp_item: &rlp::Rlp,
+) -> Result<Vec<([u8; 20], Vec<[u8; 32]>)>, TxDecodeError> {
     if !rlp_item.is_list() {
         return Err(TxDecodeError::AccessList);
     }
@@ -601,13 +629,23 @@ fn validate_signature_scalars(r: &[u8; 32], s: &[u8; 32]) -> Result<(), TxDecode
 }
 
 /// Recover sender from typed transaction (EIP-2930 / EIP-1559).
-fn recover_sender_typed(msg_hash: &[u8; 32], y_parity: u8, r: [u8; 32], s: [u8; 32]) -> Result<[u8; 20], TxDecodeError> {
+fn recover_sender_typed(
+    msg_hash: &[u8; 32],
+    y_parity: u8,
+    r: [u8; 32],
+    s: [u8; 32],
+) -> Result<[u8; 20], TxDecodeError> {
     if y_parity > 1 {
-        return Err(TxDecodeError::Signature(format!("invalid y_parity: {}", y_parity)));
+        return Err(TxDecodeError::Signature(format!(
+            "invalid y_parity: {}",
+            y_parity
+        )));
     }
 
-    let sig = Signature::from_scalars(r, s).map_err(|_| TxDecodeError::Signature("invalid r/s scalars".into()))?;
-    let rec_id = k256::ecdsa::RecoveryId::from_byte(y_parity as u8).ok_or_else(|| TxDecodeError::Signature("invalid recovery id".into()))?;
+    let sig = Signature::from_scalars(r, s)
+        .map_err(|_| TxDecodeError::Signature("invalid r/s scalars".into()))?;
+    let rec_id = k256::ecdsa::RecoveryId::from_byte(y_parity as u8)
+        .ok_or_else(|| TxDecodeError::Signature("invalid recovery id".into()))?;
     let rec_sig = Signature::from_slice(&sig.to_bytes())
         .map_err(|_| TxDecodeError::Signature("failed to create recoverable signature".into()))?;
 
@@ -690,15 +728,18 @@ mod tests {
 
     #[test]
     fn test_decode_legacy() {
-        let tx = decode_legacy_signed_tx(LEGACY_TX_RLP).unwrap();
+        let tx = decode_legacy_signed_tx(LEGACY_TX_RLP).expect("RPC error");
         assert_eq!(tx.nonce, 9);
         assert_eq!(tx.gas_price, 20_000_000_000);
         assert_eq!(tx.gas_limit, 21000);
-        assert_eq!(tx.to, Some(hex!("3535353535353535353535353535353535353535")));
+        assert_eq!(
+            tx.to,
+            Some(hex!("3535353535353535353535353535353535353535"))
+        );
         assert_eq!(tx.value, 1_000_000_000_000_000_000);
         assert_eq!(tx.data, b"");
         assert!(tx.chain_id.is_some());
-        assert_eq!(tx.chain_id.unwrap(), 1);
+        assert_eq!(tx.chain_id.expect("RPC error"), 1);
         // from should be recovered from signature
         assert_eq!(tx.from.len(), 20);
     }
@@ -707,7 +748,7 @@ mod tests {
     fn test_decode_eip1559() {
         // EIP-1559 tx: 0x02 || rlp([chainId=1, nonce=0, tip=2gwei, maxFee=100gwei, gas=21000, to, value=1ETH, data, accessList=[], yParity=1, r, s])
         let raw = hex!("02f8730180847735940085174876e80082520894d8da6bf26964af9d7eed9e03e53415d37aa96045880de0b6b3a764000080c001a028ef61340bd939bc2195fe537567866003e1a15d3c71ff63e1590620aa636276a067cbe9d8997f761aecb703304b3800ccf555c9f3dc64214b297fb1966a3b6d83");
-        let tx = decode_eip1559_signed_tx(&raw[1..]).unwrap();
+        let tx = decode_eip1559_signed_tx(&raw[1..]).expect("RPC error");
         assert_eq!(tx.chain_id, 1);
         assert_eq!(tx.nonce, 0);
         assert_eq!(tx.max_priority_fee_per_gas, 2_000_000_000);
@@ -723,7 +764,7 @@ mod tests {
     fn test_decode_eip2930() {
         // EIP-2930 tx: 0x01 || rlp([chainId=1, nonce=0, gasPrice=20gwei, gas=21000, to, value=1ETH, data, accessList=[], yParity=1, r, s])
         let raw = hex!("01f86e01808504a817c80082520894d8da6bf26964af9d7eed9e03e53415d37aa96045880de0b6b3a764000080c001a028ef61340bd939bc2195fe537567866003e1a15d3c71ff63e1590620aa636276a067cbe9d8997f761aecb703304b3800ccf555c9f3dc64214b297fb1966a3b6d83");
-        let tx = decode_eip2930_signed_tx(&raw[1..]).unwrap();
+        let tx = decode_eip2930_signed_tx(&raw[1..]).expect("RPC error");
         assert_eq!(tx.chain_id, 1);
         assert_eq!(tx.nonce, 0);
         assert_eq!(tx.gas_price, 20_000_000_000);
@@ -739,7 +780,7 @@ mod tests {
     fn test_invalid_legacy_missing_chain_id() {
         // Legacy tx with v=27 (no EIP-155 chain ID)
         let raw = hex!("f86c098504a817c800825208943535353535353535353535353535353535353535880de0b6b3a7640000801ba028ef61340bd939bc2195fe537567866003e1a15d3c71ff63e1590620aa636276a067cbe9d8997f761aecb703304b3800ccf555c9f3dc64214b297fb1966a3b6d83");
-        let tx = decode_legacy_signed_tx(&raw).unwrap();
+        let tx = decode_legacy_signed_tx(&raw).expect("RPC error");
         assert!(tx.chain_id.is_none());
         let res = tx.to_evm_tx();
         assert!(matches!(res, Err(TxDecodeError::LegacyMissingChainId)));
@@ -750,7 +791,13 @@ mod tests {
         // Legacy tx with gas_limit=0
         let raw = hex!("f86a098504a817c80080943535353535353535353535353535353535353535880de0b6b3a76400008025a028ef61340bd939bc2195fe537567866003e1a15d3c71ff63e1590620aa636276a067cbe9d8997f761aecb703304b3800ccf555c9f3dc64214b297fb1966a3b6d83");
         let err = decode_legacy_signed_tx(&raw).unwrap_err();
-        assert!(matches!(err, TxDecodeError::InvalidField { field: "gas_limit", .. }));
+        assert!(matches!(
+            err,
+            TxDecodeError::InvalidField {
+                field: "gas_limit",
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -765,12 +812,12 @@ mod tests {
     fn test_top_level_decoder() {
         // Legacy tx (no type prefix)
         let raw_legacy = LEGACY_TX_RLP;
-        let evm = decode_typed_tx(raw_legacy).unwrap();
+        let evm = decode_typed_tx(raw_legacy).expect("RPC error");
         assert!(matches!(evm, EvmTx::Legacy { .. }));
 
         // EIP-1559 tx (type 0x02 prefix)
         let raw_eip1559 = hex!("02f8730180847735940085174876e80082520894d8da6bf26964af9d7eed9e03e53415d37aa96045880de0b6b3a764000080c001a028ef61340bd939bc2195fe537567866003e1a15d3c71ff63e1590620aa636276a067cbe9d8997f761aecb703304b3800ccf555c9f3dc64214b297fb1966a3b6d83");
-        let evm = decode_typed_tx(&raw_eip1559).unwrap();
+        let evm = decode_typed_tx(&raw_eip1559).expect("RPC error");
         assert!(matches!(evm, EvmTx::Eip1559 { .. }));
 
         // Unsupported type 0x03
@@ -779,4 +826,3 @@ mod tests {
         assert!(matches!(err, TxDecodeError::UnsupportedType(0x03)));
     }
 }
-

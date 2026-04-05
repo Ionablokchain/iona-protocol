@@ -31,12 +31,12 @@ pub const DEFAULT_MAX_AGE_SECS: u64 = 300; // 5 minutes
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PendingTx {
     pub hash: String,
-    pub from: String,      // 0x-prefixed address
+    pub from: String, // 0x-prefixed address
     pub nonce: u64,
-    pub tx_type: u8,       // 0 = legacy, 1 = EIP-2930, 2 = EIP-1559
+    pub tx_type: u8, // 0 = legacy, 1 = EIP-2930, 2 = EIP-1559
     pub gas_limit: u64,
-    pub gas_price: u128,                    // for legacy/2930
-    pub max_fee_per_gas: Option<u128>,      // for EIP-1559
+    pub gas_price: u128,                        // for legacy/2930
+    pub max_fee_per_gas: Option<u128>,          // for EIP-1559
     pub max_priority_fee_per_gas: Option<u128>, // for EIP-1559
     pub raw: Vec<u8>,
     pub inserted_at: u64, // unix timestamp (seconds)
@@ -55,22 +55,48 @@ impl PendingTx {
 
     /// Create a `PendingTx` from an `EvmTx` and raw bytes.
     pub fn from_evm_tx(tx: &EvmTx, raw: Vec<u8>, inserted_at: u64) -> Result<Self, &'static str> {
-        use crate::crypto::tx::derive_address;
         use crate::types::tx_evm::EvmTx;
 
         let hash = crate::rpc::tx_decode::keccak256_hex(&raw); // compute hash from raw
         let (from, nonce, gas_limit, tx_type, gas_price, max_fee, max_priority) = match tx {
-            EvmTx::Legacy { from, nonce, gas_limit, gas_price, .. } => {
+            EvmTx::Legacy {
+                from,
+                nonce,
+                gas_limit,
+                gas_price,
+                ..
+            } => {
                 let addr = hex::encode(from);
                 (addr, *nonce, *gas_limit, 0u8, *gas_price, None, None)
             }
-            EvmTx::Eip2930 { from, nonce, gas_limit, gas_price, .. } => {
+            EvmTx::Eip2930 {
+                from,
+                nonce,
+                gas_limit,
+                gas_price,
+                ..
+            } => {
                 let addr = hex::encode(from);
                 (addr, *nonce, *gas_limit, 1u8, *gas_price, None, None)
             }
-            EvmTx::Eip1559 { from, nonce, gas_limit, max_fee_per_gas, max_priority_fee_per_gas, .. } => {
+            EvmTx::Eip1559 {
+                from,
+                nonce,
+                gas_limit,
+                max_fee_per_gas,
+                max_priority_fee_per_gas,
+                ..
+            } => {
                 let addr = hex::encode(from);
-                (addr, *nonce, *gas_limit, 2u8, 0, Some(*max_fee_per_gas), Some(*max_priority_fee_per_gas))
+                (
+                    addr,
+                    *nonce,
+                    *gas_limit,
+                    2u8,
+                    0,
+                    Some(*max_fee_per_gas),
+                    Some(*max_priority_fee_per_gas),
+                )
             }
         };
 
@@ -150,7 +176,11 @@ pub struct TxPool {
 
 impl Default for TxPool {
     fn default() -> Self {
-        Self::new(DEFAULT_MAX_TOTAL, DEFAULT_MAX_PER_SENDER, DEFAULT_MAX_AGE_SECS)
+        Self::new(
+            DEFAULT_MAX_TOTAL,
+            DEFAULT_MAX_PER_SENDER,
+            DEFAULT_MAX_AGE_SECS,
+        )
     }
 }
 
@@ -204,7 +234,10 @@ impl TxPool {
         if let Some(expected) = expected_nonce {
             if nonce < expected {
                 self.metrics.rejected_low_nonce += 1;
-                return Err(format!("nonce too low: expected {}, got {}", expected, nonce));
+                return Err(format!(
+                    "nonce too low: expected {}, got {}",
+                    expected, nonce
+                ));
             }
         }
 
@@ -239,13 +272,22 @@ impl TxPool {
         });
 
         // If there is an existing transaction, apply replacement rules.
-        if let Some((old_hash, old_inserted_at, old_type, old_gas_price, old_max_fee, old_max_priority)) = old_meta {
+        if let Some((
+            old_hash,
+            old_inserted_at,
+            old_type,
+            old_gas_price,
+            old_max_fee,
+            old_max_priority,
+        )) = old_meta
+        {
             let can_replace = match (tx.tx_type, old_type) {
                 (2, 2) => {
                     // Both are EIP-1559: must increase both max_fee and max_priority_fee.
                     let new_max_fee = tx.max_fee_per_gas.unwrap_or(0);
                     let new_max_priority = tx.max_priority_fee_per_gas.unwrap_or(0);
-                    new_max_fee > old_max_fee.unwrap_or(0) && new_max_priority > old_max_priority.unwrap_or(0)
+                    new_max_fee > old_max_fee.unwrap_or(0)
+                        && new_max_priority > old_max_priority.unwrap_or(0)
                 }
                 (1, 1) | (0, 0) => {
                     // Same legacy or EIP-2930: must increase gas_price.
@@ -275,11 +317,15 @@ impl TxPool {
         }
 
         // Now insert the new transaction.
-        let lane = self.by_sender.entry(sender.clone()).or_insert_with(BTreeMap::new);
+        let lane = self
+            .by_sender
+            .entry(sender.clone())
+            .or_insert_with(BTreeMap::new);
         lane.insert(nonce, tx.clone());
 
         // Update indexes.
-        self.by_hash.insert(tx.hash.clone(), (sender.clone(), nonce, inserted_at));
+        self.by_hash
+            .insert(tx.hash.clone(), (sender.clone(), nonce, inserted_at));
         let age_key = TxAgeKey {
             inserted_at,
             sender,
@@ -383,7 +429,8 @@ impl TxPool {
     /// - Removes any transaction older than `max_age_secs`.
     /// - If total size exceeds `max_total`, keeps the newest `max_total` by insertion time.
     pub fn all_txs(&self) -> Vec<&PendingTx> {
-        self.by_sender.values()
+        self.by_sender
+            .values()
             .flat_map(|lane| lane.values())
             .collect()
     }
@@ -391,7 +438,8 @@ impl TxPool {
     pub fn prune(&mut self, now_secs: u64) {
         // 1. Remove by age.
         let cutoff = now_secs.saturating_sub(self.max_age_secs);
-        let old_keys: Vec<TxAgeKey> = self.age_order
+        let old_keys: Vec<TxAgeKey> = self
+            .age_order
             .iter()
             .take_while(|key| key.inserted_at < cutoff)
             .cloned()
@@ -442,9 +490,9 @@ impl TxPool {
 
     /// Get transaction by hash (if present).
     pub fn get_by_hash(&self, hash: &str) -> Option<&PendingTx> {
-        self.by_hash.get(hash).and_then(|(sender, nonce, _)| {
-            self.by_sender.get(sender)?.get(nonce)
-        })
+        self.by_hash
+            .get(hash)
+            .and_then(|(sender, nonce, _)| self.by_sender.get(sender)?.get(nonce))
     }
 
     /// Get all transactions for a sender, in nonce order.
@@ -463,7 +511,7 @@ impl TxPool {
 impl MempoolTrait for TxPool {
     type Error = MempoolError;
 
-    fn submit_tx(&mut self, tx: Tx) -> Result<(), Self::Error> {
+    fn submit_tx(&mut self, _tx: Tx) -> Result<(), Self::Error> {
         // We need to convert from `Tx` (the node's generic transaction) to `PendingTx`.
         // In Iona, the `Tx` type contains a `payload` that may be `stake`, `vm`, or `evm_unified`.
         // For the EVM path, the payload is of the form "evm_unified <hex‑encoded EvmTx bincode>".
@@ -479,7 +527,7 @@ impl MempoolTrait for TxPool {
         Err(MempoolError::Unsupported)
     }
 
-    fn drain(&mut self, n: usize) -> Vec<Tx> {
+    fn drain(&mut self, _n: usize) -> Vec<Tx> {
         // Not needed for the RPC mempool; the node uses `ready_txs` directly.
         Vec::new()
     }
@@ -507,7 +555,13 @@ impl MempoolTrait for TxPool {
 mod tests {
     use super::*;
 
-    fn dummy_tx(hash: &str, from: &str, nonce: u64, gas_price: u128, inserted_at: u64) -> PendingTx {
+    fn dummy_tx(
+        hash: &str,
+        from: &str,
+        nonce: u64,
+        gas_price: u128,
+        inserted_at: u64,
+    ) -> PendingTx {
         PendingTx {
             hash: hash.to_string(),
             from: from.to_string(),
@@ -522,7 +576,14 @@ mod tests {
         }
     }
 
-    fn dummy_tx_1559(hash: &str, from: &str, nonce: u64, max_fee: u128, max_priority: u128, inserted_at: u64) -> PendingTx {
+    fn dummy_tx_1559(
+        hash: &str,
+        from: &str,
+        nonce: u64,
+        max_fee: u128,
+        max_priority: u128,
+        inserted_at: u64,
+    ) -> PendingTx {
         PendingTx {
             hash: hash.to_string(),
             from: from.to_string(),
@@ -553,7 +614,7 @@ mod tests {
     fn test_replacement_legacy() {
         let mut pool = TxPool::default();
         let tx1 = dummy_tx("hash1", "alice", 0, 10, 100);
-        pool.insert(tx1, None).unwrap();
+        pool.insert(tx1, None).expect("RPC error");
         // Replace with higher gas_price -> ok.
         let tx2 = dummy_tx("hash2", "alice", 0, 20, 101);
         assert!(pool.insert(tx2, None).is_ok());
@@ -567,7 +628,7 @@ mod tests {
     fn test_replacement_1559() {
         let mut pool = TxPool::default();
         let tx1 = dummy_tx_1559("hash1", "alice", 0, 100, 10, 100);
-        pool.insert(tx1, None).unwrap();
+        pool.insert(tx1, None).expect("RPC error");
         // Increase only max_fee -> should fail.
         let tx2 = dummy_tx_1559("hash2", "alice", 0, 200, 10, 101);
         assert!(pool.insert(tx2, None).is_err());
@@ -581,9 +642,12 @@ mod tests {
     #[test]
     fn test_ready_txs() {
         let mut pool = TxPool::default();
-        pool.insert(dummy_tx("hash1", "alice", 0, 5, 100), None).unwrap();
-        pool.insert(dummy_tx("hash2", "alice", 1, 4, 101), None).unwrap();
-        pool.insert(dummy_tx("hash3", "bob",   0, 10, 102), None).unwrap();
+        pool.insert(dummy_tx("hash1", "alice", 0, 5, 100), None)
+            .expect("RPC error");
+        pool.insert(dummy_tx("hash2", "alice", 1, 4, 101), None)
+            .expect("RPC error");
+        pool.insert(dummy_tx("hash3", "bob", 0, 10, 102), None)
+            .expect("RPC error");
 
         let mut account_nonces = HashMap::new();
         account_nonces.insert("alice".to_string(), 0);
@@ -605,8 +669,10 @@ mod tests {
     #[test]
     fn test_prune_age() {
         let mut pool = TxPool::new(100, 100, 100);
-        pool.insert(dummy_tx("hash1", "alice", 0, 5, 100), None).unwrap();
-        pool.insert(dummy_tx("hash2", "bob",   0, 5, 200), None).unwrap();
+        pool.insert(dummy_tx("hash1", "alice", 0, 5, 100), None)
+            .expect("RPC error");
+        pool.insert(dummy_tx("hash2", "bob", 0, 5, 200), None)
+            .expect("RPC error");
         pool.prune(150); // now=150, max_age=100 → cutoff=50; both are >50, so none removed.
         assert_eq!(pool.len(), 2);
         pool.prune(250); // now=250, cutoff=150; hash1 (100) is older than 150 -> removed.
@@ -618,9 +684,12 @@ mod tests {
     #[test]
     fn test_prune_size() {
         let mut pool = TxPool::new(2, 100, 1000);
-        pool.insert(dummy_tx("hash1", "alice", 0, 5, 100), None).unwrap();
-        pool.insert(dummy_tx("hash2", "bob",   0, 5, 200), None).unwrap();
-        pool.insert(dummy_tx("hash3", "carol", 0, 5, 150), None).unwrap();
+        pool.insert(dummy_tx("hash1", "alice", 0, 5, 100), None)
+            .expect("RPC error");
+        pool.insert(dummy_tx("hash2", "bob", 0, 5, 200), None)
+            .expect("RPC error");
+        pool.insert(dummy_tx("hash3", "carol", 0, 5, 150), None)
+            .expect("RPC error");
         pool.prune(1000);
         assert_eq!(pool.len(), 2);
         assert!(!pool.contains("hash1")); // oldest removed
@@ -640,8 +709,10 @@ mod tests {
     #[test]
     fn test_sender_limit() {
         let mut pool = TxPool::new(100, 2, 1000);
-        pool.insert(dummy_tx("hash1", "alice", 0, 10, 100), None).unwrap();
-        pool.insert(dummy_tx("hash2", "alice", 1, 10, 101), None).unwrap();
+        pool.insert(dummy_tx("hash1", "alice", 0, 10, 100), None)
+            .expect("RPC error");
+        pool.insert(dummy_tx("hash2", "alice", 1, 10, 101), None)
+            .expect("RPC error");
         // Third transaction from alice should be rejected.
         let tx3 = dummy_tx("hash3", "alice", 2, 10, 102);
         assert!(pool.insert(tx3, None).is_err());
@@ -651,8 +722,10 @@ mod tests {
     #[test]
     fn test_global_capacity_eviction() {
         let mut pool = TxPool::new(2, 100, 1000);
-        pool.insert(dummy_tx("hash1", "alice", 0, 5, 100), None).unwrap();
-        pool.insert(dummy_tx("hash2", "bob",   0, 5, 200), None).unwrap();
+        pool.insert(dummy_tx("hash1", "alice", 0, 5, 100), None)
+            .expect("RPC error");
+        pool.insert(dummy_tx("hash2", "bob", 0, 5, 200), None)
+            .expect("RPC error");
         // Third transaction should trigger eviction of the oldest (hash1).
         let tx3 = dummy_tx("hash3", "carol", 0, 5, 150);
         assert!(pool.insert(tx3, None).is_ok());

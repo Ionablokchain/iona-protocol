@@ -29,11 +29,11 @@
 //! validate_migration_step(from_sv, to_sv)?;
 //! ```
 
-use crate::storage::{migrations::MIGRATIONS, CURRENT_SCHEMA_VERSION, SchemaMeta};
+use crate::storage::{migrations::MIGRATIONS, SchemaMeta, CURRENT_SCHEMA_VERSION};
 use std::io;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
-use tracing::{error, info, warn};
+use tracing::info;
 
 // -----------------------------------------------------------------------------
 // SM-1: Strictly increasing
@@ -223,9 +223,9 @@ pub fn check_monotonicity(
             id: "SM-1".into(),
             name: "Strictly increasing".into(),
             passed: r.is_ok(),
-            detail: r.err().unwrap_or_else(|| {
-                format!("SV {current_sv} -> {target_sv}: OK")
-            }),
+            detail: r
+                .err()
+                .unwrap_or_else(|| format!("SV {current_sv} -> {target_sv}: OK")),
         });
     } else {
         checks.push(MonotonicityCheck {
@@ -242,9 +242,9 @@ pub fn check_monotonicity(
         id: "SM-2".into(),
         name: "No gaps".into(),
         passed: r.is_ok(),
-        detail: r.err().unwrap_or_else(|| {
-            format!("migration path {current_sv}..{target_sv} contiguous")
-        }),
+        detail: r
+            .err()
+            .unwrap_or_else(|| format!("migration path {current_sv}..{target_sv} contiguous")),
     });
 
     // SM-3: Binary >= disk.
@@ -265,9 +265,9 @@ pub fn check_monotonicity(
             id: "SM-4".into(),
             name: "Checkpoint exists".into(),
             passed: r.is_ok(),
-            detail: r.err().unwrap_or_else(|| {
-                format!("schema.json at SV={current_sv}")
-            }),
+            detail: r
+                .err()
+                .unwrap_or_else(|| format!("schema.json at SV={current_sv}")),
         });
     } else {
         checks.push(MonotonicityCheck {
@@ -311,8 +311,7 @@ pub fn validate_migration_step(from_sv: u32, to_sv: u32) -> io::Result<()> {
         ));
     }
 
-    check_binary_compat(from_sv)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    check_binary_compat(from_sv).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
 
     Ok(())
 }
@@ -421,12 +420,12 @@ mod tests {
 
     #[test]
     fn test_idempotent_noop() {
-        assert_eq!(check_idempotent(5, 5).unwrap(), true);
+        assert!(check_idempotent(5, 5).unwrap());
     }
 
     #[test]
     fn test_idempotent_needs_migration() {
-        assert_eq!(check_idempotent(4, 5).unwrap(), false);
+        assert!(!check_idempotent(4, 5).unwrap());
     }
 
     #[test]
@@ -436,11 +435,7 @@ mod tests {
 
     #[test]
     fn test_monotonicity_report_all_pass() {
-        let report = check_monotonicity(
-            CURRENT_SCHEMA_VERSION,
-            CURRENT_SCHEMA_VERSION,
-            None,
-        );
+        let report = check_monotonicity(CURRENT_SCHEMA_VERSION, CURRENT_SCHEMA_VERSION, None);
         assert!(report.all_passed, "report: {report}");
     }
 

@@ -14,12 +14,10 @@
 //! - **`activation_guarantees`**: Formal guarantees about activation behavior (determinism, monotonicity, etc.).
 
 // Re-export commonly used items from submodules.
-pub use self::activation_guarantees::{
-    check_all_guarantees, ActivationCheck, ActivationReport,
-};
+pub use self::activation_guarantees::{check_all_guarantees, ActivationCheck, ActivationReport};
 pub use self::compat::{
-    build_compat_matrix, check_version_compat, generate_upgrade_guide, CompatChecker,
-    CompatDomain, CompatLevel, CompatReport,
+    build_compat_matrix, check_version_compat, generate_upgrade_guide, CompatChecker, CompatDomain,
+    CompatLevel, CompatReport,
 };
 // dual_validate re-exports handled below
 pub use self::version::{

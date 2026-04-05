@@ -27,9 +27,7 @@ pub enum StallReason {
     },
 
     /// Proposal received but full block not yet available.
-    MissingBlock {
-        block_id: String,
-    },
+    MissingBlock { block_id: String },
 
     /// Not enough prevotes to proceed.
     InsufficientPrevotes {
@@ -48,9 +46,7 @@ pub enum StallReason {
     },
 
     /// No connected validators (P2P issue).
-    NoConnectedValidators {
-        total_validators: usize,
-    },
+    NoConnectedValidators { total_validators: usize },
 
     /// Too few connected validators for quorum.
     InsufficientConnectedValidators {
@@ -62,9 +58,7 @@ pub enum StallReason {
     },
 
     /// Already committed at this height.
-    AlreadyCommitted {
-        height: Height,
-    },
+    AlreadyCommitted { height: Height },
 
     /// Round is advancing due to timeouts / retries.
     RoundAdvancing {
@@ -90,10 +84,12 @@ pub struct ConsensusDiagnostic {
 impl ConsensusDiagnostic {
     pub fn is_stalled(&self) -> bool {
         !self.stall_reasons.is_empty()
-            && !self
-                .stall_reasons
-                .iter()
-                .all(|r| matches!(r, StallReason::AlreadyCommitted { .. } | StallReason::NoObviousStall))
+            && !self.stall_reasons.iter().all(|r| {
+                matches!(
+                    r,
+                    StallReason::AlreadyCommitted { .. } | StallReason::NoObviousStall
+                )
+            })
     }
 }
 
@@ -170,7 +166,8 @@ pub fn diagnose(
                 missing_validators,
             });
         }
-        ConnectivityDiagnostic::Sufficient { .. } | ConnectivityDiagnostic::NoneConnected { .. } => {}
+        ConnectivityDiagnostic::Sufficient { .. }
+        | ConnectivityDiagnostic::NoneConnected { .. } => {}
     }
 
     match state.step {
@@ -262,7 +259,10 @@ fn build_summary(state: &ConsensusState, reasons: &[StallReason]) -> String {
         }
     }
 
-    if reasons.iter().all(|r| matches!(r, StallReason::NoObviousStall)) {
+    if reasons
+        .iter()
+        .all(|r| matches!(r, StallReason::NoObviousStall))
+    {
         return format!(
             "OK height={} round={} step={:?}",
             state.height, state.round, state.step
@@ -297,7 +297,12 @@ fn format_reason(reason: &StallReason) -> String {
             format!("missing_block(id={})", block_id)
         }
 
-        StallReason::InsufficientPrevotes { have, need, voted, missing } => format!(
+        StallReason::InsufficientPrevotes {
+            have,
+            need,
+            voted,
+            missing,
+        } => format!(
             "low_prevotes(have={} need={} voted=[{}] missing=[{}])",
             have,
             need,
@@ -353,7 +358,11 @@ fn format_reason(reason: &StallReason) -> String {
     }
 }
 
-fn collect_voters(state: &ConsensusState, round: Round, vote_type: VoteType) -> Vec<PublicKeyBytes> {
+fn collect_voters(
+    state: &ConsensusState,
+    round: Round,
+    vote_type: VoteType,
+) -> Vec<PublicKeyBytes> {
     state
         .votes
         .get(&round)

@@ -6,13 +6,12 @@
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use tracing::{error, info};
 
-use crate::rpc::eth_rpc::{Block, Receipt, TxRecord, EthRpcState};
+use crate::rpc::eth_rpc::{Block, EthRpcState, Receipt, TxRecord};
 use crate::rpc::txpool::TxPool;
 use crate::rpc::withdrawals::Withdrawal;
 
@@ -83,7 +82,9 @@ pub fn load_snapshot(dir: impl AsRef<Path>) -> io::Result<Option<StateSnapshot>>
 
     // Check version first before full deserialization
     #[derive(serde::Deserialize)]
-    struct VersionCheck { version: u32 }
+    struct VersionCheck {
+        version: u32,
+    }
     if let Ok(vc) = serde_json::from_str::<VersionCheck>(&data) {
         if vc.version != SNAPSHOT_VERSION {
             return Err(io::Error::new(
@@ -133,8 +134,16 @@ pub fn snapshot_from_state(st: &EthRpcState) -> StateSnapshot {
     let blocks = st.blocks.lock().expect("mutex lock poisoned").clone();
     let receipts = st.receipts.lock().expect("mutex lock poisoned").clone();
     let txs = st.txs.lock().expect("mutex lock poisoned").clone();
-    let receipts_by_block = st.receipts_by_block.lock().expect("mutex lock poisoned").clone();
-    let pending_withdrawals = st.pending_withdrawals.lock().expect("mutex lock poisoned").clone();
+    let receipts_by_block = st
+        .receipts_by_block
+        .lock()
+        .expect("mutex lock poisoned")
+        .clone();
+    let pending_withdrawals = st
+        .pending_withdrawals
+        .lock()
+        .expect("mutex lock poisoned")
+        .clone();
     let txpool = st.txpool.lock().expect("mutex lock poisoned").clone();
 
     StateSnapshot::new(
@@ -218,7 +227,7 @@ mod tests {
 
     #[test]
     fn test_snapshot_roundtrip() {
-        let dir = tempdir().unwrap();
+        let dir = tempdir().expect("RPC error");
         let snap = StateSnapshot::new(
             6126151,
             1234,
@@ -231,8 +240,10 @@ mod tests {
             TxPool::default(),
         );
 
-        save_snapshot(dir.path(), &snap).unwrap();
-        let loaded = load_snapshot(dir.path()).unwrap().unwrap();
+        save_snapshot(dir.path(), &snap).expect("RPC error");
+        let loaded = load_snapshot(dir.path())
+            .expect("RPC error")
+            .expect("RPC error");
 
         assert_eq!(loaded.version, SNAPSHOT_VERSION);
         assert_eq!(loaded.chain_id, snap.chain_id);
@@ -241,14 +252,14 @@ mod tests {
 
     #[test]
     fn test_load_nonexistent() {
-        let dir = tempdir().unwrap();
-        let loaded = load_snapshot(dir.path()).unwrap();
+        let dir = tempdir().expect("RPC error");
+        let loaded = load_snapshot(dir.path()).expect("RPC error");
         assert!(loaded.is_none());
     }
 
     #[test]
     fn test_version_mismatch() {
-        let dir = tempdir().unwrap();
+        let dir = tempdir().expect("RPC error");
         // Manually write an old version snapshot
         let old_snap = serde_json::json!({
             "version": 999,
@@ -263,16 +274,26 @@ mod tests {
             "txpool": {}
         });
         let path = snapshot_path(dir.path());
-        fs::write(&path, old_snap.to_string()).unwrap();
+        fs::write(&path, old_snap.to_string()).expect("RPC error");
         let err = load_snapshot(dir.path()).unwrap_err();
         assert!(err.to_string().contains("incompatible snapshot version"));
     }
 
     #[test]
     fn test_atomic_write() {
-        let dir = tempdir().unwrap();
-        let snap = StateSnapshot::new(1, 0, 0, vec![], vec![], Default::default(), Default::default(), vec![], TxPool::default());
-        save_snapshot(dir.path(), &snap).unwrap();
+        let dir = tempdir().expect("RPC error");
+        let snap = StateSnapshot::new(
+            1,
+            0,
+            0,
+            vec![],
+            vec![],
+            Default::default(),
+            Default::default(),
+            vec![],
+            TxPool::default(),
+        );
+        save_snapshot(dir.path(), &snap).expect("RPC error");
         // Ensure the temporary file is gone
         let tmp_path = snapshot_path(dir.path()).with_extension("tmp");
         assert!(!tmp_path.exists());

@@ -181,7 +181,12 @@ pub fn attestation_path(data_dir: &str, height: u64) -> PathBuf {
 ///
 /// The state is serialised to JSON, compressed with zstd, and stored atomically.
 /// A manifest file is also written.
-pub fn write_snapshot(data_dir: &str, height: u64, state: &KvState, zstd_level: i32) -> io::Result<()> {
+pub fn write_snapshot(
+    data_dir: &str,
+    height: u64,
+    state: &KvState,
+    zstd_level: i32,
+) -> io::Result<()> {
     let snap_dir = snapshots_dir(data_dir);
     fs::create_dir_all(&snap_dir)?;
 
@@ -223,7 +228,11 @@ pub fn write_snapshot(data_dir: &str, height: u64, state: &KvState, zstd_level: 
     })?;
     fs::write(manifest_path(data_dir, height), manifest_json)?;
 
-    info!(height, compressed_bytes = compressed.len(), "snapshot written");
+    info!(
+        height,
+        compressed_bytes = compressed.len(),
+        "snapshot written"
+    );
     Ok(())
 }
 
@@ -252,9 +261,8 @@ pub fn read_snapshot_state(data_dir: &str, height: u64) -> io::Result<KvState> {
 pub fn read_snapshot_manifest(data_dir: &str, height: u64) -> io::Result<SnapshotManifest> {
     let path = manifest_path(data_dir, height);
     let bytes = fs::read(&path)?;
-    let manifest: SnapshotManifest = serde_json::from_slice(&bytes).map_err(|e| {
-        io::Error::new(io::ErrorKind::InvalidData, format!("manifest json: {e}"))
-    })?;
+    let manifest: SnapshotManifest = serde_json::from_slice(&bytes)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("manifest json: {e}")))?;
     Ok(manifest)
 }
 
@@ -269,7 +277,10 @@ pub fn list_snapshot_heights(data_dir: &str) -> io::Result<Vec<u64>> {
         let entry = entry?;
         let name = entry.file_name();
         let name = name.to_string_lossy();
-        if let Some(h) = name.strip_prefix("state_").and_then(|s| s.split('.').next()) {
+        if let Some(h) = name
+            .strip_prefix("state_")
+            .and_then(|s| s.split('.').next())
+        {
             if let Ok(v) = h.parse::<u64>() {
                 heights.push(v);
             }
@@ -320,9 +331,8 @@ pub fn restore_latest_if_missing(data_dir: &str, state_full_path: &str) -> io::R
     };
 
     let state = read_snapshot_state(data_dir, height)?;
-    let json = serde_json::to_vec_pretty(&state).map_err(|e| {
-        io::Error::new(io::ErrorKind::InvalidData, format!("serialise state: {e}"))
-    })?;
+    let json = serde_json::to_vec_pretty(&state)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("serialise state: {e}")))?;
     fs::write(state_full_path, json)?;
     info!(height, "restored latest snapshot");
     Ok(Some(height))
@@ -513,13 +523,11 @@ pub fn write_delta(
     fs::create_dir_all(&snap_dir)?;
 
     let delta = compute_delta(from_h, to_h, from, to);
-    let json = serde_json::to_vec(&delta).map_err(|e| {
-        io::Error::new(io::ErrorKind::InvalidData, format!("delta encode: {e}"))
-    })?;
+    let json = serde_json::to_vec(&delta)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("delta encode: {e}")))?;
 
-    let compressed = zstd::encode_all(&json[..], zstd_level).map_err(|e| {
-        io::Error::new(io::ErrorKind::Other, format!("delta zstd: {e}"))
-    })?;
+    let compressed = zstd::encode_all(&json[..], zstd_level)
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("delta zstd: {e}")))?;
 
     let path = delta_path(data_dir, from_h, to_h);
     let tmp_path = path.with_extension("tmp");
@@ -593,12 +601,19 @@ pub fn list_delta_edges(data_dir: &str) -> io::Result<Vec<(u64, u64)>> {
 // -----------------------------------------------------------------------------
 
 /// Write an attestation for a snapshot.
-pub fn write_attestation(data_dir: &str, height: u64, attestation: &SnapshotAttestation) -> io::Result<()> {
+pub fn write_attestation(
+    data_dir: &str,
+    height: u64,
+    attestation: &SnapshotAttestation,
+) -> io::Result<()> {
     let dir = snapshots_dir(data_dir);
     fs::create_dir_all(&dir)?;
     let path = attestation_path(data_dir, height);
     let json = serde_json::to_string_pretty(attestation).map_err(|e| {
-        io::Error::new(io::ErrorKind::InvalidData, format!("attestation encode: {e}"))
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("attestation encode: {e}"),
+        )
     })?;
     fs::write(&path, json)?;
     Ok(())
@@ -633,7 +648,10 @@ pub fn verify_attestation(
     };
     let msg = snapshot_attest_sign_bytes(manifest.height, root_hex)?;
 
-    let allow_set: std::collections::HashSet<String> = validator_pubkeys_hex.iter().map(|s| s.to_lowercase()).collect();
+    let allow_set: std::collections::HashSet<String> = validator_pubkeys_hex
+        .iter()
+        .map(|s| s.to_lowercase())
+        .collect();
 
     let mut ok_count = 0u32;
     for sig in &att.signatures {
@@ -668,9 +686,8 @@ pub fn snapshot_attest_sign_bytes(height: u64, state_root_hex: &str) -> io::Resu
     let mut out = Vec::with_capacity(8 + 32 + 32);
     out.extend_from_slice(b"iona:snapshot_attest:v1");
     out.extend_from_slice(&height.to_le_bytes());
-    let root = hex::decode(state_root_hex).map_err(|e| {
-        io::Error::new(io::ErrorKind::InvalidData, format!("state_root hex: {e}"))
-    })?;
+    let root = hex::decode(state_root_hex)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("state_root hex: {e}")))?;
     out.extend_from_slice(&root);
     Ok(out)
 }
@@ -687,13 +704,11 @@ pub fn snapshot_attest_sign_bytes_v2(
     out.extend_from_slice(b"iona:snapshot_attest:v2");
     out.extend_from_slice(&chain_id.to_le_bytes());
     out.extend_from_slice(&height.to_le_bytes());
-    let root = hex::decode(state_root_hex).map_err(|e| {
-        io::Error::new(io::ErrorKind::InvalidData, format!("state_root hex: {e}"))
-    })?;
+    let root = hex::decode(state_root_hex)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("state_root hex: {e}")))?;
     out.extend_from_slice(&root);
-    let vsh = hex::decode(validator_set_hash_hex).map_err(|e| {
-        io::Error::new(io::ErrorKind::InvalidData, format!("vset_hash hex: {e}"))
-    })?;
+    let vsh = hex::decode(validator_set_hash_hex)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("vset_hash hex: {e}")))?;
     out.extend_from_slice(&vsh);
     out.extend_from_slice(&epoch_nonce.to_le_bytes());
     Ok(out)

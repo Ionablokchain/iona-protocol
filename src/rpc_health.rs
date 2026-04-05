@@ -44,7 +44,13 @@ impl HealthResponse {
         }
     }
 
-    pub fn degraded(reason: &str, height: u64, peers: usize, producing: bool, catching_up: bool) -> Self {
+    pub fn degraded(
+        reason: &str,
+        height: u64,
+        peers: usize,
+        producing: bool,
+        catching_up: bool,
+    ) -> Self {
         Self {
             status: "degraded".into(),
             reason: Some(reason.into()),
@@ -114,7 +120,7 @@ pub struct ValidatorInfo {
 pub struct CommitInfo {
     pub block_hash: String,
     pub proposer: String,
-    pub commit_time: u64,      // Unix seconds
+    pub commit_time: u64, // Unix seconds
     pub num_txs: usize,
 }
 
@@ -314,9 +320,21 @@ mod tests {
             mempool_size: 50,
             diagnostic: None,
             validator_infos: vec![
-                ValidatorInfo { pubkey_short: "aabb..".into(), power: 1, connected: true },
-                ValidatorInfo { pubkey_short: "ccdd..".into(), power: 1, connected: true },
-                ValidatorInfo { pubkey_short: "eeff..".into(), power: 1, connected: false },
+                ValidatorInfo {
+                    pubkey_short: "aabb..".into(),
+                    power: 1,
+                    connected: true,
+                },
+                ValidatorInfo {
+                    pubkey_short: "ccdd..".into(),
+                    power: 1,
+                    connected: true,
+                },
+                ValidatorInfo {
+                    pubkey_short: "eeff..".into(),
+                    power: 1,
+                    connected: false,
+                },
             ],
             total_power: 3,
             quorum_threshold: 3,
@@ -338,7 +356,8 @@ mod tests {
                 num_txs: 5,
             }),
             mev_stats: None,
-        }.build();
+        }
+        .build();
 
         assert_eq!(status.node_version, env!("CARGO_PKG_VERSION"));
         assert_eq!(status.height, 42);

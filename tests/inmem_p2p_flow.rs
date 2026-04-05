@@ -8,18 +8,18 @@
 //! and that the observer's engine processes the proposal.
 
 use iona::consensus::{
-    ConsensusMsg, SimpleBlockProducer, SimpleProducerCfg, Validator, ValidatorSet,
-    BlockStore, Outbox, Engine, Step, Config, ValidatorIdentity,
+    BlockStore, Config, ConsensusMsg, Engine, Outbox, SimpleBlockProducer, SimpleProducerCfg, Step,
+    Validator, ValidatorIdentity, ValidatorSet,
 };
 use iona::crypto::ed25519::{Ed25519Keypair, Ed25519Verifier};
 use iona::crypto::Signer;
-use iona::types::{Hash32, Block};
-use iona::slashing::StakeLedger;
 use iona::execution::KvState;
 use iona::net::inmem::{InMemNet, NodeId};
+use iona::slashing::StakeLedger;
+use iona::types::{Block, Hash32};
 
 use std::collections::HashMap;
-use std::sync::{Mutex, Arc};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::time::timeout;
@@ -185,13 +185,27 @@ async fn inmem_network_delivers_proposal_to_observer() {
         // Ensure engine is in Propose step.
         assert_eq!(eng2.state.step, Step::Propose);
         let mut out2 = outbox2.lock().await;
-        let produced = producer.try_produce(
-            eng2.state.height, eng2.state.round, None, [0u8; 32],
-            &eng2.app_state, eng2.base_fee_per_gas, &keypair2,
-            &addr2,
-            keypair2.public_key().0.clone(), &val_ids, &[], false,
-        ).ok().flatten();
-        assert!(produced.is_some(), "Producer should have created a proposal");
+        let produced = producer
+            .try_produce(
+                eng2.state.height,
+                eng2.state.round,
+                None,
+                [0u8; 32],
+                &eng2.app_state,
+                eng2.base_fee_per_gas,
+                &keypair2,
+                &addr2,
+                keypair2.public_key().0.clone(),
+                &val_ids,
+                &[],
+                false,
+            )
+            .ok()
+            .flatten();
+        assert!(
+            produced.is_some(),
+            "Producer should have created a proposal"
+        );
         let (proposal, block) = produced.unwrap();
         // Store the block locally and broadcast the proposal.
         store2.put(block);
@@ -216,7 +230,8 @@ async fn inmem_network_delivers_proposal_to_observer() {
             }
             tokio::task::yield_now().await;
         }
-    }).await;
+    })
+    .await;
 
     assert!(
         result.is_ok(),

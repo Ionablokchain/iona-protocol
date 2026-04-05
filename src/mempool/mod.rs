@@ -8,17 +8,15 @@
 //! Both pools implement the `Mempool` trait, allowing the node to switch
 //! between them seamlessly.
 
-pub mod pool;
 pub mod mev_resistant;
+pub mod pool;
 
 // Re‑export core types and traits.
-pub use pool::StandardMempool;
 pub use mev_resistant::{
-    MevMempool, MevConfig, MevMempoolMetrics,
-    TxCommit, TxReveal, CommitStatus,
-    EncryptedEnvelope, encrypt_tx_envelope, decrypt_tx_envelope,
-    compute_commit_hash, derive_epoch_secret,
+    compute_commit_hash, decrypt_tx_envelope, derive_epoch_secret, encrypt_tx_envelope,
+    CommitStatus, EncryptedEnvelope, MevConfig, MevMempool, MevMempoolMetrics, TxCommit, TxReveal,
 };
+pub use pool::StandardMempool;
 
 // Re‑export common error type.
 pub use self::error::MempoolError;
@@ -29,7 +27,7 @@ pub use self::trait_def::Mempool;
 // ── Trait definition ──────────────────────────────────────────────────────
 
 pub mod trait_def {
-    use crate::types::{Height, Hash32, Tx};
+    use crate::types::{Hash32, Height, Tx};
 
     /// Common interface for all mempool implementations.
     pub trait Mempool {

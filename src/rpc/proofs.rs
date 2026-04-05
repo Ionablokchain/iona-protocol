@@ -54,8 +54,16 @@ fn hex0x(bytes: &[u8]) -> String {
 
 fn u256_to_trimmed_be(v: U256) -> Vec<u8> {
     let bytes = v.to_be_bytes::<32>().to_vec();
-    let trimmed = bytes.iter().skip_while(|&&b| b == 0).copied().collect::<Vec<_>>();
-    if trimmed.is_empty() { vec![0u8] } else { trimmed }
+    let trimmed = bytes
+        .iter()
+        .skip_while(|&&b| b == 0)
+        .copied()
+        .collect::<Vec<_>>();
+    if trimmed.is_empty() {
+        vec![0u8]
+    } else {
+        trimmed
+    }
 }
 
 fn rlp_encode_u256(v: U256) -> Vec<u8> {
@@ -63,7 +71,12 @@ fn rlp_encode_u256(v: U256) -> Vec<u8> {
     rlp::encode(&trimmed.as_slice()).to_vec()
 }
 
-fn rlp_encode_account(nonce: u64, balance: U256, storage_root: [u8; 32], code_hash: [u8; 32]) -> Vec<u8> {
+fn rlp_encode_account(
+    nonce: u64,
+    balance: U256,
+    storage_root: [u8; 32],
+    code_hash: [u8; 32],
+) -> Vec<u8> {
     let mut stream = rlp::RlpStream::new_list(4);
     stream.append(&nonce);
     let balance_trimmed = u256_to_trimmed_be(balance);
@@ -74,10 +87,8 @@ fn rlp_encode_account(nonce: u64, balance: U256, storage_root: [u8; 32], code_ha
 }
 
 const EMPTY_TRIE_ROOT: [u8; 32] = [
-    0x56, 0xe8, 0x1f, 0x17, 0x1b, 0xcc, 0x55, 0xa6,
-    0xff, 0x83, 0x45, 0xe6, 0x92, 0xc0, 0xf8, 0x6e,
-    0x5b, 0x48, 0xe0, 0x1b, 0x99, 0x6c, 0xad, 0xc0,
-    0x01, 0x62, 0x2f, 0xb5, 0xe3, 0x63, 0xb4, 0x21,
+    0x56, 0xe8, 0x1f, 0x17, 0x1b, 0xcc, 0x55, 0xa6, 0xff, 0x83, 0x45, 0xe6, 0x92, 0xc0, 0xf8, 0x6e,
+    0x5b, 0x48, 0xe0, 0x1b, 0x99, 0x6c, 0xad, 0xc0, 0x01, 0x62, 0x2f, 0xb5, 0xe3, 0x63, 0xb4, 0x21,
 ];
 
 // -----------------------------------------------------------------------------
@@ -86,7 +97,11 @@ const EMPTY_TRIE_ROOT: [u8; 32] = [
 
 /// Build a complete account proof for the given address and storage keys.
 /// Stubbed: returns a default proof until trie-db version mismatch is resolved.
-pub fn build_proof(db: &MemDb, addr: Address, _storage_keys: Vec<[u8; 32]>) -> Result<AccountProof, String> {
+pub fn build_proof(
+    _db: &MemDb,
+    addr: Address,
+    _storage_keys: Vec<[u8; 32]>,
+) -> Result<AccountProof, String> {
     Ok(AccountProof {
         address: format!("0x{}", hex::encode(addr)),
         account_proof: vec![],
@@ -142,7 +157,7 @@ mod tests {
         let addr = Address::from([0xaa; 20]);
         let result = build_proof(&db, addr, vec![]);
         assert!(result.is_ok());
-        let proof = result.unwrap();
+        let proof = result.expect("RPC error");
         assert_eq!(proof.address, format!("0x{}", hex::encode(addr)));
     }
 }

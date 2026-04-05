@@ -201,9 +201,7 @@ impl Evidence {
                     warn!("DoubleProposal round mismatch");
                     return false;
                 }
-                if proposal_a.proposer.0 != proposer.0
-                    || proposal_b.proposer.0 != proposer.0
-                {
+                if proposal_a.proposer.0 != proposer.0 || proposal_b.proposer.0 != proposer.0 {
                     warn!("DoubleProposal proposer mismatch");
                     return false;
                 }
@@ -254,9 +252,7 @@ impl Evidence {
         if proposal_a.proposer.0 != proposal_b.proposer.0 {
             return None;
         }
-        if proposal_a.height != proposal_b.height
-            || proposal_a.round != proposal_b.round
-        {
+        if proposal_a.height != proposal_b.height || proposal_a.round != proposal_b.round {
             return None;
         }
         let a = Some(proposal_a.block_id.clone());
@@ -317,7 +313,7 @@ impl fmt::Display for Evidence {
 mod tests {
     use super::*;
     use crate::consensus::messages::{Proposal, Vote, VoteType};
-    use crate::types::{Block, BlockHeader, Hash32, Height, Round};
+    use crate::types::{Hash32, Height, Round};
 
     fn dummy_vote(hash: Option<Hash32>, height: Height, round: Round, voter: &[u8]) -> Vote {
         Vote {
@@ -326,7 +322,7 @@ mod tests {
             round,
             vote_type: VoteType::Prevote,
             block_id: hash,
-                        signature: crate::crypto::SignatureBytes(vec![]),
+            signature: crate::crypto::SignatureBytes(vec![]),
         }
     }
 

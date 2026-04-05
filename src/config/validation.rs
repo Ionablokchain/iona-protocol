@@ -82,7 +82,9 @@ fn validate_bootnode(addr: &str) -> Result<(), String> {
 
     let parts: Vec<&str> = addr.split('/').collect();
     if parts.len() < 7 {
-        return Err(format!("malformed multiaddr (too few parts, missing peer ID?): {addr}"));
+        return Err(format!(
+            "malformed multiaddr (too few parts, missing peer ID?): {addr}"
+        ));
     }
 
     if !parts[0].is_empty() {
@@ -138,10 +140,9 @@ fn validate_bootnode(addr: &str) -> Result<(), String> {
 /// Uses SHA-256 of the canonical JSON representation (normalized to avoid formatting differences).
 pub fn genesis_hash(genesis_json: &str) -> [u8; 32] {
     use sha2::{Digest, Sha256};
-    let parsed: serde_json::Value = serde_json::from_str(genesis_json)
-        .expect("genesis JSON must be valid");
-    let canonical = serde_json::to_string(&parsed)
-        .expect("canonical serialization failed");
+    let parsed: serde_json::Value =
+        serde_json::from_str(genesis_json).expect("genesis JSON must be valid");
+    let canonical = serde_json::to_string(&parsed).expect("canonical serialization failed");
 
     let mut hasher = Sha256::new();
     hasher.update(canonical.as_bytes());
@@ -160,8 +161,8 @@ pub fn verify_genesis_integrity(
         .map_err(|e| format!("cannot read genesis: {e}"))?;
 
     // Validate JSON structure
-    let parsed: serde_json::Value = serde_json::from_str(&content)
-        .map_err(|e| format!("invalid JSON in genesis: {e}"))?;
+    let parsed: serde_json::Value =
+        serde_json::from_str(&content).map_err(|e| format!("invalid JSON in genesis: {e}"))?;
 
     // Basic required fields
     if parsed.get("chain_id").is_none() {
@@ -203,7 +204,7 @@ pub fn validate_config(
     rpc_enabled: bool,
     node_seed: u64,
     genesis_validator_seeds: &[u64],
-    config_validator_seeds: &[u64],   // added
+    config_validator_seeds: &[u64], // added
     protocol_activations: &[crate::protocol::version::ProtocolActivation],
     listen_addr: &str,
     p2p_listen_addr: &str,
@@ -227,8 +228,13 @@ pub fn validate_config(
     }
 
     // 2. Check for self-bootstrap (node's own address in bootnodes).
-    let listen_port = listen_addr.rsplit(':').next().unwrap_or("")
-        .chars().filter(|c| c.is_ascii_digit()).collect::<String>();
+    let listen_port = listen_addr
+        .rsplit(':')
+        .next()
+        .unwrap_or("")
+        .chars()
+        .filter(|c| c.is_ascii_digit())
+        .collect::<String>();
     let self_indicators = ["127.0.0.1", "0.0.0.0", "localhost"];
     for bn in bootnodes {
         if !listen_port.is_empty() {
@@ -369,7 +375,9 @@ pub fn validate_config(
                     } else {
                         errors.push(ValidationError {
                             field: "network.listen".into(),
-                            message: format!("invalid port number in P2P listen address: {port_str}"),
+                            message: format!(
+                                "invalid port number in P2P listen address: {port_str}"
+                            ),
                         });
                     }
                 }
@@ -402,9 +410,9 @@ pub fn validate_config(
             message: "protocol activation schedule cannot be empty".into(),
         });
     } else {
-        let has_v1_at_zero = protocol_activations.iter().any(|a| {
-            a.protocol_version == 1 && a.activation_height == Some(0)
-        });
+        let has_v1_at_zero = protocol_activations
+            .iter()
+            .any(|a| a.protocol_version == 1 && a.activation_height == Some(0));
         if !has_v1_at_zero {
             errors.push(ValidationError {
                 field: "consensus.protocol_activations".into(),
@@ -419,7 +427,10 @@ pub fn validate_config(
                     if h <= prev {
                         errors.push(ValidationError {
                             field: "consensus.protocol_activations".into(),
-                            message: format!("activation heights must be strictly increasing ({} <= {})", prev, h),
+                            message: format!(
+                                "activation heights must be strictly increasing ({} <= {})",
+                                prev, h
+                            ),
                         });
                         break;
                     }
@@ -482,7 +493,9 @@ pub fn validate_config(
     if max_connections_total < 1 || max_connections_total > 10_000 {
         errors.push(ValidationError {
             field: "network.max_connections_total".into(),
-            message: format!("max_connections_total must be between 1 and 10000 (got {max_connections_total})"),
+            message: format!(
+                "max_connections_total must be between 1 and 10000 (got {max_connections_total})"
+            ),
         });
     }
     if max_connections_per_peer < 1 || max_connections_per_peer > 100 {
@@ -519,8 +532,16 @@ mod tests {
 
     fn dummy_activation() -> Vec<ProtocolActivation> {
         vec![
-            ProtocolActivation { protocol_version: 1, activation_height: Some(0), grace_blocks: 0 },
-            ProtocolActivation { protocol_version: 2, activation_height: Some(100), grace_blocks: 10 },
+            ProtocolActivation {
+                protocol_version: 1,
+                activation_height: Some(0),
+                grace_blocks: 0,
+            },
+            ProtocolActivation {
+                protocol_version: 2,
+                activation_height: Some(100),
+                grace_blocks: 10,
+            },
         ]
     }
 
@@ -550,8 +571,8 @@ mod tests {
             &["/ip4/1.2.3.4/tcp/7001/p2p/12D3KooW".into()],
             1000,
             true,
-            false,   // rpc_enabled
-            2,       // node seed in validator set
+            false, // rpc_enabled
+            2,     // node seed in validator set
             &[2, 3, 4],
             &[2, 3, 4],
             &dummy_activation(),
@@ -559,7 +580,7 @@ mod tests {
             "/ip4/0.0.0.0/tcp/7001",
             "/tmp/iona",
             "plain",
-            false,   // no password needed for plain
+            false, // no password needed for plain
             200_000,
             200,
             8,
@@ -668,7 +689,10 @@ mod tests {
             8,
         );
         assert!(!result.is_ok());
-        assert!(result.errors.iter().any(|e| e.message.contains("exceeds maximum")));
+        assert!(result
+            .errors
+            .iter()
+            .any(|e| e.message.contains("exceeds maximum")));
     }
 
     #[test]
@@ -694,7 +718,10 @@ mod tests {
             8,
         );
         assert!(!result.is_ok());
-        assert!(result.errors.iter().any(|e| e.field.contains("simple_producer")));
+        assert!(result
+            .errors
+            .iter()
+            .any(|e| e.field.contains("simple_producer")));
     }
 
     #[test]
@@ -720,7 +747,10 @@ mod tests {
             8,
         );
         assert!(!result.is_ok());
-        assert!(result.errors.iter().any(|e| e.message.contains("mutually exclusive")));
+        assert!(result
+            .errors
+            .iter()
+            .any(|e| e.message.contains("mutually exclusive")));
     }
 
     #[test]
@@ -749,7 +779,10 @@ mod tests {
             8,
         );
         assert!(!result.is_ok());
-        assert!(result.errors.iter().any(|e| e.message.contains("duplicate")));
+        assert!(result
+            .errors
+            .iter()
+            .any(|e| e.message.contains("duplicate")));
     }
 
     #[test]
@@ -801,7 +834,10 @@ mod tests {
             8,
         );
         assert!(!result.is_ok());
-        assert!(result.errors.iter().any(|e| e.message.contains("invalid port")));
+        assert!(result
+            .errors
+            .iter()
+            .any(|e| e.message.contains("invalid port")));
     }
 
     #[test]
@@ -827,7 +863,10 @@ mod tests {
             8,
         );
         assert!(!result.is_ok());
-        assert!(result.errors.iter().any(|e| e.message.contains("at least one validator")));
+        assert!(result
+            .errors
+            .iter()
+            .any(|e| e.message.contains("at least one validator")));
     }
 
     #[test]
@@ -853,7 +892,10 @@ mod tests {
             8,
         );
         assert!(!result.is_ok());
-        assert!(result.errors.iter().any(|e| e.message.contains("duplicate validator seeds")));
+        assert!(result
+            .errors
+            .iter()
+            .any(|e| e.message.contains("duplicate validator seeds")));
     }
 
     #[test]
@@ -879,7 +921,10 @@ mod tests {
             8,
         );
         assert!(!result.is_ok());
-        assert!(result.errors.iter().any(|e| e.message.contains("must exactly match")));
+        assert!(result
+            .errors
+            .iter()
+            .any(|e| e.message.contains("must exactly match")));
     }
 
     #[test]
@@ -961,14 +1006,19 @@ mod tests {
             8,
         );
         assert!(!result.is_ok());
-        assert!(result.errors.iter().any(|e| e.message.contains("cannot be empty")));
+        assert!(result
+            .errors
+            .iter()
+            .any(|e| e.message.contains("cannot be empty")));
     }
 
     #[test]
     fn test_protocol_activations_no_v1() {
-        let activations = vec![
-            ProtocolActivation { protocol_version: 2, activation_height: Some(100), grace_blocks: 10 },
-        ];
+        let activations = vec![ProtocolActivation {
+            protocol_version: 2,
+            activation_height: Some(100),
+            grace_blocks: 10,
+        }];
         let result = validate_config(
             6126151,
             None,
@@ -990,7 +1040,9 @@ mod tests {
             8,
         );
         assert!(!result.is_ok());
-        assert!(result.errors.iter().any(|e| e.message.contains("must include activation for protocol_version=1 at height 0")));
+        assert!(result.errors.iter().any(|e| e
+            .message
+            .contains("must include activation for protocol_version=1 at height 0")));
     }
 
     #[test]
@@ -1044,7 +1096,10 @@ mod tests {
             8,
         );
         assert!(!result.is_ok());
-        assert!(result.errors.iter().any(|e| e.message.contains("no password provided")));
+        assert!(result
+            .errors
+            .iter()
+            .any(|e| e.message.contains("no password provided")));
     }
 
     #[test]
@@ -1096,7 +1151,10 @@ mod tests {
             8,
         );
         assert!(!result.is_ok());
-        assert!(result.errors.iter().any(|e| e.message.contains("max_connections_total")));
+        assert!(result
+            .errors
+            .iter()
+            .any(|e| e.message.contains("max_connections_total")));
 
         let result = validate_config(
             6126151,
@@ -1119,6 +1177,9 @@ mod tests {
             300, // per peer > total
         );
         assert!(!result.is_ok());
-        assert!(result.errors.iter().any(|e| e.message.contains("cannot exceed")));
+        assert!(result
+            .errors
+            .iter()
+            .any(|e| e.message.contains("cannot exceed")));
     }
 }

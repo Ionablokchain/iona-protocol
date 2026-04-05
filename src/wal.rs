@@ -20,11 +20,23 @@ const KEEP_SEGMENTS: usize = 3;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum WalEvent {
-    Inbound  { bytes: Vec<u8> },
-    Outbound { bytes: Vec<u8> },
-    Step     { height: u64, round: u32, step: String },
-    Snapshot { bytes: Vec<u8> },
-    Note     { msg: String },
+    Inbound {
+        bytes: Vec<u8>,
+    },
+    Outbound {
+        bytes: Vec<u8>,
+    },
+    Step {
+        height: u64,
+        round: u32,
+        step: String,
+    },
+    Snapshot {
+        bytes: Vec<u8>,
+    },
+    Note {
+        msg: String,
+    },
 }
 
 /// Metadata persisted across restarts.
@@ -49,9 +61,8 @@ impl WalMeta {
             return Ok(Self::default());
         }
         let content = fs::read_to_string(&path)?;
-        serde_json::from_str(&content).map_err(|e| {
-            std::io::Error::new(std::io::ErrorKind::InvalidData, e)
-        })
+        serde_json::from_str(&content)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
     }
 
     fn save(&self, dir: &Path) -> std::io::Result<()> {
@@ -86,10 +97,7 @@ impl Wal {
         let current_segment = meta.current_segment;
         let path = Self::segment_path(&dir, current_segment);
         let written = fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-        let current_file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)?;
+        let current_file = OpenOptions::new().create(true).append(true).open(&path)?;
 
         let inner = WalInner {
             dir,
@@ -139,7 +147,11 @@ impl Wal {
 
     /// Replay events starting from a specific segment and offset.
     /// This is used after loading a snapshot: we only need events after the snapshot point.
-    pub fn replay_from(start_segment: u32, start_offset: u64, dir: &Path) -> std::io::Result<Vec<WalEvent>> {
+    pub fn replay_from(
+        start_segment: u32,
+        start_offset: u64,
+        dir: &Path,
+    ) -> std::io::Result<Vec<WalEvent>> {
         let mut segments = Self::collect_segments(dir)?;
         // Keep only segments >= start_segment
         segments.retain(|&s| s >= start_segment);
@@ -156,7 +168,10 @@ impl Wal {
 
             for line in br.lines() {
                 let line = match line {
-                    Ok(l) if l.trim().is_empty() => { current_offset += l.len() as u64 + 1; continue; },
+                    Ok(l) if l.trim().is_empty() => {
+                        current_offset += l.len() as u64 + 1;
+                        continue;
+                    }
                     Ok(l) => l,
                     Err(e) => {
                         warn!("WAL read error seg={seg} line={line_num}: {e}");
@@ -223,11 +238,17 @@ impl WalInner {
 
     fn prune_old_segments(&self) {
         // Keep at least KEEP_SEGMENTS, and also keep all segments >= snapshot_segment.
-        let min_keep = self.meta.snapshot_segment.saturating_sub(KEEP_SEGMENTS as u32);
+        let _min_keep = self
+            .meta
+            .snapshot_segment
+            .saturating_sub(KEEP_SEGMENTS as u32);
         // We cannot delete segments that are before the snapshot if they are still referenced by `snapshot_segment`.
         // Actually we should keep at least the snapshot segment and maybe a few before for safety.
         // We'll keep all segments with seg >= snapshot_segment.saturating_sub(KEEP_SEGMENTS as u32).
-        let cutoff = self.meta.snapshot_segment.saturating_sub(KEEP_SEGMENTS as u32);
+        let cutoff = self
+            .meta
+            .snapshot_segment
+            .saturating_sub(KEEP_SEGMENTS as u32);
         for seg in 0..cutoff {
             let path = Wal::segment_path(&self.dir, seg);
             if path.exists() {

@@ -26,14 +26,14 @@ pub const EMPTY_HASH: H256 = [0u8; 32];
 
 /// Keccak‑256 hash of an empty RLP list (`0xc0`).
 pub const EMPTY_OMMERS_HASH: H256 = [
-    0x1d, 0xcc, 0x4d, 0xe8, 0xdc, 0x75, 0xee, 0xef,
-    0x42, 0x3b, 0x7a, 0xef, 0x78, 0x8b, 0xfc, 0x8f,
-    0x41, 0xcc, 0x2a, 0xd6, 0x55, 0xbd, 0xea, 0xba,
-    0xeb, 0xe5, 0xae, 0x8b, 0xa7, 0xfe, 0xcf, 0x5c,
+    0x1d, 0xcc, 0x4d, 0xe8, 0xdc, 0x75, 0xee, 0xef, 0x42, 0x3b, 0x7a, 0xef, 0x78, 0x8b, 0xfc, 0x8f,
+    0x41, 0xcc, 0x2a, 0xd6, 0x55, 0xbd, 0xea, 0xba, 0xeb, 0xe5, 0xae, 0x8b, 0xa7, 0xfe, 0xcf, 0x5c,
 ];
 
 /// Zeroed bloom filter (256 bytes).
-pub fn empty_bloom() -> Bloom256 { vec![0u8; 256] }
+pub fn empty_bloom() -> Bloom256 {
+    vec![0u8; 256]
+}
 
 // -----------------------------------------------------------------------------
 // Ethereum Block Header
@@ -108,7 +108,12 @@ impl Default for EthHeader {
 
 impl fmt::Display for EthHeader {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "EthHeader {{ number: {}, hash: {} }}", self.number, hex::encode(self.hash()))
+        write!(
+            f,
+            "EthHeader {{ number: {}, hash: {} }}",
+            self.number,
+            hex::encode(self.hash())
+        )
     }
 }
 
@@ -218,10 +223,9 @@ mod tests {
         // Known value: keccak(rlp([])) = 0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a741c0f142a0c0b27c2c2
         // Our constant is the correct value.
         let expected = [
-            0x1d, 0xcc, 0x4d, 0xe8, 0xdc, 0x75, 0xee, 0xef,
-            0x42, 0x3b, 0x7a, 0xef, 0x78, 0x8b, 0xfc, 0x8f,
-            0x41, 0xcc, 0x2a, 0xd6, 0x55, 0xbd, 0xea, 0xba,
-            0xeb, 0xe5, 0xae, 0x8b, 0xa7, 0xfe, 0xcf, 0x5c,
+            0x1d, 0xcc, 0x4d, 0xe8, 0xdc, 0x75, 0xee, 0xef, 0x42, 0x3b, 0x7a, 0xef, 0x78, 0x8b,
+            0xfc, 0x8f, 0x41, 0xcc, 0x2a, 0xd6, 0x55, 0xbd, 0xea, 0xba, 0xeb, 0xe5, 0xae, 0x8b,
+            0xa7, 0xfe, 0xcf, 0x5c,
         ];
         assert_eq!(EMPTY_OMMERS_HASH, expected);
     }
@@ -241,22 +245,25 @@ mod tests {
     #[test]
     fn test_hex_parsing() {
         let hash_hex = "0x1111111111111111111111111111111111111111111111111111111111111111";
-        let hash = h256_from_hex(hash_hex).unwrap();
+        let hash = h256_from_hex(hash_hex).expect("RPC error");
         assert_eq!(hash, [0x11; 32]);
 
         let bloom_hex = format!("0x{}", "00".repeat(256));
-        let bloom = bloom_from_hex(&bloom_hex).unwrap();
+        let bloom = bloom_from_hex(&bloom_hex).expect("RPC error");
         assert_eq!(bloom, empty_bloom());
 
         let addr_hex = "0x1111111111111111111111111111111111111111";
-        let addr = address_from_hex(addr_hex).unwrap();
+        let addr = address_from_hex(addr_hex).expect("RPC error");
         assert_eq!(addr, [0x11; 20]);
     }
 
     #[test]
     fn test_invalid_hex() {
         assert!(h256_from_hex("0x123").is_none()); // too short
-        assert!(h256_from_hex("0xzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz").is_none()); // invalid chars
+        assert!(h256_from_hex(
+            "0xzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
+        )
+        .is_none()); // invalid chars
         assert!(bloom_from_hex("0x00").is_none()); // wrong length
         assert!(address_from_hex("0x1234567890").is_none()); // too short
     }

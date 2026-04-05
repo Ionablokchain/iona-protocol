@@ -79,11 +79,7 @@ impl RemoteSigner {
         let url = format!("{}/pubkey", base_url.trim_end_matches('/'));
         debug!(url = %url, "fetching remote signer public key");
 
-        let r: PubkeyResp = client
-            .get(url)
-            .send()?
-            .error_for_status()?
-            .json()?;
+        let r: PubkeyResp = client.get(url).send()?.error_for_status()?.json()?;
 
         let pk = B64.decode(r.pubkey_base64.as_bytes())?;
         debug!("remote signer public key acquired");
@@ -132,15 +128,13 @@ impl RemoteSigner {
             .and_then(|r| r.error_for_status())
             .and_then(|r| r.json::<SignResp>())
         {
-            Ok(resp) => {
-                match B64.decode(resp.sig_base64.as_bytes()) {
-                    Ok(sig) => Some(SignatureBytes(sig)),
-                    Err(e) => {
-                        error!("remote signer returned invalid base64 signature: {}", e);
-                        None
-                    }
+            Ok(resp) => match B64.decode(resp.sig_base64.as_bytes()) {
+                Ok(sig) => Some(SignatureBytes(sig)),
+                Err(e) => {
+                    error!("remote signer returned invalid base64 signature: {}", e);
+                    None
                 }
-            }
+            },
             Err(e) => {
                 error!("remote signer request failed: {}", e);
                 None
@@ -170,7 +164,9 @@ impl Signer for RemoteSigner {
             Some(sig) => sig,
             None => {
                 // Return empty signature as a fallback; the consensus engine may treat this as a failure.
-                warn!("remote signer returned empty signature; will likely cause consensus failure");
+                warn!(
+                    "remote signer returned empty signature; will likely cause consensus failure"
+                );
                 SignatureBytes(vec![])
             }
         }
@@ -191,14 +187,14 @@ mod tests {
         let pubkey_mock = server.mock(|when, then| {
             when.method(GET).path("/pubkey");
             then.status(200)
-                .json_body(json!({ "pubkey_base64": base64::encode(&[0xaa; 32]) }));
+                .json_body(json!({ "pubkey_base64": B64.encode(&[0xaa; 32]) }));
         });
 
         // Mock /sign
         let sign_mock = server.mock(|when, then| {
             when.method(POST).path("/sign");
             then.status(200)
-                .json_body(json!({ "sig_base64": base64::encode(&[0xbb; 64]) }));
+                .json_body(json!({ "sig_base64": B64.encode(&[0xbb; 64]) }));
         });
 
         let signer = RemoteSigner::connect(server.base_url(), Duration::from_secs(2)).unwrap();
@@ -240,9 +236,10 @@ mod tests {
         let pubkey_mock = no_health_server.mock(|when, then| {
             when.method(GET).path("/pubkey");
             then.status(200)
-                .json_body(json!({ "pubkey_base64": base64::encode(&[0xaa; 32]) }));
+                .json_body(json!({ "pubkey_base64": B64.encode(&[0xaa; 32]) }));
         });
-        let signer2 = RemoteSigner::connect(no_health_server.base_url(), Duration::from_secs(2)).unwrap();
+        let signer2 =
+            RemoteSigner::connect(no_health_server.base_url(), Duration::from_secs(2)).unwrap();
         assert!(signer2.is_healthy()); // should fall back to /pubkey
         assert!(pubkey_mock.hits() >= 1);
     }
@@ -259,7 +256,7 @@ mod tests {
         let pubkey_mock = server.mock(|when, then| {
             when.method(GET).path("/pubkey");
             then.status(200)
-                .json_body(json!({ "pubkey_base64": base64::encode(&[0xaa; 32]) }));
+                .json_body(json!({ "pubkey_base64": B64.encode(&[0xaa; 32]) }));
         });
         let sign_mock = server.mock(|when, then| {
             when.method(POST).path("/sign");

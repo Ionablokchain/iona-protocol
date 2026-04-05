@@ -19,7 +19,9 @@
 //! | UC-8  | Quorum readiness          | Sufficient nodes should be ready before activation        |
 //! | UC-9  | Downgrade protection      | Downgrades are not allowed                                |
 
-use crate::protocol::version::{version_for_height, ProtocolActivation, SUPPORTED_PROTOCOL_VERSIONS};
+use crate::protocol::version::{
+    version_for_height, ProtocolActivation, SUPPORTED_PROTOCOL_VERSIONS,
+};
 use crate::storage::CURRENT_SCHEMA_VERSION;
 
 /// Minimum grace window for any PV activation, in blocks.
@@ -48,12 +50,12 @@ pub struct ConstraintReport {
 
 impl ConstraintReport {
     pub fn from_results(results: Vec<ConstraintResult>) -> Self {
-        let can_upgrade = results
-            .iter()
-            .filter(|r| r.hard)
-            .all(|r| r.passed);
+        let can_upgrade = results.iter().filter(|r| r.hard).all(|r| r.passed);
 
-        Self { results, can_upgrade }
+        Self {
+            results,
+            can_upgrade,
+        }
     }
 
     pub fn blockers(&self) -> Vec<&ConstraintResult> {
@@ -76,7 +78,11 @@ impl std::fmt::Display for ConstraintReport {
         writeln!(
             f,
             "Upgrade Constraints: {}",
-            if self.can_upgrade { "ALLOWED" } else { "BLOCKED" }
+            if self.can_upgrade {
+                "ALLOWED"
+            } else {
+                "BLOCKED"
+            }
         )?;
         for r in &self.results {
             let mark = if r.passed {
@@ -682,7 +688,14 @@ mod tests {
     fn test_can_upgrade_convenience() {
         let acts = valid_activations();
         assert!(can_upgrade(1, CURRENT_SCHEMA_VERSION, None, 0, 100, &acts));
-        assert!(!can_upgrade(3, CURRENT_SCHEMA_VERSION, Some(700), 150, 100, &acts));
+        assert!(!can_upgrade(
+            3,
+            CURRENT_SCHEMA_VERSION,
+            Some(700),
+            150,
+            100,
+            &acts
+        ));
     }
 
     #[test]

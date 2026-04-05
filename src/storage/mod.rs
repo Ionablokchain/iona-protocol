@@ -8,12 +8,11 @@
 //!
 //! It uses the underlying `DataLayout` for path management and atomic writes.
 
-
+pub mod block_store;
+pub mod evidence_store;
 pub mod layout;
 pub mod meta;
-pub mod evidence_store;
 pub mod migrations;
-pub mod block_store;
 pub mod peer_store;
 pub mod receipts_store;
 pub mod schema_monotonicity;
@@ -21,21 +20,18 @@ pub mod snapshots;
 
 use crate::crypto::ed25519::Ed25519Signer as Ed25519Keypair;
 use crate::crypto::keystore;
-use crate::storage::layout::DataLayout;
-use crate::execution::KvState;
-use crate::storage::meta::{NodeMeta, NodeMetaError};
 use crate::economics::staking::StakingState as StakeLedger;
+use crate::execution::KvState;
+use crate::storage::layout::DataLayout;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
 use std::io;
-use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub const CURRENT_SCHEMA_VERSION: u32 = 5;
 
 // Re-export current schema version for external use.
-
 
 /// Metadata stored in `<data_dir>/schema.json`.
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -119,7 +115,12 @@ impl DataDir {
     /// Notes:
     /// - For demos, keys are deterministically derived from `seed`.
     /// - In production, you should replace this with proper key management.
-    pub fn load_or_create_keys(&self, seed: u64, keystore: &str, password_env: &str) -> io::Result<Ed25519Keypair> {
+    pub fn load_or_create_keys(
+        &self,
+        seed: u64,
+        keystore: &str,
+        password_env: &str,
+    ) -> io::Result<Ed25519Keypair> {
         self.load_or_create_keys_with_fallback(seed, keystore, password_env, "")
     }
 
@@ -182,8 +183,9 @@ impl DataDir {
             // Plain JSON (demo/dev) - unencrypted at rest.
             if plain_path.exists() {
                 let s = fs::read_to_string(&plain_path)?;
-                let k: K = serde_json::from_str(&s)
-                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("keys.json parse: {e}")))?;
+                let k: K = serde_json::from_str(&s).map_err(|e| {
+                    io::Error::new(io::ErrorKind::InvalidData, format!("keys.json parse: {e}"))
+                })?;
                 Ok(Ed25519Keypair::from_seed(k.seed32))
             } else {
                 // Derive deterministic seed32.
@@ -191,8 +193,9 @@ impl DataDir {
                 seed32[..8].copy_from_slice(&seed.to_le_bytes());
                 let kp = Ed25519Keypair::from_seed(seed32);
 
-                let out = serde_json::to_string_pretty(&K { seed32 })
-                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("keys.json encode: {e}")))?;
+                let out = serde_json::to_string_pretty(&K { seed32 }).map_err(|e| {
+                    io::Error::new(io::ErrorKind::InvalidData, format!("keys.json encode: {e}"))
+                })?;
                 fs::write(&plain_path, out)?;
 
                 // Best-effort: make key file owner-readable only on unix.
@@ -216,8 +219,9 @@ impl DataDir {
         let path = self.layout.state_kv_path(); // was "state.json"
         if path.exists() {
             let s = fs::read_to_string(&path)?;
-            serde_json::from_str(&s)
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("state.json parse: {e}")))
+            serde_json::from_str(&s).map_err(|e| {
+                io::Error::new(io::ErrorKind::InvalidData, format!("state.json parse: {e}"))
+            })
         } else {
             Ok(BTreeMap::new())
         }
@@ -226,8 +230,12 @@ impl DataDir {
     pub fn save_state_kv(&self, state: &BTreeMap<String, String>) -> io::Result<()> {
         self.ensure()?;
         let path = self.layout.state_kv_path();
-        let out = serde_json::to_string_pretty(state)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("state.json encode: {e}")))?;
+        let out = serde_json::to_string_pretty(state).map_err(|e| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("state.json encode: {e}"),
+            )
+        })?;
         DataLayout::atomic_write(&path, out.as_bytes())?;
         Ok(())
     }
@@ -237,8 +245,12 @@ impl DataDir {
         let path = self.layout.state_full_path();
         if path.exists() {
             let s = fs::read_to_string(&path)?;
-            serde_json::from_str(&s)
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("state_full.json parse: {e}")))
+            serde_json::from_str(&s).map_err(|e| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("state_full.json parse: {e}"),
+                )
+            })
         } else {
             Ok(KvState::default())
         }
@@ -247,8 +259,12 @@ impl DataDir {
     pub fn save_state_full(&self, state: &KvState) -> io::Result<()> {
         self.ensure()?;
         let path = self.layout.state_full_path();
-        let out = serde_json::to_string_pretty(state)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("state_full.json encode: {e}")))?;
+        let out = serde_json::to_string_pretty(state).map_err(|e| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("state_full.json encode: {e}"),
+            )
+        })?;
         DataLayout::atomic_write(&path, out.as_bytes())?;
         Ok(())
     }
@@ -262,8 +278,12 @@ impl DataDir {
         let path = self.layout.stakes_path();
         if path.exists() {
             let s = fs::read_to_string(&path)?;
-            serde_json::from_str(&s)
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("stakes.json parse: {e}")))
+            serde_json::from_str(&s).map_err(|e| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("stakes.json parse: {e}"),
+                )
+            })
         } else {
             Ok(StakeLedger::default_demo())
         }
@@ -272,8 +292,12 @@ impl DataDir {
     pub fn save_stakes(&self, stakes: &StakeLedger) -> io::Result<()> {
         self.ensure()?;
         let path = self.layout.stakes_path();
-        let out = serde_json::to_string_pretty(stakes)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("stakes.json encode: {e}")))?;
+        let out = serde_json::to_string_pretty(stakes).map_err(|e| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("stakes.json encode: {e}"),
+            )
+        })?;
         DataLayout::atomic_write(&path, out.as_bytes())?;
         Ok(())
     }
@@ -289,16 +313,24 @@ impl DataDir {
             return Ok(0);
         }
         let s = fs::read_to_string(&path)?;
-        let meta: SchemaMeta = serde_json::from_str(&s)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("schema.json parse: {e}")))?;
+        let meta: SchemaMeta = serde_json::from_str(&s).map_err(|e| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("schema.json parse: {e}"),
+            )
+        })?;
         Ok(meta.version)
     }
 
     /// Persist the schema metadata atomically.
     fn write_schema(&self, meta: &SchemaMeta) -> io::Result<()> {
         let path = self.layout.schema_path();
-        let json = serde_json::to_string_pretty(meta)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("schema.json encode: {e}")))?;
+        let json = serde_json::to_string_pretty(meta).map_err(|e| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("schema.json encode: {e}"),
+            )
+        })?;
         DataLayout::atomic_write(&path, json.as_bytes())
     }
 
@@ -309,9 +341,8 @@ impl DataDir {
         match from_version {
             // v0 → v1: Introduce schema.json marker.
             0 => {
-                meta.migration_log.push(format!(
-                    "[{timestamp}] v0 → v1: schema.json marker created"
-                ));
+                meta.migration_log
+                    .push(format!("[{timestamp}] v0 → v1: schema.json marker created"));
             }
 
             // v1 → v2: Normalize state_full.json and stakes.json (add missing fields).
@@ -327,9 +358,11 @@ impl DataDir {
                     let mut val: serde_json::Value = serde_json::from_str(&raw)
                         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
                     if let Some(obj) = val.as_object_mut() {
-                        obj.entry("vm").or_insert_with(|| serde_json::json!({
-                            "storage": {}, "code": {}, "nonces": {}, "logs": []
-                        }));
+                        obj.entry("vm").or_insert_with(|| {
+                            serde_json::json!({
+                                "storage": {}, "code": {}, "nonces": {}, "logs": []
+                            })
+                        });
                         obj.entry("burned").or_insert(serde_json::Value::from(0u64));
                     }
                     let normalised = serde_json::to_string_pretty(&val)
@@ -348,7 +381,8 @@ impl DataDir {
                     let mut val: serde_json::Value = serde_json::from_str(&raw)
                         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
                     if let Some(obj) = val.as_object_mut() {
-                        obj.entry("epoch_snapshots").or_insert_with(|| serde_json::json!([]));
+                        obj.entry("epoch_snapshots")
+                            .or_insert_with(|| serde_json::json!([]));
                         obj.entry("params").or_insert_with(|| serde_json::json!({}));
                     }
                     let normalised = serde_json::to_string_pretty(&val)
@@ -450,10 +484,7 @@ impl DataDir {
         meta.migrated_at = Some(now_iso8601());
         self.write_schema(&meta)?;
 
-        tracing::info!(
-            version = CURRENT_SCHEMA_VERSION,
-            "schema fully migrated"
-        );
+        tracing::info!(version = CURRENT_SCHEMA_VERSION, "schema fully migrated");
         Ok(())
     }
 }
@@ -483,12 +514,27 @@ fn days_to_ymd(mut days: u64) -> (u64, u64, u64) {
     let mut y = 1970u64;
     loop {
         let year_days = if is_leap(y) { 366 } else { 365 };
-        if days < year_days { break; }
+        if days < year_days {
+            break;
+        }
         days -= year_days;
         y += 1;
     }
     let leap = is_leap(y);
-    let month_days: [u64; 12] = [31, if leap {29} else {28}, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    let month_days: [u64; 12] = [
+        31,
+        if leap { 29 } else { 28 },
+        31,
+        30,
+        31,
+        30,
+        31,
+        31,
+        30,
+        31,
+        30,
+        31,
+    ];
     let mut mo = 0usize;
     while mo < 12 && days >= month_days[mo] {
         days -= month_days[mo];

@@ -14,6 +14,7 @@ pub fn migrate(layout: &DataLayout, meta: &mut SchemaMeta) -> io::Result<()> {
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
         DataLayout::atomic_write(&node_meta_path, json.as_bytes())?;
     }
-    meta.migration_log.push(format!("v3 → v4: node_meta.json created"));
+    meta.migration_log
+        .push(format!("v3 → v4: node_meta.json created"));
     Ok(())
 }

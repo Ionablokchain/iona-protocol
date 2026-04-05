@@ -1,6 +1,5 @@
-
-use iona::consensus::{SimpleBlockProducer, SimpleProducerCfg};
 use iona::consensus::block_producer::ValidatorIdentity;
+use iona::consensus::{SimpleBlockProducer, SimpleProducerCfg};
 use iona::crypto::ed25519::Ed25519Keypair;
 use iona::crypto::Signer;
 use iona::execution::KvState;
@@ -16,9 +15,15 @@ fn round_robin_producer_broadcasts_proposal() {
     let addr3 = hex::encode(&blake3::hash(&k3.public_key().0).as_bytes()[..20]);
 
     let validators = vec![
-        ValidatorIdentity { address: addr1.clone() },
-        ValidatorIdentity { address: addr2.clone() },
-        ValidatorIdentity { address: addr3.clone() },
+        ValidatorIdentity {
+            address: addr1.clone(),
+        },
+        ValidatorIdentity {
+            address: addr2.clone(),
+        },
+        ValidatorIdentity {
+            address: addr3.clone(),
+        },
     ];
 
     let producer = SimpleBlockProducer::new(SimpleProducerCfg {
@@ -32,27 +37,44 @@ fn round_robin_producer_broadcasts_proposal() {
 
     // Height=1, round=0 => k2 is proposer (idx = (1+0)%3 = 1)
     let result = producer.try_produce(
-        1,                              // height
-        0,                              // round
-        None,                           // valid_round
-        prev_block_id,                  // prev_block_id
-        &app_state,                     // app_state
-        0,                              // base_fee
-        &k2,                            // signer
-        &addr2,                         // proposer_addr
-        k2.public_key().0.clone(),      // proposer_pubkey_bytes
-        &validators,                    // validators
-        &[],                            // mempool_txs
-        false,                          // already_proposed
+        1,                         // height
+        0,                         // round
+        None,                      // valid_round
+        prev_block_id,             // prev_block_id
+        &app_state,                // app_state
+        0,                         // base_fee
+        &k2,                       // signer
+        &addr2,                    // proposer_addr
+        k2.public_key().0.clone(), // proposer_pubkey_bytes
+        &validators,               // validators
+        &[],                       // mempool_txs
+        false,                     // already_proposed
     );
 
-    assert!(result.is_ok(), "try_produce should not return error: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "try_produce should not return error: {:?}",
+        result.err()
+    );
 
     // Height=2, round=0 => k3 is proposer
     let result2 = producer.try_produce(
-        2, 0, None, prev_block_id, &app_state, 0,
-        &k3, &addr3, k3.public_key().0.clone(),
-        &validators, &[], false,
+        2,
+        0,
+        None,
+        prev_block_id,
+        &app_state,
+        0,
+        &k3,
+        &addr3,
+        k3.public_key().0.clone(),
+        &validators,
+        &[],
+        false,
     );
-    assert!(result2.is_ok(), "try_produce should not error: {:?}", result2.err());
+    assert!(
+        result2.is_ok(),
+        "try_produce should not error: {:?}",
+        result2.err()
+    );
 }

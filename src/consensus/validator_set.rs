@@ -37,7 +37,11 @@ impl ValidatorSet {
     /// Get the voting power of a validator by public key.
     /// Returns 0 if the validator is not in the set.
     pub fn power_of(&self, pk: &PublicKeyBytes) -> VotingPower {
-        self.vals.iter().find(|v| &v.pk == pk).map(|v| v.power).unwrap_or(0)
+        self.vals
+            .iter()
+            .find(|v| &v.pk == pk)
+            .map(|v| v.power)
+            .unwrap_or(0)
     }
 
     /// Check if a validator is in the set (has power > 0).
@@ -114,10 +118,7 @@ mod tests {
 
     #[test]
     fn test_power_of() {
-        let vset = make_vset(vec![
-            make_validator(1, 10),
-            make_validator(2, 20),
-        ]);
+        let vset = make_vset(vec![make_validator(1, 10), make_validator(2, 20)]);
         let pk1 = PublicKeyBytes(vec![1; 32]);
         let pk2 = PublicKeyBytes(vec![2; 32]);
         let pk3 = PublicKeyBytes(vec![3; 32]);
@@ -128,9 +129,7 @@ mod tests {
 
     #[test]
     fn test_contains() {
-        let vset = make_vset(vec![
-            make_validator(1, 10),
-        ]);
+        let vset = make_vset(vec![make_validator(1, 10)]);
         let pk1 = PublicKeyBytes(vec![1; 32]);
         let pk2 = PublicKeyBytes(vec![2; 32]);
         assert!(vset.contains(&pk1));
@@ -187,10 +186,7 @@ mod tests {
 
     #[test]
     fn test_iter() {
-        let vset = make_vset(vec![
-            make_validator(1, 10),
-            make_validator(2, 20),
-        ]);
+        let vset = make_vset(vec![make_validator(1, 10), make_validator(2, 20)]);
         let pks: Vec<u8> = vset.iter().map(|v| v.pk.0[0]).collect();
         assert_eq!(pks, vec![1, 2]);
     }

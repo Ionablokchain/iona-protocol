@@ -40,24 +40,24 @@
 //!
 //! For detailed documentation, see the respective submodules.
 
-pub mod messages;
-pub mod validator_set;
-pub mod quorum;
-pub mod engine;
-pub mod double_sign;
 pub mod block_producer;
+pub mod debug_trace;
+pub mod diagnostic;
+pub mod double_sign;
+pub mod engine;
 pub mod fast_finality;
 pub mod genesis;
+pub mod messages;
+pub mod quorum;
 pub mod quorum_diag;
-pub mod diagnostic;
-pub mod debug_trace;
+pub mod validator_set;
 
 // Re‑export core types for convenience.
-pub use messages::*;
-pub use validator_set::*;
-pub use quorum::*;
-pub use engine::*;
-pub use double_sign::*;
 pub use block_producer::*;
+pub use double_sign::*;
+pub use engine::*;
 pub use fast_finality::*;
-pub use genesis::GenesisConfig; // explicitly re‑export the genesis config
+pub use genesis::GenesisConfig;
+pub use messages::*;
+pub use quorum::*;
+pub use validator_set::*; // explicitly re‑export the genesis config

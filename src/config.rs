@@ -8,7 +8,7 @@ pub mod validation;
 
 use serde::{Deserialize, Serialize};
 use std::env;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 // -----------------------------------------------------------------------------
 // Main configuration struct
@@ -217,15 +217,27 @@ impl NodeConfig {
                 ["node", "keystore"] => self.node.keystore = value,
                 ["node", "keystore_password"] => self.node.keystore_password = value,
                 ["node", "keystore_password_env"] => self.node.keystore_password_env = value,
-                ["consensus", "propose_timeout_ms"] => self.consensus.propose_timeout_ms = value.parse()?,
-                ["consensus", "prevote_timeout_ms"] => self.consensus.prevote_timeout_ms = value.parse()?,
-                ["consensus", "precommit_timeout_ms"] => self.consensus.precommit_timeout_ms = value.parse()?,
-                ["consensus", "max_txs_per_block"] => self.consensus.max_txs_per_block = value.parse()?,
+                ["consensus", "propose_timeout_ms"] => {
+                    self.consensus.propose_timeout_ms = value.parse()?
+                }
+                ["consensus", "prevote_timeout_ms"] => {
+                    self.consensus.prevote_timeout_ms = value.parse()?
+                }
+                ["consensus", "precommit_timeout_ms"] => {
+                    self.consensus.precommit_timeout_ms = value.parse()?
+                }
+                ["consensus", "max_txs_per_block"] => {
+                    self.consensus.max_txs_per_block = value.parse()?
+                }
                 ["consensus", "gas_target"] => self.consensus.gas_target = value.parse()?,
                 ["consensus", "fast_quorum"] => self.consensus.fast_quorum = value.parse()?,
-                ["consensus", "initial_base_fee"] => self.consensus.initial_base_fee = value.parse()?,
+                ["consensus", "initial_base_fee"] => {
+                    self.consensus.initial_base_fee = value.parse()?
+                }
                 ["consensus", "stake_each"] => self.consensus.stake_each = value.parse()?,
-                ["consensus", "simple_producer"] => self.consensus.simple_producer = value.parse()?,
+                ["consensus", "simple_producer"] => {
+                    self.consensus.simple_producer = value.parse()?
+                }
                 // ... more fields can be added
                 _ => {}
             }
@@ -568,7 +580,7 @@ impl Default for GovernanceSection {
         Self {
             min_deposit: 1_000_000,
             voting_epochs: 100,
-            quorum_bps: 3340,  // 33.4%
+            quorum_bps: 3340,    // 33.4%
             threshold_bps: 5000, // 50%
         }
     }
@@ -586,12 +598,12 @@ pub struct EconomicsSection {
 impl Default for EconomicsSection {
     fn default() -> Self {
         Self {
-            base_inflation_bps: 500,          // 5% annual
-            min_stake: 10_000_000_000,        // 10 billion base units
-            slash_double_sign_bps: 5000,      // 50%
-            slash_downtime_bps: 100,          // 1%
+            base_inflation_bps: 500,     // 5% annual
+            min_stake: 10_000_000_000,   // 10 billion base units
+            slash_double_sign_bps: 5000, // 50%
+            slash_downtime_bps: 100,     // 1%
             unbonding_epochs: 14,
-            treasury_bps: 500,                // 5%
+            treasury_bps: 500, // 5%
         }
     }
 }

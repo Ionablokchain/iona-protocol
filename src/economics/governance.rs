@@ -40,7 +40,7 @@ pub struct Proposal {
 pub enum ProposalResult {
     Passed,
     Rejected,
-    Expired,   // did not meet quorum
+    Expired, // did not meet quorum
 }
 
 // -----------------------------------------------------------------------------
@@ -63,10 +63,10 @@ pub struct GovernanceParams {
 impl Default for GovernanceParams {
     fn default() -> Self {
         Self {
-            min_deposit: 1_000_000,          // 1 M tokens
-            voting_period_epochs: 100,        // 100 epochs
-            quorum_bps: 3340,                 // 33.4% of total stake must vote
-            threshold_bps: 5000,              // 50% of votes must be yes
+            min_deposit: 1_000_000,    // 1 M tokens
+            voting_period_epochs: 100, // 100 epochs
+            quorum_bps: 3340,          // 33.4% of total stake must vote
+            threshold_bps: 5000,       // 50% of votes must be yes
         }
     }
 }
@@ -84,12 +84,7 @@ pub struct GovernanceState {
 impl GovernanceState {
     /// Submits a new proposal.
     /// Returns the proposal ID, or `None` if deposit is insufficient.
-    pub fn submit(
-        &mut self,
-        kind: ProposalKind,
-        deposit: u128,
-        current_epoch: u64,
-    ) -> Option<u64> {
+    pub fn submit(&mut self, kind: ProposalKind, deposit: u128, current_epoch: u64) -> Option<u64> {
         if deposit < self.params.min_deposit {
             return None;
         }
@@ -115,7 +110,12 @@ impl GovernanceState {
 
     /// Tally votes for a proposal, using the current total stake (passed as argument).
     /// Returns `(yes_stake, no_stake)`.
-    pub fn tally(&self, proposal_id: u64, total_stake: u128, stake_of: impl Fn(&str) -> u128) -> (u128, u128) {
+    pub fn tally(
+        &self,
+        proposal_id: u64,
+        _total_stake: u128,
+        stake_of: impl Fn(&str) -> u128,
+    ) -> (u128, u128) {
         let mut yes = 0u128;
         let mut no = 0u128;
         for ((pid, voter), &vote) in &self.votes {
@@ -134,7 +134,12 @@ impl GovernanceState {
 
     /// Determines the outcome of a proposal based on stake votes and quorum.
     /// Returns `Some(ProposalResult)` if the proposal can be finalized.
-    pub fn evaluate(&self, proposal_id: u64, total_stake: u128, stake_of: impl Fn(&str) -> u128) -> Option<ProposalResult> {
+    pub fn evaluate(
+        &self,
+        proposal_id: u64,
+        total_stake: u128,
+        stake_of: impl Fn(&str) -> u128,
+    ) -> Option<ProposalResult> {
         let proposal = self.proposals.get(&proposal_id)?;
         if proposal.processed {
             return proposal.result;
@@ -168,7 +173,10 @@ impl GovernanceState {
         total_stake: u128,
         stake_of: impl Fn(&str) -> u128,
     ) -> Result<Option<ProposalResult>, &'static str> {
-        let proposal = self.proposals.get(&proposal_id).ok_or("Proposal not found")?;
+        let proposal = self
+            .proposals
+            .get(&proposal_id)
+            .ok_or("Proposal not found")?;
         if proposal.processed {
             return Ok(proposal.result);
         }
@@ -177,8 +185,13 @@ impl GovernanceState {
         }
 
         // Determine result (may be None if quorum not met even after end_epoch)
-        let result = self.evaluate(proposal_id, total_stake, stake_of).unwrap_or(ProposalResult::Expired);
-        let proposal = self.proposals.get_mut(&proposal_id).ok_or("Proposal not found")?;
+        let result = self
+            .evaluate(proposal_id, total_stake, stake_of)
+            .unwrap_or(ProposalResult::Expired);
+        let proposal = self
+            .proposals
+            .get_mut(&proposal_id)
+            .ok_or("Proposal not found")?;
         proposal.result = Some(result);
         proposal.processed = true;
 
@@ -191,8 +204,15 @@ impl GovernanceState {
 
     /// Execute a passed proposal. This should be called after finalization, e.g., at the next block.
     /// Returns `Ok(())` if execution was successful, `Err` otherwise.
-    pub fn execute(&self, proposal_id: u64, executor: impl FnOnce(&ProposalKind) -> Result<(), String>) -> Result<(), String> {
-        let proposal = self.proposals.get(&proposal_id).ok_or("Proposal not found")?;
+    pub fn execute(
+        &self,
+        proposal_id: u64,
+        executor: impl FnOnce(&ProposalKind) -> Result<(), String>,
+    ) -> Result<(), String> {
+        let proposal = self
+            .proposals
+            .get(&proposal_id)
+            .ok_or("Proposal not found")?;
         if !proposal.processed {
             return Err("Proposal not yet processed".into());
         }
@@ -220,6 +240,61 @@ impl GovernanceState {
     }
 }
 
+// -----------------------------------------------------------------------------
+// Public helper functions (used by other modules)
+// -----------------------------------------------------------------------------
+
+pub fn submit_proposal(
+    state: &mut GovernanceState,
+    kind: ProposalKind,
+    deposit: u128,
+    current_epoch: u64,
+) -> Option<u64> {
+    state.submit(kind, deposit, current_epoch)
+}
+
+pub fn vote(state: &mut GovernanceState, proposal_id: u64, voter: String, yes: bool) {
+    state.vote(proposal_id, voter, yes);
+}
+
+pub fn process_proposals(
+    state: &mut GovernanceState,
+    current_epoch: u64,
+    total_stake: u128,
+    stake_of: impl Fn(&str) -> u128,
+) {
+    let ids: Vec<u64> = state.proposals.keys().cloned().collect();
+    for id in ids {
+        let should_process = state
+            .proposals
+            .get(&id)
+            .map(|p| !p.processed && current_epoch >= p.end_epoch)
+            .unwrap_or(false);
+        if should_process {
+            let (yes_stake, no_stake) = state.tally(id, total_stake, &stake_of);
+            let total_voted = yes_stake + no_stake;
+            let quorum_met = total_voted * 10_000 >= total_stake * state.params.quorum_bps as u128;
+            let threshold_met = total_voted > 0
+                && yes_stake * 10_000 >= total_voted * state.params.threshold_bps as u128;
+            let result = if !quorum_met {
+                ProposalResult::Expired
+            } else if threshold_met {
+                ProposalResult::Passed
+            } else {
+                ProposalResult::Rejected
+            };
+            if let Some(p) = state.proposals.get_mut(&id) {
+                p.processed = true;
+                p.result = Some(result);
+            }
+        }
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Tests
+// -----------------------------------------------------------------------------
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -227,7 +302,7 @@ mod tests {
     fn stake_of(addr: &str) -> u128 {
         match addr {
             "alice" => 500_000,
-            "bob"   => 300_000,
+            "bob" => 300_000,
             "carol" => 200_000,
             _ => 0,
         }
@@ -244,7 +319,16 @@ mod tests {
         gov.params = params;
 
         let epoch = 0;
-        let id = gov.submit(ProposalKind::ParamChange { key: "foo".into(), value: "bar".into() }, 1_000_000, epoch).unwrap();
+        let id = gov
+            .submit(
+                ProposalKind::ParamChange {
+                    key: "foo".into(),
+                    value: "bar".into(),
+                },
+                1_000_000,
+                epoch,
+            )
+            .unwrap();
 
         // Vote
         gov.vote(id, "alice".into(), true);
@@ -252,11 +336,15 @@ mod tests {
         gov.vote(id, "carol".into(), true);
 
         // Not yet final (epoch still inside voting period)
-        let res = gov.try_finalize(id, epoch + 50, total_stake(), stake_of).unwrap();
+        let res = gov
+            .try_finalize(id, epoch + 50, total_stake(), stake_of)
+            .unwrap();
         assert!(res.is_none());
 
         // After voting period ends
-        let res = gov.try_finalize(id, epoch + 101, total_stake(), stake_of).unwrap();
+        let res = gov
+            .try_finalize(id, epoch + 101, total_stake(), stake_of)
+            .unwrap();
         assert_eq!(res, Some(ProposalResult::Passed));
 
         // Execute
@@ -278,11 +366,22 @@ mod tests {
     #[test]
     fn test_quorum_failure() {
         let mut gov = GovernanceState::default();
-        let mut params = GovernanceParams::default();
-        params.quorum_bps = 5000; // 50% of total stake must vote
+        let params = GovernanceParams {
+            quorum_bps: 5000,
+            ..Default::default()
+        };
         gov.params = params;
 
-        let id = gov.submit(ProposalKind::ParamChange { key: "x".into(), value: "y".into() }, 1_000_000, 0).unwrap();
+        let id = gov
+            .submit(
+                ProposalKind::ParamChange {
+                    key: "x".into(),
+                    value: "y".into(),
+                },
+                1_000_000,
+                0,
+            )
+            .unwrap();
         gov.vote(id, "alice".into(), true); // 500 000 stake votes, but total = 1 000 000, quorum = 500 000, ok
 
         // Let it expire
@@ -290,32 +389,20 @@ mod tests {
         assert_eq!(res, Some(ProposalResult::Passed)); // passed because yes stake >= threshold
 
         // Now test no quorum: reduce total stake but keep same votes
-        let id2 = gov.submit(ProposalKind::ParamChange { key: "x".into(), value: "y".into() }, 1_000_000, 0).unwrap();
+        let id2 = gov
+            .submit(
+                ProposalKind::ParamChange {
+                    key: "x".into(),
+                    value: "y".into(),
+                },
+                1_000_000,
+                0,
+            )
+            .unwrap();
         gov.vote(id2, "alice".into(), true);
         // Pretend total stake is 2 000 000, quorum needs 1 000 000, but alice only has 500 000
         let huge_total = 2_000_000;
         let res = gov.try_finalize(id2, 101, huge_total, stake_of).unwrap();
         assert_eq!(res, Some(ProposalResult::Expired));
-    }
-}
-
-pub fn submit_proposal(state: &mut GovernanceState, kind: ProposalKind, deposit: u128, current_epoch: u64) -> Option<u64> {
-    state.submit(kind, deposit, current_epoch)
-}
-pub fn vote(state: &mut GovernanceState, proposal_id: u64, voter: String, yes: bool) {
-    state.vote(proposal_id, voter, yes);
-}
-pub fn process_proposals(state: &mut GovernanceState, current_epoch: u64, total_stake: u128, stake_of: impl Fn(&str) -> u128) {
-    let ids: Vec<u64> = state.proposals.keys().cloned().collect();
-    for id in ids {
-        let should_process = state.proposals.get(&id).map(|p| !p.processed && current_epoch >= p.end_epoch).unwrap_or(false);
-        if should_process {
-            let (yes_stake, no_stake) = state.tally(id, total_stake, &stake_of);
-            let total_voted = yes_stake + no_stake;
-            let quorum_met = total_voted * 10_000 >= total_stake * state.params.quorum_bps as u128;
-            let threshold_met = total_voted > 0 && yes_stake * 10_000 >= total_voted * state.params.threshold_bps as u128;
-            let result = if !quorum_met { ProposalResult::Expired } else if threshold_met { ProposalResult::Passed } else { ProposalResult::Rejected };
-            if let Some(p) = state.proposals.get_mut(&id) { p.processed = true; p.result = Some(result); }
-        }
     }
 }

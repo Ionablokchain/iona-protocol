@@ -1,5 +1,4 @@
 /// Transaction signing and address derivation.
-
 use crate::crypto::ed25519::Ed25519Signer;
 use crate::crypto::Signer;
 use crate::crypto::{PublicKeyBytes, SignatureBytes};
@@ -39,8 +38,8 @@ pub fn sign_tx(tx: &mut Tx, signer: &Ed25519Signer) {
 
 /// Verify a transaction's signature.
 pub fn verify_tx_signature(tx: &Tx) -> Result<(), crate::crypto::CryptoError> {
-    use crate::crypto::Verifier;
     use crate::crypto::ed25519::Ed25519Verifier;
+    use crate::crypto::Verifier;
 
     let msg = tx_sign_bytes(tx);
     let pk = PublicKeyBytes(tx.pubkey.clone());

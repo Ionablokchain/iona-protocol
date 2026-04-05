@@ -30,6 +30,6 @@ pub mod withdrawals;
 pub use router::serve;
 
 // Re‑export commonly used types for convenience
-pub use eth_rpc::{EthRpcState, Block, Receipt, TxRecord, Log};
+pub use eth_rpc::{Block, EthRpcState, Log, Receipt, TxRecord};
 pub use txpool::TxPool;
 pub use withdrawals::Withdrawal;

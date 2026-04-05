@@ -159,7 +159,10 @@ async fn main() -> anyhow::Result<()> {
 
     // Initialise logging.
     init_logging(&args.log_level)?;
-    info!("Starting IONA chaos harness (version {})", env!("CARGO_PKG_VERSION"));
+    info!(
+        "Starting IONA chaos harness (version {})",
+        env!("CARGO_PKG_VERSION")
+    );
 
     let mut children: Vec<Option<Child>> = (0..args.nodes).map(|_| None).collect();
 
@@ -286,11 +289,9 @@ async fn main() -> anyhow::Result<()> {
 fn init_logging(level: &str) -> anyhow::Result<()> {
     use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new(level));
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(level));
 
     let subscriber = fmt::Subscriber::builder()
-        
         .with_target(true)
         .with_thread_ids(false)
         .with_env_filter(filter)

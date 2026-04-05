@@ -23,8 +23,8 @@
 //!   vm call         Read‑only call to a contract
 //!   vm deploy       Generate deploy contract tx payload
 
-use std::process;
 use serde_json::Value;
+use std::process;
 
 // Default RPC endpoint
 const DEFAULT_RPC: &str = "http://127.0.0.1:8080";
@@ -119,7 +119,8 @@ fn http_get(url: &str) -> Result<Value, String> {
     let response = ureq::get(url)
         .call()
         .map_err(|e| format!("HTTP GET {}: {}", url, e))?;
-    response.into_json::<Value>()
+    response
+        .into_json::<Value>()
         .map_err(|e| format!("JSON parse error: {}", e))
 }
 
@@ -129,13 +130,17 @@ fn http_post(url: &str, body: Value) -> Result<Value, String> {
         .set("Content-Type", "application/json")
         .send_json(body)
         .map_err(|e| format!("HTTP POST {}: {}", url, e))?;
-    response.into_json::<Value>()
+    response
+        .into_json::<Value>()
         .map_err(|e| format!("JSON parse error: {}", e))
 }
 
 /// Pretty‑print JSON value
 fn print_json(v: &Value) {
-    println!("{}", serde_json::to_string_pretty(v).unwrap_or_else(|_| v.to_string()));
+    println!(
+        "{}",
+        serde_json::to_string_pretty(v).unwrap_or_else(|_| v.to_string())
+    );
 }
 
 /// Exit with error message
@@ -154,7 +159,8 @@ fn require(args: &[String], idx: usize, usage_hint: &str) -> String {
 
 /// Parse a u64 amount from string, with error handling
 fn parse_amount(s: &str, field: &str) -> u64 {
-    s.parse().unwrap_or_else(|_| die(&format!("Invalid {}: '{}'", field, s)))
+    s.parse()
+        .unwrap_or_else(|_| die(&format!("Invalid {}: '{}'", field, s)))
 }
 
 /// Normalize address (remove 0x prefix, lowercase)
@@ -195,12 +201,10 @@ fn cmd_nonce(rpc: &str, address: &str) {
 
 fn cmd_kv_get(rpc: &str, key: &str) {
     match http_get(&format!("{}/state", rpc)) {
-        Ok(v) => {
-            match v["kv"].get(key) {
-                Some(val) if !val.is_null() => println!("{} = {}", key, val),
-                _ => println!("Key '{}' not found", key),
-            }
-        }
+        Ok(v) => match v["kv"].get(key) {
+            Some(val) if !val.is_null() => println!("{} = {}", key, val),
+            _ => println!("Key '{}' not found", key),
+        },
         Err(e) => die(&e),
     }
 }
@@ -265,7 +269,10 @@ fn print_staking_payload(action: &str, args: &str, usage_hint: &str) {
         "signature": "<your_signature_hex>"
     });
     println!("Example JSON:");
-    println!("{}", serde_json::to_string_pretty(&example).expect("example config serialization failed"));
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&example).expect("example config serialization failed")
+    );
 }
 
 fn cmd_gov_list(rpc: &str) {
@@ -331,7 +338,10 @@ fn cmd_gov_propose(args: &[String]) {
         "signature": "<your_signature_hex>"
     });
     println!("Example JSON:");
-    println!("{}", serde_json::to_string_pretty(&example).expect("example config serialization failed"));
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&example).expect("example config serialization failed")
+    );
 }
 
 fn cmd_gov_vote(id_str: &str, vote_str: &str) {
@@ -358,7 +368,10 @@ fn cmd_gov_vote(id_str: &str, vote_str: &str) {
         "signature": "<your_signature_hex>"
     });
     println!("Example JSON:");
-    println!("{}", serde_json::to_string_pretty(&example).expect("example config serialization failed"));
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&example).expect("example config serialization failed")
+    );
 }
 
 fn cmd_faucet(rpc: &str, address: &str, amount: &str) {
@@ -409,7 +422,10 @@ fn print_vm_deploy_help(init_code_hex: &str) {
         "signature": "<your_signature_hex>"
     });
     println!("Example JSON:");
-    println!("{}", serde_json::to_string_pretty(&example).expect("example config serialization failed"));
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&example).expect("example config serialization failed")
+    );
     println!();
     println!("After deploy, call the contract with:");
     println!("  iona-cli vm call <contract_address_from_receipt> <calldata_hex>");
@@ -500,47 +516,45 @@ fn main() {
                 }
                 Some(sub) => {
                     eprintln!("Unknown staking subcommand: {}", sub);
-                    eprintln!("Usage: staking <info|delegate|undelegate|withdraw|register|deregister>");
+                    eprintln!(
+                        "Usage: staking <info|delegate|undelegate|withdraw|register|deregister>"
+                    );
                     process::exit(1);
                 }
             }
         }
 
-        Some("gov") => {
-            match pos.get(1).map(|s| s.as_str()) {
-                Some("propose") => cmd_gov_propose(&pos[2..]),
-                Some("vote") => {
-                    let id = require(&pos, 2, "gov vote <id> yes|no");
-                    let vote = require(&pos, 3, "gov vote <id> yes|no");
-                    cmd_gov_vote(&id, &vote);
-                }
-                Some("list") => cmd_gov_list(&rpc),
-                _ => {
-                    eprintln!("Usage: gov <propose|vote|list>");
-                    process::exit(1);
-                }
+        Some("gov") => match pos.get(1).map(|s| s.as_str()) {
+            Some("propose") => cmd_gov_propose(&pos[2..]),
+            Some("vote") => {
+                let id = require(&pos, 2, "gov vote <id> yes|no");
+                let vote = require(&pos, 3, "gov vote <id> yes|no");
+                cmd_gov_vote(&id, &vote);
             }
-        }
+            Some("list") => cmd_gov_list(&rpc),
+            _ => {
+                eprintln!("Usage: gov <propose|vote|list>");
+                process::exit(1);
+            }
+        },
 
-        Some("vm") => {
-            match pos.get(1).map(|s| s.as_str()) {
-                Some("state") | None => cmd_vm_state(&rpc),
-                Some("call") => {
-                    let contract = require(&pos, 2, "vm call <contract_hex> [calldata_hex]");
-                    let calldata = pos.get(3).cloned().unwrap_or_default();
-                    cmd_vm_call(&rpc, &contract, &calldata);
-                }
-                Some("deploy") => {
-                    let init_code = require(&pos, 2, "vm deploy <init_code_hex>");
-                    print_vm_deploy_help(&init_code);
-                }
-                Some(sub) => {
-                    eprintln!("Unknown vm subcommand: {}", sub);
-                    eprintln!("Usage: vm <state|call|deploy>");
-                    process::exit(1);
-                }
+        Some("vm") => match pos.get(1).map(|s| s.as_str()) {
+            Some("state") | None => cmd_vm_state(&rpc),
+            Some("call") => {
+                let contract = require(&pos, 2, "vm call <contract_hex> [calldata_hex]");
+                let calldata = pos.get(3).cloned().unwrap_or_default();
+                cmd_vm_call(&rpc, &contract, &calldata);
             }
-        }
+            Some("deploy") => {
+                let init_code = require(&pos, 2, "vm deploy <init_code_hex>");
+                print_vm_deploy_help(&init_code);
+            }
+            Some(sub) => {
+                eprintln!("Unknown vm subcommand: {}", sub);
+                eprintln!("Usage: vm <state|call|deploy>");
+                process::exit(1);
+            }
+        },
 
         Some("faucet") => {
             let addr = require(&pos, 1, "faucet <address> <amount>");

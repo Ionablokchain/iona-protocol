@@ -16,8 +16,8 @@
 //! (if stored in node_meta.json) to detect tampering.
 
 use crate::consensus::validator_set::{Validator, ValidatorSet, VotingPower};
-use crate::crypto::{PublicKeyBytes, Signer, ed25519::Ed25519Keypair};
-use crate::protocol::version::{ProtocolActivation, default_activations};
+use crate::crypto::{ed25519::Ed25519Keypair, PublicKeyBytes, Signer};
+use crate::protocol::version::{default_activations, ProtocolActivation};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::{fs, io, path::Path};
@@ -49,9 +49,15 @@ pub struct GenesisConfig {
     pub protocol_activations: Vec<ProtocolActivation>,
 }
 
-fn default_pv() -> u32 { 1 }
-fn default_base_fee() -> u64 { 1 }
-fn default_stake() -> u64 { 1000 }
+fn default_pv() -> u32 {
+    1
+}
+fn default_base_fee() -> u64 {
+    1
+}
+fn default_stake() -> u64 {
+    1000
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GenesisValidator {
@@ -65,7 +71,9 @@ pub struct GenesisValidator {
     pub name: String,
 }
 
-fn default_power() -> VotingPower { 1 }
+fn default_power() -> VotingPower {
+    1
+}
 
 // -----------------------------------------------------------------------------
 // Validation error
@@ -90,14 +98,22 @@ impl GenesisConfig {
     /// Load genesis from a JSON file.
     pub fn load(path: impl AsRef<Path>) -> io::Result<Self> {
         let s = fs::read_to_string(path.as_ref())?;
-        serde_json::from_str(&s)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("genesis.json parse: {e}")))
+        serde_json::from_str(&s).map_err(|e| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("genesis.json parse: {e}"),
+            )
+        })
     }
 
     /// Save genesis to a JSON file.
     pub fn save(&self, path: impl AsRef<Path>) -> io::Result<()> {
-        let out = serde_json::to_string_pretty(self)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("genesis.json encode: {e}")))?;
+        let out = serde_json::to_string_pretty(self).map_err(|e| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("genesis.json encode: {e}"),
+            )
+        })?;
         fs::write(path.as_ref(), out)
     }
 
@@ -121,10 +137,13 @@ impl GenesisConfig {
 
         // Validate protocol activations
         if self.protocol_activations.is_empty() {
-            return Err(GenesisError::InvalidActivations("empty activation list".into()));
+            return Err(GenesisError::InvalidActivations(
+                "empty activation list".into(),
+            ));
         }
         let has_v1_at_zero = self.protocol_activations.iter().any(|a| {
-            a.protocol_version == 1 && (a.activation_height == Some(0) || a.activation_height.is_none())
+            a.protocol_version == 1
+                && (a.activation_height == Some(0) || a.activation_height.is_none())
         });
         if !has_v1_at_zero {
             return Err(GenesisError::InvalidActivations(
@@ -137,9 +156,10 @@ impl GenesisConfig {
             if let Some(h) = act.activation_height {
                 if let Some(prev) = prev_height {
                     if h <= prev {
-                        return Err(GenesisError::InvalidActivations(
-                            format!("activation heights must be strictly increasing ({} <= {})", prev, h)
-                        ));
+                        return Err(GenesisError::InvalidActivations(format!(
+                            "activation heights must be strictly increasing ({} <= {})",
+                            prev, h
+                        )));
                     }
                 }
                 prev_height = Some(h);
@@ -151,15 +171,19 @@ impl GenesisConfig {
 
     /// Build a ValidatorSet from this genesis.
     pub fn validator_set(&self) -> ValidatorSet {
-        let vals: Vec<Validator> = self.validators.iter().map(|gv| {
-            let mut seed32 = [0u8; 32];
-            seed32[..8].copy_from_slice(&gv.seed.to_le_bytes());
-            let kp = Ed25519Keypair::from_seed(seed32);
-            Validator {
-                pk: kp.public_key(),
-                power: gv.power,
-            }
-        }).collect();
+        let vals: Vec<Validator> = self
+            .validators
+            .iter()
+            .map(|gv| {
+                let mut seed32 = [0u8; 32];
+                seed32[..8].copy_from_slice(&gv.seed.to_le_bytes());
+                let kp = Ed25519Keypair::from_seed(seed32);
+                Validator {
+                    pk: kp.public_key(),
+                    power: gv.power,
+                }
+            })
+            .collect();
         ValidatorSet { vals }
     }
 
@@ -198,9 +222,21 @@ impl GenesisConfig {
             chain_id: 6126151,
             chain_name: "iona-testnet-1".into(),
             validators: vec![
-                GenesisValidator { seed: 2, power: 1, name: "val2".into() },
-                GenesisValidator { seed: 3, power: 1, name: "val3".into() },
-                GenesisValidator { seed: 4, power: 1, name: "val4".into() },
+                GenesisValidator {
+                    seed: 2,
+                    power: 1,
+                    name: "val2".into(),
+                },
+                GenesisValidator {
+                    seed: 3,
+                    power: 1,
+                    name: "val3".into(),
+                },
+                GenesisValidator {
+                    seed: 4,
+                    power: 1,
+                    name: "val4".into(),
+                },
             ],
             protocol_version: 1,
             initial_base_fee: 1,
@@ -270,7 +306,11 @@ mod tests {
         let g1 = GenesisConfig {
             chain_id: 1,
             chain_name: "test".into(),
-            validators: vec![GenesisValidator { seed: 1, power: 1, name: "v1".into() }],
+            validators: vec![GenesisValidator {
+                seed: 1,
+                power: 1,
+                name: "v1".into(),
+            }],
             protocol_version: 1,
             initial_base_fee: 1,
             stake_each: 1000,
@@ -282,10 +322,26 @@ mod tests {
             chain_id: 1,
             chain_name: "test".into(),
             validators: vec![
-                GenesisValidator { seed: 1, power: 1, name: "v1".into() },
-                GenesisValidator { seed: 2, power: 1, name: "v2".into() },
-                GenesisValidator { seed: 3, power: 1, name: "v3".into() },
-                GenesisValidator { seed: 4, power: 1, name: "v4".into() },
+                GenesisValidator {
+                    seed: 1,
+                    power: 1,
+                    name: "v1".into(),
+                },
+                GenesisValidator {
+                    seed: 2,
+                    power: 1,
+                    name: "v2".into(),
+                },
+                GenesisValidator {
+                    seed: 3,
+                    power: 1,
+                    name: "v3".into(),
+                },
+                GenesisValidator {
+                    seed: 4,
+                    power: 1,
+                    name: "v4".into(),
+                },
             ],
             protocol_version: 1,
             initial_base_fee: 1,
@@ -306,12 +362,24 @@ mod tests {
         assert!(matches!(g.validate(), Err(GenesisError::NoValidators)));
 
         g.validators = vec![
-            GenesisValidator { seed: 2, power: 1, name: "v2".into() },
-            GenesisValidator { seed: 2, power: 1, name: "v2".into() },
+            GenesisValidator {
+                seed: 2,
+                power: 1,
+                name: "v2".into(),
+            },
+            GenesisValidator {
+                seed: 2,
+                power: 1,
+                name: "v2".into(),
+            },
         ];
         assert!(matches!(g.validate(), Err(GenesisError::DuplicateSeed(2))));
 
-        g.validators = vec![GenesisValidator { seed: 2, power: 0, name: "v2".into() }];
+        g.validators = vec![GenesisValidator {
+            seed: 2,
+            power: 0,
+            name: "v2".into(),
+        }];
         assert!(matches!(g.validate(), Err(GenesisError::ZeroPower(2))));
     }
 

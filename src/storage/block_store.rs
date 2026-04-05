@@ -174,7 +174,9 @@ impl FsBlockStore {
             }),
         };
 
-        if rebuild_meta || (store.meta.lock().by_height.is_empty() && store.contains_any_blocks()?) {
+        if rebuild_meta
+            || (store.meta.lock().by_height.is_empty() && store.contains_any_blocks()?)
+        {
             info!("rebuilding block store metadata");
             store.rebuild_metadata()?;
         }
@@ -527,7 +529,10 @@ impl FsBlockStore {
 
         for (height, id_hex) in &meta.by_height {
             let id = parse_hash32_hex(id_hex).ok_or_else(|| {
-                io::Error::new(io::ErrorKind::InvalidData, format!("invalid block hex id: {id_hex}"))
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("invalid block hex id: {id_hex}"),
+                )
             })?;
 
             let path = self.block_path(&id);
@@ -547,7 +552,10 @@ impl FsBlockStore {
             let block_id = parse_hash32_hex(&loc.block_id).ok_or_else(|| {
                 io::Error::new(
                     io::ErrorKind::InvalidData,
-                    format!("invalid tx location block id for tx {tx_hash_hex}: {}", loc.block_id),
+                    format!(
+                        "invalid tx location block id for tx {tx_hash_hex}: {}",
+                        loc.block_id
+                    ),
                 )
             })?;
 
@@ -661,7 +669,12 @@ impl crate::consensus::BlockStore for FsBlockStore {
         let block = match self.read_block_file(&path, id) {
             Ok(block) => block,
             Err(e) => {
-                debug!("failed to read block {} from {}: {}", hex_str(id), path.display(), e);
+                debug!(
+                    "failed to read block {} from {}: {}",
+                    hex_str(id),
+                    path.display(),
+                    e
+                );
                 return None;
             }
         };
@@ -683,16 +696,16 @@ impl crate::consensus::BlockStore for FsBlockStore {
 
 #[cfg(test)]
 mod tests {
-    use crate::consensus::engine::BlockStore;
     use super::*;
-    use crate::types::{Block, BlockHeader, Tx};
+    use crate::consensus::engine::BlockStore;
+    use crate::types::{Block, BlockHeader};
     use tempfile::tempdir;
 
     fn dummy_block(height: Height, hash_byte: u8) -> Block {
         let mut sr = [0u8; 32];
         sr[0] = hash_byte;
         let header = BlockHeader {
-                pv: 0,
+            pv: 0,
             height,
             round: 0,
             prev: Hash32([0; 32]),
@@ -713,7 +726,10 @@ mod tests {
         // Override id by setting a dummy; but block.id() is computed, so we rely on that.
         // For testing, we just create a block with a deterministic state root so id is deterministic.
         // We'll use a dummy block and ignore id.
-        Block { header, txs: vec![] }
+        Block {
+            header,
+            txs: vec![],
+        }
     }
 
     #[test]
@@ -764,7 +780,7 @@ mod tests {
         // For simplicity, we skip this test or implement a minimal Tx.
         // We'll just ensure the store doesn't crash.
         let dir = tempdir().unwrap();
-        let store = FsBlockStore::open(dir.path()).unwrap();
+        let _store = FsBlockStore::open(dir.path()).unwrap();
         // No transactions to test.
     }
 

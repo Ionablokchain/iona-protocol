@@ -33,11 +33,20 @@ impl MemDb {
 
     /// Loads an account into the database from Iona's `KvState`.
     /// This is a convenience method for initializing the EVM environment.
-    pub fn load_account_from_iona(&mut self, addr: Address, balance: u64, nonce: u64, code: Option<Bytecode>) {
-        let code_hash = code.as_ref().map(|c| c.hash_slow()).unwrap_or(revm::primitives::KECCAK_EMPTY);
+    pub fn load_account_from_iona(
+        &mut self,
+        addr: Address,
+        balance: u64,
+        nonce: u64,
+        code: Option<Bytecode>,
+    ) {
+        let code_hash = code
+            .as_ref()
+            .map(|c| c.hash_slow())
+            .unwrap_or(revm::primitives::KECCAK_EMPTY);
         let account_info = AccountInfo {
             balance: U256::from(balance),
-            nonce: nonce,
+            nonce,
             code_hash,
             code: code.clone(),
         };
@@ -97,7 +106,8 @@ impl DatabaseCommit for MemDb {
             // Update storage
             for (slot, storage_slot) in account.storage {
                 if storage_slot.present_value != U256::ZERO {
-                    self.storage.insert((address, slot), storage_slot.present_value);
+                    self.storage
+                        .insert((address, slot), storage_slot.present_value);
                 } else {
                     self.storage.remove(&(address, slot));
                 }
@@ -150,17 +160,20 @@ mod tests {
         let addr = Address::from([0xcc; 20]);
 
         // Create a change set (simulate transaction output)
-        use revm::primitives::{Account, AccountInfo, StorageSlot};
+        use revm::primitives::{Account, StorageSlot};
+
+        let account = Account {
+            info: AccountInfo {
+                balance: U256::from(500),
+                nonce: 1,
+                code_hash: B256::ZERO,
+                code: None,
+            },
+            storage: [(U256::from(1), StorageSlot::new(U256::from(999)))].into(),
+            ..Default::default()
+        };
 
         let mut changes = revm::primitives::State::new();
-        let mut account = Account::default();
-        account.info = AccountInfo {
-            balance: U256::from(500),
-            nonce: 1,
-            code_hash: B256::ZERO,
-            code: None,
-        };
-        account.storage.insert(U256::from(1), StorageSlot::new(U256::from(999)));
         changes.insert(addr, account);
 
         db.commit(changes);

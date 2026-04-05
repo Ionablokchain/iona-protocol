@@ -111,8 +111,8 @@ impl Vote {
         use crate::types::hash_bytes;
         let mut buf = Vec::new();
         match (self.vote_type, &self.block_id) {
-            (VoteType::Prevote, Some(id)) => buf.extend_from_slice(b"PREV"),
-            (VoteType::Precommit, Some(id)) => buf.extend_from_slice(b"PREC"),
+            (VoteType::Prevote, Some(_id)) => buf.extend_from_slice(b"PREV"),
+            (VoteType::Precommit, Some(_id)) => buf.extend_from_slice(b"PREC"),
             _ => buf.extend_from_slice(b"NILV"),
         }
         buf.extend_from_slice(&self.height.to_le_bytes());

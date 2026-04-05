@@ -14,8 +14,8 @@
 use serde::{Deserialize, Serialize};
 
 // Re-export submodules
-pub mod tx_vm;
 pub mod tx_evm;
+pub mod tx_vm;
 
 // ------------------------------
 // Constants for hash domain separation
@@ -262,8 +262,12 @@ pub struct BlockHeader {
     pub pv: u32,
 }
 
-fn default_chain_id() -> u64 { DEFAULT_CHAIN_ID }
-fn default_protocol_version() -> u32 { DEFAULT_PROTOCOL_VERSION }
+fn default_chain_id() -> u64 {
+    DEFAULT_CHAIN_ID
+}
+fn default_protocol_version() -> u32 {
+    DEFAULT_PROTOCOL_VERSION
+}
 
 // ------------------------------
 // Block
@@ -287,9 +291,8 @@ impl Block {
     /// This is stable across serde versions and JSON whitespace changes.
     pub fn id(&self) -> Hash32 {
         let h = &self.header;
-        let mut buf = Vec::with_capacity(
-            8 + 8 + 4 + 32 + 2 + h.proposer_pk.len() + 32 + 32 + 32 + 8 + 8,
-        );
+        let mut buf =
+            Vec::with_capacity(8 + 8 + 4 + 32 + 2 + h.proposer_pk.len() + 32 + 32 + 32 + 8 + 8);
         buf.extend_from_slice(BLOCK_ID_PREFIX);
         buf.extend_from_slice(&h.height.to_le_bytes());
         buf.extend_from_slice(&h.round.to_le_bytes());
@@ -406,12 +409,15 @@ pub fn receipts_root(receipts: &[Receipt]) -> Hash32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hex_literal::hex;
 
     #[test]
     fn hash32_hex_conversion() {
-        let h = Hash32::from_hex("00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff");
-        assert_eq!(h.to_hex(), "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff");
+        let h =
+            Hash32::from_hex("00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff");
+        assert_eq!(
+            h.to_hex(),
+            "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
+        );
     }
 
     #[test]
@@ -458,7 +464,10 @@ mod tests {
             timestamp: 0,
             protocol_version: 1,
         };
-        let block = Block { header, txs: vec![] };
+        let block = Block {
+            header,
+            txs: vec![],
+        };
         let id1 = block.id();
         let id2 = block.id();
         assert_eq!(id1, id2);
@@ -494,13 +503,22 @@ mod tests {
         };
         assert!(valid_tx.is_valid());
 
-        let invalid_pubkey = Tx { pubkey: vec![1u8; 31], ..valid_tx.clone() };
+        let invalid_pubkey = Tx {
+            pubkey: vec![1u8; 31],
+            ..valid_tx.clone()
+        };
         assert!(!invalid_pubkey.is_valid());
 
-        let invalid_sig = Tx { signature: vec![0u8; 63], ..valid_tx.clone() };
+        let invalid_sig = Tx {
+            signature: vec![0u8; 63],
+            ..valid_tx.clone()
+        };
         assert!(!invalid_sig.is_valid());
 
-        let zero_gas = Tx { gas_limit: 0, ..valid_tx.clone() };
+        let zero_gas = Tx {
+            gas_limit: 0,
+            ..valid_tx.clone()
+        };
         assert!(!zero_gas.is_valid());
     }
 }

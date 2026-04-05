@@ -34,7 +34,10 @@ impl EvidenceStore {
     /// If `index_path` is provided, it is used to store only the IDs of seen evidence.
     /// This speeds up startup because we don't have to deserialize the whole evidence file.
     /// The index file is maintained automatically alongside the data file.
-    pub fn open(data_path: impl AsRef<Path>, index_path: Option<impl AsRef<Path>>) -> io::Result<Self> {
+    pub fn open(
+        data_path: impl AsRef<Path>,
+        index_path: Option<impl AsRef<Path>>,
+    ) -> io::Result<Self> {
         let data_path = data_path.as_ref().to_path_buf();
         let index_path = index_path.map(|p| p.as_ref().to_path_buf());
 
@@ -293,7 +296,9 @@ mod tests {
             let mut hash_bytes = [0u8; 32];
             let h = te.hash.as_bytes();
             for (i, b) in h.iter().enumerate() {
-                if i < 32 { hash_bytes[i] = *b; }
+                if i < 32 {
+                    hash_bytes[i] = *b;
+                }
             }
             let block_hash = crate::types::Hash32(hash_bytes);
             crate::evidence::Evidence::DoubleVote {
@@ -325,10 +330,12 @@ mod tests {
 
     impl Clone for TestEvidence {
         fn clone(&self) -> Self {
-            TestEvidence { height: self.height, hash: self.hash.clone() }
+            TestEvidence {
+                height: self.height,
+                hash: self.hash.clone(),
+            }
         }
     }
-
 
     type Evidence = TestEvidence;
 
@@ -338,7 +345,10 @@ mod tests {
         let data_path = dir.path().join("evidence.log");
         let store = EvidenceStore::open(&data_path, None::<&Path>)?;
 
-        let ev = Evidence { height: 10, hash: "abc".to_string() };
+        let ev = Evidence {
+            height: 10,
+            hash: "abc".to_string(),
+        };
         let peer = "peer1";
         let height = 10;
 
@@ -358,11 +368,17 @@ mod tests {
         let height = 20;
 
         for i in 0..30 {
-            let ev = Evidence { height, hash: format!("hash{}", i) };
+            let ev = Evidence {
+                height,
+                hash: format!("hash{}", i),
+            };
             assert!(store.insert(&ev.clone().into(), peer, height)?);
         }
 
-        let ev = Evidence { height, hash: "hash30".to_string() };
+        let ev = Evidence {
+            height,
+            hash: "hash30".to_string(),
+        };
         assert!(!store.insert(&ev.clone().into(), peer, height)?); // rate limited
 
         Ok(())
@@ -379,12 +395,21 @@ mod tests {
         // Use multiple peers to avoid the per-peer rate limit (30 per 60s).
         for i in 0..200 {
             let peer = format!("peer_cap_{}", i / 25); // rotate peers every 25
-            let ev = Evidence { height, hash: format!("hash{}", i) };
-            assert!(store.insert(&ev.clone().into(), &peer, height)?,
-                "insert #{} should succeed", i);
+            let ev = Evidence {
+                height,
+                hash: format!("hash{}", i),
+            };
+            assert!(
+                store.insert(&ev.clone().into(), &peer, height)?,
+                "insert #{} should succeed",
+                i
+            );
         }
 
-        let ev = Evidence { height, hash: "hash200".to_string() };
+        let ev = Evidence {
+            height,
+            hash: "hash200".to_string(),
+        };
         assert!(!store.insert(&ev.clone().into(), "peer_new", height)?); // cap reached
 
         Ok(())
@@ -399,8 +424,14 @@ mod tests {
         // Create store with index.
         let store = EvidenceStore::open(&data_path, Some(&index_path))?;
 
-        let ev1 = Evidence { height: 1, hash: "a".to_string() };
-        let ev2 = Evidence { height: 1, hash: "b".to_string() };
+        let ev1 = Evidence {
+            height: 1,
+            hash: "a".to_string(),
+        };
+        let ev2 = Evidence {
+            height: 1,
+            hash: "b".to_string(),
+        };
 
         assert!(store.insert(&ev1.clone().into(), "peer", 1)?);
         assert!(store.insert(&ev2.clone().into(), "peer", 1)?);

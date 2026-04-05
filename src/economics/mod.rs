@@ -26,33 +26,26 @@
 //! ```
 
 // Re‑export core types and functions from each submodule.
-pub use params::StakingParams;
-pub use staking::{
-    StakingState, Validator, Delegation, UnbondingEntry,
-    apply_staking_tx, StakingError,
-};
 pub use governance::{
-    GovernanceState, GovernanceParams, Proposal, ProposalKind, ProposalResult,
-    submit_proposal, vote, process_proposals,
+    process_proposals, submit_proposal, vote, GovernanceParams, GovernanceState, Proposal,
+    ProposalKind, ProposalResult,
 };
-pub use rewards::{
-    RewardState, RewardConfig, distribute_rewards,
+pub use params::StakingParams;
+pub use rewards::{distribute_rewards, RewardConfig, RewardState};
+pub use staking::{
+    apply_staking_tx, Delegation, StakingError, StakingState, UnbondingEntry, Validator,
 };
-pub use staking_tx::{
-    StakingTx,
-    StakingTxKind,
-    validate_staking_tx,
-};
+pub use staking_tx::{validate_staking_tx, StakingTx, StakingTxKind};
 
 // Optionally, re‑export error types for convenience.
 pub use staking::StakeLedger;
 pub use staking::StakingError as Error;
 
 // Module declarations (kept private to enforce re‑export interface).
-pub mod params;
-pub mod staking;
 pub mod governance;
+pub mod params;
 pub mod rewards;
+pub mod staking;
 pub mod staking_tx;
 
 // Test helpers (only in dev builds).
@@ -63,7 +56,7 @@ mod tests {
     #[test]
     fn staking_and_rewards_integration() {
         // Simple integration test to ensure submodules work together.
-        let mut state = StakingState::default();
+        let _state = StakingState::default();
         // ... test logic ...
     }
 }

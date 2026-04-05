@@ -32,9 +32,10 @@
 
 use crate::execution::KvState;
 use crate::vm::state::VmState;
-use revm::primitives::{
-    Account, AccountInfo, Address, Bytecode, B256, KECCAK_EMPTY, U256,
-};
+use revm::primitives::{AccountInfo, Address, Bytecode, B256, KECCAK_EMPTY, U256};
+
+#[cfg(test)]
+use revm::primitives::Account;
 use revm::{Database, DatabaseCommit};
 use sha3::{Digest, Keccak256};
 use std::collections::HashMap;
@@ -228,7 +229,9 @@ impl<'a> DatabaseCommit for KvStateDb<'a> {
             if account.info.nonce == 0 {
                 self.state.nonces.remove(&iona_key);
             } else {
-                self.state.nonces.insert(iona_key.clone(), account.info.nonce);
+                self.state
+                    .nonces
+                    .insert(iona_key.clone(), account.info.nonce);
             }
 
             // ── Bytecode ──────────────────────────────────────────────────────
@@ -328,12 +331,18 @@ pub fn execute_evm_on_state(
                     logs,
                     ..
                 } => (true, *gas_used, output.clone(), logs.clone()),
-                revm::primitives::ExecutionResult::Revert { gas_used, output } => {
-                    (false, *gas_used, revm::primitives::Output::Call(output.clone()), vec![])
-                }
-                revm::primitives::ExecutionResult::Halt { gas_used, .. } => {
-                    (false, *gas_used, revm::primitives::Output::Call(revm::primitives::Bytes::new()), vec![])
-                }
+                revm::primitives::ExecutionResult::Revert { gas_used, output } => (
+                    false,
+                    *gas_used,
+                    revm::primitives::Output::Call(output.clone()),
+                    vec![],
+                ),
+                revm::primitives::ExecutionResult::Halt { gas_used, .. } => (
+                    false,
+                    *gas_used,
+                    revm::primitives::Output::Call(revm::primitives::Bytes::new()),
+                    vec![],
+                ),
             };
 
             let (return_data, created_address) = match output {
@@ -354,7 +363,11 @@ pub fn execute_evm_on_state(
                 return_data,
                 created_address,
                 logs,
-                error: if success { None } else { Some("execution reverted".into()) },
+                error: if success {
+                    None
+                } else {
+                    Some("execution reverted".into())
+                },
             }
         }
         Err(e) => UnifiedEvmResult {
@@ -372,7 +385,14 @@ fn build_tx_env(tx: &EvmTx) -> TxEnv {
     let mut env = TxEnv::default();
     match tx {
         EvmTx::Legacy {
-            from, to, nonce, gas_limit, gas_price, value, data, chain_id,
+            from,
+            to,
+            nonce,
+            gas_limit,
+            gas_price,
+            value,
+            data,
+            chain_id,
         } => {
             env.caller = Address::from_slice(from);
             env.gas_limit = *gas_limit;
@@ -387,7 +407,15 @@ fn build_tx_env(tx: &EvmTx) -> TxEnv {
             env.data = revm::primitives::Bytes::copy_from_slice(data);
         }
         EvmTx::Eip2930 {
-            from, to, nonce, gas_limit, gas_price, value, data, access_list, chain_id,
+            from,
+            to,
+            nonce,
+            gas_limit,
+            gas_price,
+            value,
+            data,
+            access_list,
+            chain_id,
         } => {
             env.caller = Address::from_slice(from);
             env.gas_limit = *gas_limit;
@@ -414,8 +442,16 @@ fn build_tx_env(tx: &EvmTx) -> TxEnv {
                 .collect();
         }
         EvmTx::Eip1559 {
-            from, to, nonce, gas_limit, max_fee_per_gas, max_priority_fee_per_gas,
-            value, data, access_list, chain_id,
+            from,
+            to,
+            nonce,
+            gas_limit,
+            max_fee_per_gas: _,
+            max_priority_fee_per_gas,
+            value,
+            data,
+            access_list,
+            chain_id,
         } => {
             env.caller = Address::from_slice(from);
             env.gas_limit = *gas_limit;
@@ -450,7 +486,7 @@ fn build_tx_env(tx: &EvmTx) -> TxEnv {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::tx_evm::{AccessListItem, EvmTx};
+    use crate::types::tx_evm::EvmTx;
 
     fn make_iona_addr(seed: u8) -> [u8; 32] {
         let mut addr = [0u8; 32];
@@ -539,22 +575,34 @@ mod tests {
 
         let coinbase = make_iona_addr(99);
         let result = execute_evm_on_state(
-            &mut state, tx,
-            1,  // block_number
+            &mut state,
+            tx,
+            1,             // block_number
             1_600_000_000, // block_timestamp
-            1, // base_fee
-            30_000_000, // gas_limit
+            1,             // base_fee
+            30_000_000,    // gas_limit
             coinbase,
             6126151,
         );
 
         assert!(result.success, "Transfer failed: {:?}", result.error);
-        let alice_balance = state.balances.get(&iona_addr_hex(&alice_iona)).copied().unwrap_or(0);
-        let bob_balance = state.balances.get(&iona_addr_hex(&bob_iona)).copied().unwrap_or(0);
+        let alice_balance = state
+            .balances
+            .get(&iona_addr_hex(&alice_iona))
+            .copied()
+            .unwrap_or(0);
+        let bob_balance = state
+            .balances
+            .get(&iona_addr_hex(&bob_iona))
+            .copied()
+            .unwrap_or(0);
         // Alice: 1,000,000 - value (100,000) - gas (21,000 * gas_price)
         // gas_price=1_000 but actual deduction depends on EVM execution;
         // just verify alice lost value + some gas and bob gained value.
-        assert!(alice_balance < 100_000_000 - 100_000, "alice should have paid gas");
+        assert!(
+            alice_balance < 100_000_000 - 100_000,
+            "alice should have paid gas"
+        );
         assert!(alice_balance > 0, "alice should still have funds");
         assert_eq!(bob_balance, 100_000);
     }

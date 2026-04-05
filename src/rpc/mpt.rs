@@ -4,10 +4,6 @@
 //! for a list of RLP‑encoded items, as used in Ethereum for `transactionsRoot`,
 //! `receiptsRoot`, and `withdrawalsRoot`.
 
-use memory_db;
-use keccak_hasher::KeccakHasher;
-use triehash::ordered_trie_root;
-
 /// Compute the Ethereum‑style ordered MPT root for a list of RLP‑encoded items.
 ///
 /// In Ethereum, the transactionsRoot, receiptsRoot, and withdrawalsRoot are ordered tries where:
@@ -85,7 +81,10 @@ pub fn eth_ordered_trie_root_hex(rlp_items: &[Vec<u8>]) -> String {
 /// let root = eth_ordered_trie_root_encodable(&items);
 /// ```
 pub fn eth_ordered_trie_root_encodable<T: rlp::Encodable>(items: &[T]) -> [u8; 32] {
-    let rlp_items: Vec<Vec<u8>> = items.iter().map(|item| rlp::encode(item).to_vec()).collect();
+    let rlp_items: Vec<Vec<u8>> = items
+        .iter()
+        .map(|item| rlp::encode(item).to_vec())
+        .collect();
     eth_ordered_trie_root(&rlp_items)
 }
 
@@ -102,7 +101,7 @@ mod tests {
     #[test]
     fn test_empty_list() {
         let empty: Vec<Vec<u8>> = vec![];
-        let root = eth_ordered_trie_root(&empty);
+        let _root = eth_ordered_trie_root(&empty);
         // Known value: keccak(rlp([])) = 0x56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421
         let expected_hex = "0x56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421";
         assert_eq!(eth_ordered_trie_root_hex(&empty), expected_hex);

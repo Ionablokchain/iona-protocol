@@ -26,7 +26,12 @@ impl VoteTally {
     /// * `vset` – the current validator set (to look up the validator's power).
     /// * `voter` – the public key of the validator casting the vote.
     /// * `block_id` – the block ID they are voting for (or `None` for a nil vote).
-    pub fn add_vote(&mut self, vset: &ValidatorSet, voter: &PublicKeyBytes, block_id: &Option<Hash32>) {
+    pub fn add_vote(
+        &mut self,
+        vset: &ValidatorSet,
+        voter: &PublicKeyBytes,
+        block_id: &Option<Hash32>,
+    ) {
         let power = vset.power_of(voter);
         *self.per_block.entry(block_id.clone()).or_insert(0) += power;
     }
@@ -78,9 +83,18 @@ mod tests {
     fn test_vset() -> ValidatorSet {
         ValidatorSet {
             vals: vec![
-                Validator { pk: PublicKeyBytes(vec![1u8; 32]), power: 1 },
-                Validator { pk: PublicKeyBytes(vec![2u8; 32]), power: 1 },
-                Validator { pk: PublicKeyBytes(vec![3u8; 32]), power: 1 },
+                Validator {
+                    pk: PublicKeyBytes(vec![1u8; 32]),
+                    power: 1,
+                },
+                Validator {
+                    pk: PublicKeyBytes(vec![2u8; 32]),
+                    power: 1,
+                },
+                Validator {
+                    pk: PublicKeyBytes(vec![3u8; 32]),
+                    power: 1,
+                },
             ],
         }
     }

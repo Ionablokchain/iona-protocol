@@ -11,7 +11,6 @@
 //! 4. Session PV = `min(max(local.supported_pv), max(remote.supported_pv))`.
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
 
 use super::version::{CURRENT_PROTOCOL_VERSION, SUPPORTED_PROTOCOL_VERSIONS};
 use crate::storage::CURRENT_SCHEMA_VERSION;
@@ -68,7 +67,10 @@ impl Hello {
         capabilities: CapabilityFlags,
         peer_id: Option<String>,
     ) -> Self {
-        debug_assert!(!SUPPORTED_PROTOCOL_VERSIONS.is_empty(), "supported PV list cannot be empty");
+        debug_assert!(
+            !SUPPORTED_PROTOCOL_VERSIONS.is_empty(),
+            "supported PV list cannot be empty"
+        );
         Self {
             supported_pv: SUPPORTED_PROTOCOL_VERSIONS.to_vec(),
             supported_sv: (0..=CURRENT_SCHEMA_VERSION).collect(),
@@ -281,8 +283,16 @@ mod tests {
 
     #[test]
     fn test_capabilities_and() {
-        let a = make_hello(1, vec![1], capabilities::SNAPSHOT_SYNC | capabilities::ZSTD_COMPRESSION);
-        let b = make_hello(1, vec![1], capabilities::ZSTD_COMPRESSION | capabilities::LIGHT_CLIENT);
+        let a = make_hello(
+            1,
+            vec![1],
+            capabilities::SNAPSHOT_SYNC | capabilities::ZSTD_COMPRESSION,
+        );
+        let b = make_hello(
+            1,
+            vec![1],
+            capabilities::ZSTD_COMPRESSION | capabilities::LIGHT_CLIENT,
+        );
         let r = check_hello_compat(&a, &b);
         assert!(r.compatible);
         assert_eq!(r.common_capabilities, capabilities::ZSTD_COMPRESSION);

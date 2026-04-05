@@ -10,18 +10,17 @@
 //! - blake3 hash for integrity verification
 //! - Metadata header with height, state_root, timestamp
 
-use crate::execution::KvState;
 use crate::economics::staking::StakeLedger;
+use crate::execution::KvState;
 use crate::storage::layout::DataLayout;
 use crate::types::{Hash32, Height};
 use crate::vm::state::VmStorage;
 use base64::Engine;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
 use std::io::{Read, Write};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
-use tracing::{error, info, warn};
+use tracing::info;
 
 /// Snapshot format version.
 pub const SNAPSHOT_VERSION: u32 = 1;
@@ -82,7 +81,9 @@ pub fn export_snapshot(data_dir: &str, output_path: &str) -> anyhow::Result<Snap
     let vm = kv_state.vm.clone(); // vm is already part of KvState
     let schema = layout.load_schema()?;
     let node_meta = layout.load_node_meta()?;
-    let last_height = layout.latest_height().ok_or_else(|| anyhow::anyhow!("no height"))?;
+    let last_height = layout
+        .latest_height()
+        .ok_or_else(|| anyhow::anyhow!("no height"))?;
 
     // Build snapshot state
     let snapshot_state = SnapshotState {
@@ -122,7 +123,8 @@ pub fn export_snapshot(data_dir: &str, output_path: &str) -> anyhow::Result<Snap
         node_version: env!("CARGO_PKG_VERSION").to_string(),
         schema_version: snapshot_state.schema["version"]
             .as_u64()
-            .unwrap_or(crate::storage::CURRENT_SCHEMA_VERSION as u64) as u32,
+            .unwrap_or(crate::storage::CURRENT_SCHEMA_VERSION as u64)
+            as u32,
         protocol_version: crate::protocol::version::CURRENT_PROTOCOL_VERSION,
         payload_blake3,
         uncompressed_size,
@@ -141,7 +143,11 @@ pub fn export_snapshot(data_dir: &str, output_path: &str) -> anyhow::Result<Snap
     std::fs::write(&tmp_path, json_out)?;
     std::fs::rename(&tmp_path, out_path)?;
 
-    info!(height = last_height, path = output_path, "snapshot exported");
+    info!(
+        height = last_height,
+        path = output_path,
+        "snapshot exported"
+    );
     Ok(header)
 }
 
@@ -236,7 +242,11 @@ pub fn import_snapshot(snapshot_path: &str, data_dir: &str) -> anyhow::Result<Sn
     // Cleanup temporary directory
     let _ = std::fs::remove_dir_all(&tmp_dir);
 
-    info!(height = header.height, path = snapshot_path, "snapshot imported");
+    info!(
+        height = header.height,
+        path = snapshot_path,
+        "snapshot imported"
+    );
     Ok(header)
 }
 
@@ -312,7 +322,6 @@ fn decompress_stream(data: &[u8]) -> anyhow::Result<Vec<u8>> {
 mod tests {
     use super::*;
     use crate::execution::KvState;
-    use crate::types::Hash32;
     use tempfile::tempdir;
 
     fn setup_test_state() -> (tempfile::TempDir, DataLayout, KvState) {
@@ -323,13 +332,15 @@ mod tests {
         let mut state = KvState::default();
         state.balances.insert("alice".into(), 1000);
         state.kv.insert("key".into(), "value".into());
-        let root = state.root();
+        let _root = state.root();
 
         layout.save_state_full(&state).unwrap();
         layout.save_stakes(&Default::default()).unwrap();
         // Write a dummy block so latest_height() returns Some(1)
         std::fs::write(layout.blocks_dir().join("1.json"), "{}").unwrap();
-        layout.save_schema(&serde_json::json!({"version": 4})).unwrap();
+        layout
+            .save_schema(&serde_json::json!({"version": 4}))
+            .unwrap();
         layout.save_node_meta(&serde_json::json!({})).unwrap();
 
         (dir, layout, state)
@@ -337,7 +348,7 @@ mod tests {
 
     #[test]
     fn test_export_import_roundtrip() {
-        let (data_dir, layout, original_state) = setup_test_state();
+        let (data_dir, _layout, original_state) = setup_test_state();
 
         let snapshot_path = data_dir.path().join("snapshot.json");
         let header = export_snapshot(
@@ -373,7 +384,11 @@ mod tests {
         let snapshot_path = data_dir.path().join("snapshot.json");
 
         // Export a valid snapshot
-        export_snapshot(data_dir.path().to_str().unwrap(), snapshot_path.to_str().unwrap()).unwrap();
+        export_snapshot(
+            data_dir.path().to_str().unwrap(),
+            snapshot_path.to_str().unwrap(),
+        )
+        .unwrap();
 
         // Corrupt the file
         let mut content = std::fs::read_to_string(&snapshot_path).unwrap();

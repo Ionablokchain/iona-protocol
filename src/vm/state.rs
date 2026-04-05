@@ -30,7 +30,12 @@ pub trait VmState {
 
     /// Write a 32‑byte value to the contract's storage at the given key.
     /// If the value is all zeros, the entry is deleted (to save space).
-    fn sstore(&mut self, contract: &[u8; 32], key: &[u8; 32], value: [u8; 32]) -> Result<(), VmError>;
+    fn sstore(
+        &mut self,
+        contract: &[u8; 32],
+        key: &[u8; 32],
+        value: [u8; 32],
+    ) -> Result<(), VmError>;
 
     /// Retrieve the bytecode of a contract. Returns an empty vector if no code exists.
     fn get_code(&self, contract: &[u8; 32]) -> Vec<u8>;
@@ -96,10 +101,19 @@ impl VmStorage {
 
 impl VmState for VmStorage {
     fn sload(&self, contract: &[u8; 32], key: &[u8; 32]) -> Result<[u8; 32], VmError> {
-        Ok(self.storage.get(&(*contract, *key)).copied().unwrap_or([0u8; 32]))
+        Ok(self
+            .storage
+            .get(&(*contract, *key))
+            .copied()
+            .unwrap_or([0u8; 32]))
     }
 
-    fn sstore(&mut self, contract: &[u8; 32], key: &[u8; 32], value: [u8; 32]) -> Result<(), VmError> {
+    fn sstore(
+        &mut self,
+        contract: &[u8; 32],
+        key: &[u8; 32],
+        value: [u8; 32],
+    ) -> Result<(), VmError> {
         if value == [0u8; 32] {
             self.storage.remove(&(*contract, *key));
         } else {
@@ -166,11 +180,17 @@ impl Memory {
         if size == 0 {
             return Ok(0);
         }
-        let new_end = offset
-            .checked_add(size)
-            .ok_or(VmError::MemoryLimit { pc: 0, requested: 0, limit: 0 })?;
+        let new_end = offset.checked_add(size).ok_or(VmError::MemoryLimit {
+            pc: 0,
+            requested: 0,
+            limit: 0,
+        })?;
         if new_end > MAX_MEMORY_BYTES {
-            return Err(VmError::MemoryLimit { pc: 0, requested: 0, limit: 0 });
+            return Err(VmError::MemoryLimit {
+                pc: 0,
+                requested: 0,
+                limit: 0,
+            });
         }
         if new_end > self.data.len() {
             let old_words = (self.data.len() + 31) / 32;
@@ -240,24 +260,15 @@ mod tests {
         let value = [0xDE; 32];
 
         // Initially storage should be zero.
-        assert_eq!(
-            storage.sload(&contract, &key).unwrap(),
-            [0u8; 32]
-        );
+        assert_eq!(storage.sload(&contract, &key).unwrap(), [0u8; 32]);
 
         // Store a value.
         storage.sstore(&contract, &key, value).unwrap();
-        assert_eq!(
-            storage.sload(&contract, &key).unwrap(),
-            value
-        );
+        assert_eq!(storage.sload(&contract, &key).unwrap(), value);
 
         // Delete by storing zero.
         storage.sstore(&contract, &key, [0u8; 32]).unwrap();
-        assert_eq!(
-            storage.sload(&contract, &key).unwrap(),
-            [0u8; 32]
-        );
+        assert_eq!(storage.sload(&contract, &key).unwrap(), [0u8; 32]);
     }
 
     #[test]
@@ -310,10 +321,11 @@ mod tests {
     #[test]
     fn test_memory_read_write() {
         let mut mem = Memory::new();
-        let value = [0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88,
-                     0x99, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x00,
-                     0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
-                     0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10];
+        let value = [
+            0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE,
+            0xFF, 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C,
+            0x0D, 0x0E, 0x0F, 0x10,
+        ];
 
         mem.store32(0, &value).unwrap();
         let loaded = mem.load32(0).unwrap();
@@ -345,7 +357,14 @@ mod tests {
         let mut mem = Memory::new();
         // Try to write beyond 4 MiB
         let result = mem.ensure(MAX_MEMORY_BYTES, 1);
-        assert!(matches!(result, Err(VmError::MemoryLimit { pc: 0, requested: 0, limit: 0 })));
+        assert!(matches!(
+            result,
+            Err(VmError::MemoryLimit {
+                pc: 0,
+                requested: 0,
+                limit: 0
+            })
+        ));
     }
 
     #[test]

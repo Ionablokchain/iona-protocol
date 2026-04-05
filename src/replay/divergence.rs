@@ -35,7 +35,7 @@ use crate::types::{Hash32, Height};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
 // -----------------------------------------------------------------------------
 // VM Snapshot (new)
@@ -186,10 +186,7 @@ pub enum DivergenceDetail {
         value_b: Option<String>,
     },
     /// Account exists in one snapshot but not the other.
-    AccountMissing {
-        account: String,
-        present_in: String,
-    },
+    AccountMissing { account: String, present_in: String },
     /// VM storage slot differs.
     VmStorageDiff {
         contract: String,
@@ -210,31 +207,55 @@ pub enum DivergenceDetail {
         nonce_b: u64,
     },
     /// Protocol version differs.
-    ProtocolVersionDiff {
-        version_a: u32,
-        version_b: u32,
-    },
+    ProtocolVersionDiff { version_a: u32, version_b: u32 },
 }
 
 impl std::fmt::Display for DivergenceDetail {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::BalanceDiff { account, value_a, value_b } =>
-                write!(f, "balance({account}): {value_a} vs {value_b}"),
-            Self::NonceDiff { account, value_a, value_b } =>
-                write!(f, "nonce({account}): {value_a} vs {value_b}"),
-            Self::KvDiff { key, value_a, value_b } =>
-                write!(f, "kv({key}): {:?} vs {:?}", value_a, value_b),
-            Self::AccountMissing { account, present_in } =>
-                write!(f, "account {account} only in {present_in}"),
-            Self::VmStorageDiff { contract, slot, value_a, value_b } =>
-                write!(f, "vm.storage({contract},{slot}): {:?} vs {:?}", value_a, value_b),
-            Self::VmCodeDiff { contract, len_a, len_b } =>
-                write!(f, "vm.code({contract}): length {} vs {}", len_a, len_b),
-            Self::VmNonceDiff { contract, nonce_a, nonce_b } =>
-                write!(f, "vm.nonce({contract}): {} vs {}", nonce_a, nonce_b),
-            Self::ProtocolVersionDiff { version_a, version_b } =>
-                write!(f, "protocol version: {} vs {}", version_a, version_b),
+            Self::BalanceDiff {
+                account,
+                value_a,
+                value_b,
+            } => write!(f, "balance({account}): {value_a} vs {value_b}"),
+            Self::NonceDiff {
+                account,
+                value_a,
+                value_b,
+            } => write!(f, "nonce({account}): {value_a} vs {value_b}"),
+            Self::KvDiff {
+                key,
+                value_a,
+                value_b,
+            } => write!(f, "kv({key}): {:?} vs {:?}", value_a, value_b),
+            Self::AccountMissing {
+                account,
+                present_in,
+            } => write!(f, "account {account} only in {present_in}"),
+            Self::VmStorageDiff {
+                contract,
+                slot,
+                value_a,
+                value_b,
+            } => write!(
+                f,
+                "vm.storage({contract},{slot}): {:?} vs {:?}",
+                value_a, value_b
+            ),
+            Self::VmCodeDiff {
+                contract,
+                len_a,
+                len_b,
+            } => write!(f, "vm.code({contract}): length {} vs {}", len_a, len_b),
+            Self::VmNonceDiff {
+                contract,
+                nonce_a,
+                nonce_b,
+            } => write!(f, "vm.nonce({contract}): {} vs {}", nonce_a, nonce_b),
+            Self::ProtocolVersionDiff {
+                version_a,
+                version_b,
+            } => write!(f, "protocol version: {} vs {}", version_a, version_b),
         }
     }
 }
@@ -349,14 +370,19 @@ impl DivergenceReport {
     /// Return a textual summary (for logs).
     pub fn log_summary(&self) {
         if self.all_agree {
-            info!("Divergence report: all {} nodes agree across {} heights",
-                  self.node_count, self.heights_checked.len());
+            info!(
+                "Divergence report: all {} nodes agree across {} heights",
+                self.node_count,
+                self.heights_checked.len()
+            );
         } else {
-            warn!("Divergence detected! {} divergences found across {} nodes",
-                  self.divergences.len(), self.node_count);
+            warn!(
+                "Divergence detected! {} divergences found across {} nodes",
+                self.divergences.len(),
+                self.node_count
+            );
             for div in &self.divergences {
-                warn!("  height {}: {} vs {}",
-                      div.height, div.node_a, div.node_b);
+                warn!("  height {}: {} vs {}", div.height, div.node_a, div.node_b);
             }
         }
     }
@@ -364,14 +390,30 @@ impl DivergenceReport {
 
 impl std::fmt::Display for DivergenceReport {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        writeln!(f, "Divergence Report: {}",
-            if self.all_agree { "NO DIVERGENCE" } else { "DIVERGENCE DETECTED" })?;
-        writeln!(f, "  nodes={}, heights={:?}", self.node_count, self.heights_checked)?;
+        writeln!(
+            f,
+            "Divergence Report: {}",
+            if self.all_agree {
+                "NO DIVERGENCE"
+            } else {
+                "DIVERGENCE DETECTED"
+            }
+        )?;
+        writeln!(
+            f,
+            "  nodes={}, heights={:?}",
+            self.node_count, self.heights_checked
+        )?;
         for d in &self.divergences {
-            writeln!(f, "  height {}: {} ({}) vs {} ({})",
+            writeln!(
+                f,
+                "  height {}: {} ({}) vs {} ({})",
                 d.height,
-                d.node_a, hex::encode(&d.root_a.0[..4]),
-                d.node_b, hex::encode(&d.root_b.0[..4]))?;
+                d.node_a,
+                hex::encode(&d.root_a.0[..4]),
+                d.node_b,
+                hex::encode(&d.root_b.0[..4])
+            )?;
             for detail in &d.details {
                 writeln!(f, "    - {detail}")?;
             }
@@ -534,11 +576,7 @@ fn compare_btree_str(
     }
 }
 
-fn compare_vm_snapshots(
-    a: &VmSnapshot,
-    b: &VmSnapshot,
-    details: &mut Vec<DivergenceDetail>,
-) {
+fn compare_vm_snapshots(a: &VmSnapshot, b: &VmSnapshot, details: &mut Vec<DivergenceDetail>) {
     // Storage
     for ((contract, slot), val_a) in &a.storage {
         match b.storage.get(&(contract.clone(), slot.clone())) {
@@ -694,7 +732,8 @@ pub fn detect_divergence_range(
 
         for i in 0..at_height.len() {
             for j in (i + 1)..at_height.len() {
-                if let Some(div) = compare_snapshots(at_height[i], at_height[j], compare_full_state) {
+                if let Some(div) = compare_snapshots(at_height[i], at_height[j], compare_full_state)
+                {
                     all_divergences.push(div);
                 }
             }
@@ -745,9 +784,22 @@ mod tests {
         state
     }
 
-    fn snap(id: &str, height: Height, root: [u8; 32], protocol: u32, include_full: bool) -> NodeSnapshot {
+    fn snap(
+        id: &str,
+        height: Height,
+        root: [u8; 32],
+        protocol: u32,
+        include_full: bool,
+    ) -> NodeSnapshot {
         let state = dummy_state();
-        NodeSnapshot::from_state(&state, id.into(), protocol, height, Hash32(root), include_full)
+        NodeSnapshot::from_state(
+            &state,
+            id.into(),
+            protocol,
+            height,
+            Hash32(root),
+            include_full,
+        )
     }
 
     #[test]
@@ -782,18 +834,24 @@ mod tests {
         let report = detect_divergence(&snapshots, false);
         assert!(!report.all_agree);
         let div = &report.divergences[0];
-        assert!(div.details.iter().any(|d| matches!(d,
-            DivergenceDetail::ProtocolVersionDiff { version_a: 1, version_b: 2 }
+        assert!(div.details.iter().any(|d| matches!(
+            d,
+            DivergenceDetail::ProtocolVersionDiff {
+                version_a: 1,
+                version_b: 2
+            }
         )));
     }
 
     #[test]
     fn test_full_state_comparison() {
-        let mut state_a = dummy_state();
+        let state_a = dummy_state();
         let mut state_b = dummy_state();
         state_b.balances.insert("alice".into(), 999); // different balance
-        let snap_a = NodeSnapshot::from_state(&state_a, "node-1".into(), 1, 100, Hash32([1; 32]), true);
-        let snap_b = NodeSnapshot::from_state(&state_b, "node-2".into(), 1, 100, Hash32([2; 32]), true);
+        let snap_a =
+            NodeSnapshot::from_state(&state_a, "node-1".into(), 1, 100, Hash32([1; 32]), true);
+        let snap_b =
+            NodeSnapshot::from_state(&state_b, "node-2".into(), 1, 100, Hash32([2; 32]), true);
 
         let report = detect_divergence(&[snap_a, snap_b], true);
         assert!(!report.all_agree);
@@ -807,12 +865,14 @@ mod tests {
     #[test]
     fn test_range_detection() {
         let mut node_snaps = BTreeMap::new();
-        let mut v1 = Vec::new();
-        v1.push(snap("node-1", 1, [1; 32], 1, false));
-        v1.push(snap("node-1", 2, [2; 32], 1, false));
-        let mut v2 = Vec::new();
-        v2.push(snap("node-2", 1, [1; 32], 1, false));
-        v2.push(snap("node-2", 2, [9; 32], 1, false)); // diverges at height 2
+        let v1 = vec![
+            snap("node-1", 1, [1; 32], 1, false),
+            snap("node-1", 2, [2; 32], 1, false),
+        ];
+        let v2 = vec![
+            snap("node-2", 1, [1; 32], 1, false),
+            snap("node-2", 2, [9; 32], 1, false),
+        ];
         node_snaps.insert("node-1".into(), v1);
         node_snaps.insert("node-2".into(), v2);
 

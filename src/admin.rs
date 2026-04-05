@@ -10,11 +10,10 @@
 //!
 //! This ensures resets are compatible with the internal schema and layout.
 
-use crate::storage::layout::{DataLayout, ResetScope, NodeStatus};
+use crate::storage::layout::{DataLayout, NodeStatus, ResetScope};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
-use tracing::warn;
 
 /// Admin command result.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -89,7 +88,11 @@ pub fn exec_reset_identity(data_dir: &str, confirm: bool) -> Result<AdminResult,
 
 /// Reset everything (full wipe).
 pub fn exec_reset_full(data_dir: &str, confirm: bool) -> Result<AdminResult, String> {
-    if confirm && !user_confirmation("This will delete ALL data. This action cannot be undone. Continue? [y/N]")? {
+    if confirm
+        && !user_confirmation(
+            "This will delete ALL data. This action cannot be undone. Continue? [y/N]",
+        )?
+    {
         return Err("Reset cancelled by user".into());
     }
     let layout = DataLayout::new(data_dir);
@@ -131,10 +134,10 @@ pub fn exec_print_multiaddr(data_dir: &str, listen_addr: &str) -> Result<AdminRe
 
 /// Print current configuration (as JSON).
 pub fn exec_config(config_path: &str) -> Result<AdminResult, String> {
-    let config_str = fs::read_to_string(config_path)
-        .map_err(|e| format!("Failed to read config file: {e}"))?;
-    let config: serde_json::Value = toml::from_str(&config_str)
-        .map_err(|e| format!("Failed to parse config: {e}"))?;
+    let config_str =
+        fs::read_to_string(config_path).map_err(|e| format!("Failed to read config file: {e}"))?;
+    let config: serde_json::Value =
+        toml::from_str(&config_str).map_err(|e| format!("Failed to parse config: {e}"))?;
     Ok(AdminResult::Config { config })
 }
 
@@ -149,14 +152,13 @@ pub fn exec_version() -> AdminResult {
 /// Create a backup of the entire data directory.
 pub fn exec_backup(data_dir: &str, backup_dir: &str) -> Result<AdminResult, String> {
     let source = Path::new(data_dir);
-    let target = Path::new(backup_dir).join(format!("iona_backup_{}", chrono::Utc::now().timestamp()));
+    let target =
+        Path::new(backup_dir).join(format!("iona_backup_{}", chrono::Utc::now().timestamp()));
     if !source.exists() {
         return Err("Data directory does not exist".into());
     }
-    fs::create_dir_all(&target)
-        .map_err(|e| format!("Failed to create backup dir: {e}"))?;
-    copy_dir_all(source, &target)
-        .map_err(|e| format!("Backup failed: {e}"))?;
+    fs::create_dir_all(&target).map_err(|e| format!("Failed to create backup dir: {e}"))?;
+    copy_dir_all(source, &target).map_err(|e| format!("Backup failed: {e}"))?;
     Ok(AdminResult::BackupCreated {
         backup_path: target.to_string_lossy().into(),
     })
@@ -175,7 +177,9 @@ fn user_confirmation(prompt: &str) -> Result<bool, String> {
         return Ok(false);
     }
     print!("{} ", prompt);
-    io::stdout().flush().map_err(|e| format!("I/O error: {e}"))?;
+    io::stdout()
+        .flush()
+        .map_err(|e| format!("I/O error: {e}"))?;
     let mut input = String::new();
     io::stdin()
         .read_line(&mut input)
@@ -244,7 +248,10 @@ mod tests {
 
         let result = exec_reset_chain(data_dir, false).unwrap(); // no confirmation for test
         match result {
-            AdminResult::ResetChain { dirs_removed, dirs_preserved } => {
+            AdminResult::ResetChain {
+                dirs_removed,
+                dirs_preserved,
+            } => {
                 assert!(dirs_removed.contains(&"chain/".to_string()));
                 assert!(dirs_preserved.contains(&"identity/".to_string()));
             }

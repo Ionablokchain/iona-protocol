@@ -45,7 +45,7 @@ use std::{
 use tokio::signal;
 use tracing::{error, info, warn};
 
-use axum_server::tls_rustls::{RustlsConfig};
+use axum_server::tls_rustls::RustlsConfig;
 use rustls::{
     pki_types::CertificateDer,
     server::danger::{ClientCertVerified, ClientCertVerifier},
@@ -183,7 +183,6 @@ impl ClientCertVerifier for AllowlistClientVerifier {
         &[]
     }
 
-
     fn verify_client_cert(
         &self,
         end_entity: &CertificateDer<'_>,
@@ -191,7 +190,9 @@ impl ClientCertVerifier for AllowlistClientVerifier {
         now: rustls::pki_types::UnixTime,
     ) -> Result<ClientCertVerified, rustls::Error> {
         // First, delegate to the inner verifier (WebPKI) to check the certificate chain.
-        let verified = self.inner.verify_client_cert(end_entity, intermediates, now)?;
+        let verified = self
+            .inner
+            .verify_client_cert(end_entity, intermediates, now)?;
 
         let fp = Self::fingerprint_hex(end_entity);
         if !self.allow.contains(&fp) {
@@ -239,7 +240,8 @@ fn now_unix_s() -> u64 {
 
 /// Extract the SHA‑256 fingerprint of the client certificate from the TLS connection info.
 fn client_fingerprint(ci: &RustlsConnectInfo) -> String {
-    let certs: Vec<Vec<u8>> = vec![]; if !certs.is_empty() {
+    let certs: Vec<Vec<u8>> = vec![];
+    if !certs.is_empty() {
         if let Some(first) = certs.first() {
             let mut hasher = Sha256::new();
             hasher.update(AsRef::<[u8]>::as_ref(first));
@@ -306,15 +308,25 @@ async fn sign(
                 ok: false,
                 reason: format!("bad base64: {}", e),
             };
-            { let mut file = st.audit.lock();
-                { use std::io::Write as _W; let _ = _W::write_fmt(&mut *file, format_args!("{}\n", serde_json::to_string(&audit).unwrap_or_default())); }
+            {
+                let mut file = st.audit.lock();
+                {
+                    use std::io::Write as _W;
+                    let _ = _W::write_fmt(
+                        &mut *file,
+                        format_args!("{}\n", serde_json::to_string(&audit).unwrap_or_default()),
+                    );
+                }
             }
             return (StatusCode::BAD_REQUEST, "bad base64").into_response();
         }
     };
 
     let msg_hash = blake3::hash(&msg);
-    let sig = { use ed25519_dalek::Signer as _; st.signing_key.sign(&msg).to_bytes().to_vec() };
+    let sig = {
+        use ed25519_dalek::Signer as _;
+        st.signing_key.sign(&msg).to_bytes().to_vec()
+    };
 
     let client_fp = client_fingerprint(&ci);
     let audit = AuditLine {
@@ -327,17 +339,28 @@ async fn sign(
     };
 
     // Write audit log
-    { let mut file = st.audit.lock();
-        if let Err(e) = { use std::io::Write as _W; _W::write_fmt(&mut *file, format_args!("{}\n", serde_json::to_string(&audit).unwrap_or_default())) } {
+    {
+        let mut file = st.audit.lock();
+        if let Err(e) = {
+            use std::io::Write as _W;
+            _W::write_fmt(
+                &mut *file,
+                format_args!("{}\n", serde_json::to_string(&audit).unwrap_or_default()),
+            )
+        } {
             warn!("failed to write audit log: {}", e);
-        } else if let Err(e) = { use std::io::Write as _W; _W::flush(&mut *file) } {
+        } else if let Err(e) = {
+            use std::io::Write as _W;
+            _W::flush(&mut *file)
+        } {
             warn!("failed to flush audit log: {}", e);
         }
     }
 
     Json(SignResp {
         sig_base64: B64.encode(sig),
-    }).into_response()
+    })
+    .into_response()
 }
 
 // -----------------------------------------------------------------------------
@@ -351,10 +374,15 @@ async fn main() -> anyhow::Result<()> {
     // Initialize logging
     init_logging(&args.log_level)?;
 
-    info!("Starting IONA remote signer (version {})", env!("CARGO_PKG_VERSION"));
+    info!(
+        "Starting IONA remote signer (version {})",
+        env!("CARGO_PKG_VERSION")
+    );
 
     // Load or generate signing key
-    let signing_key = Arc::new(read_signing_key_or_generate(args.key_path.to_str().unwrap_or("key.pem"))?);
+    let signing_key = Arc::new(read_signing_key_or_generate(
+        args.key_path.to_str().unwrap_or("key.pem"),
+    )?);
     let verifying_key = signing_key.verifying_key();
     let pubkey_b64 = B64.encode(verifying_key.to_bytes());
 
@@ -375,7 +403,10 @@ async fn main() -> anyhow::Result<()> {
 
     // Load allowlist
     let allowlist = Arc::new(load_allowlist(&args.allowlist)?);
-    info!("Loaded {} client fingerprints from allowlist", allowlist.len());
+    info!(
+        "Loaded {} client fingerprints from allowlist",
+        allowlist.len()
+    );
 
     // Load client CA roots
     let ca_roots = load_ca_roots(&args.client_ca_pem)?;
@@ -413,11 +444,13 @@ async fn main() -> anyhow::Result<()> {
 
     // Start server
     let addr: SocketAddr = args.listen.parse()?;
-    info!("Listening on https://{} (mTLS + allowlist + audit log)", addr);
+    info!(
+        "Listening on https://{} (mTLS + allowlist + audit log)",
+        addr
+    );
 
     let server = axum_server::bind_rustls(addr, tls)
-        .serve(app.into_make_service_with_connect_info::<RustlsConnectInfo>())
-        ;
+        .serve(app.into_make_service_with_connect_info::<RustlsConnectInfo>());
 
     if let Err(e) = server.await {
         error!("server error: {}", e);
@@ -435,11 +468,9 @@ async fn main() -> anyhow::Result<()> {
 fn init_logging(level: &str) -> anyhow::Result<()> {
     use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new(level));
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(level));
 
     let subscriber = fmt::Subscriber::builder()
-        
         .with_target(true)
         .with_thread_ids(false)
         .with_env_filter(filter)
@@ -463,8 +494,8 @@ async fn shutdown_signal() {
     #[cfg(unix)]
     let terminate = async {
         use signal::unix::{signal, SignalKind};
-        let mut signal = signal(SignalKind::terminate())
-            .expect("failed to install SIGTERM handler");
+        let mut signal =
+            signal(SignalKind::terminate()).expect("failed to install SIGTERM handler");
         signal.recv().await;
     };
 
@@ -492,11 +523,7 @@ mod tests {
     fn test_load_allowlist() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("allowlist.txt");
-        std::fs::write(
-            &path,
-            "# comment\nabc123\nDEF456  \n\n  \n",
-        )
-        .unwrap();
+        std::fs::write(&path, "# comment\nabc123\nDEF456  \n\n  \n").unwrap();
 
         let set = load_allowlist(&path).unwrap();
         assert_eq!(set.len(), 2);

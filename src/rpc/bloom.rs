@@ -34,7 +34,8 @@ impl Bloom {
     pub fn insert(&mut self, data: &[u8]) {
         let hash = keccak256(data);
         for i in 0..3 {
-            let bitpos = ((hash[2 * i] as u16) << 8 | (hash[2 * i + 1] as u16)) & (BLOOM_BITS - 1) as u16;
+            let bitpos =
+                ((hash[2 * i] as u16) << 8 | (hash[2 * i + 1] as u16)) & (BLOOM_BITS - 1) as u16;
             let byte_index = (bitpos / 8) as usize;
             let bit_in_byte = (bitpos % 8) as u8;
             self.0[byte_index] |= 1u8 << bit_in_byte;
@@ -48,7 +49,8 @@ impl Bloom {
     pub fn contains(&self, data: &[u8]) -> bool {
         let hash = keccak256(data);
         for i in 0..3 {
-            let bitpos = ((hash[2 * i] as u16) << 8 | (hash[2 * i + 1] as u16)) & (BLOOM_BITS - 1) as u16;
+            let bitpos =
+                ((hash[2 * i] as u16) << 8 | (hash[2 * i + 1] as u16)) & (BLOOM_BITS - 1) as u16;
             let byte_index = (bitpos / 8) as usize;
             let bit_in_byte = (bitpos % 8) as u8;
             if (self.0[byte_index] & (1u8 << bit_in_byte)) == 0 {
@@ -174,14 +176,14 @@ mod tests {
         let mut bloom = Bloom::new();
         bloom.insert(b"test");
         let hex = bloom.to_hex();
-        let parsed = Bloom::from_hex(&hex).unwrap();
+        let parsed = Bloom::from_hex(&hex).expect("RPC error");
         assert_eq!(bloom, parsed);
     }
 
     #[test]
     fn test_bloom_from_str() {
         let hex = &format!("0x{}", "00".repeat(256));
-        let bloom: Bloom = hex.parse().unwrap();
+        let bloom: Bloom = hex.parse().expect("RPC error");
         assert!(bloom.is_zero());
     }
 

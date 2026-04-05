@@ -22,34 +22,34 @@ use futures::StreamExt;
 use libp2p::{
     core::upgrade,
     gossipsub::{self, IdentTopic, MessageAuthenticity, TopicHash, ValidationMode},
-    identify, mdns, noise,
+    identify,
     kad::{self, store::MemoryStore},
+    mdns,
+    multiaddr::Protocol,
+    noise,
     request_response::{
-        self, Codec as RequestResponseCodec, Message as RequestResponseMessage,
-        ProtocolSupport, 
+        self, Codec as RequestResponseCodec, Message as RequestResponseMessage, ProtocolSupport,
     },
-    swarm::{NetworkBehaviour, SwarmEvent},
     swarm::behaviour::toggle::Toggle,
     swarm::StreamProtocol,
-    multiaddr::Protocol,
-    tcp, yamux,  Multiaddr, PeerId, Swarm, Transport,
+    swarm::{NetworkBehaviour, SwarmEvent},
+    tcp, yamux, Multiaddr, PeerId, Swarm, Transport,
 };
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
-    fs,
-    io,
+    fs, io,
     path::{Path, PathBuf},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 
 #[cfg(feature = "metrics")]
 use lazy_static::lazy_static;
 #[cfg(feature = "metrics")]
 use prometheus::{
-    register_histogram_vec, register_int_counter_vec, register_int_gauge,
-    register_int_gauge_vec, HistogramVec, IntCounterVec, IntGauge, IntGaugeVec, opts,
+    histogram_opts, opts, register_histogram_vec, register_int_counter_vec, register_int_gauge,
+    register_int_gauge_vec, HistogramVec, IntCounterVec, IntGauge, IntGaugeVec,
 };
 
 #[cfg(feature = "metrics")]
@@ -57,31 +57,47 @@ lazy_static! {
     static ref P2P_CONNECTIONS: IntGaugeVec = register_int_gauge_vec!(
         opts!("iona_p2p_connections", "Number of active P2P connections"),
         &["direction"]
-    ).expect("prometheus metric registration failed");
+    )
+    .expect("prometheus metric registration failed");
     static ref P2P_MESSAGES_TOTAL: IntCounterVec = register_int_counter_vec!(
         opts!("iona_p2p_messages_total", "Total P2P messages by type"),
         &["type", "direction"]
-    ).expect("prometheus metric registration failed");
+    )
+    .expect("prometheus metric registration failed");
     static ref P2P_MESSAGE_BYTES: HistogramVec = register_histogram_vec!(
-        opts!("iona_p2p_message_bytes", "Message size distribution"),
-        &["type", "direction"],
-        vec![256.0, 1024.0, 4096.0, 16384.0, 65536.0, 262144.0, 1048576.0, 4194304.0, 16777216.0]
-    ).expect("prometheus metric registration failed");
+        histogram_opts!(
+            "iona_p2p_message_bytes",
+            "Message size distribution",
+            vec![
+                256.0, 1024.0, 4096.0, 16384.0, 65536.0, 262144.0, 1048576.0, 4194304.0, 16777216.0
+            ]
+        ),
+        &["type", "direction"]
+    )
+    .expect("prometheus metric registration failed");
     static ref P2P_RATE_LIMITED: IntCounterVec = register_int_counter_vec!(
-        opts!("iona_p2p_rate_limited_total", "Requests dropped due to rate limiting"),
+        opts!(
+            "iona_p2p_rate_limited_total",
+            "Requests dropped due to rate limiting"
+        ),
         &["reason"]
-    ).expect("prometheus metric registration failed");
+    )
+    .expect("prometheus metric registration failed");
     static ref P2P_QUARANTINED: IntCounterVec = register_int_counter_vec!(
         opts!("iona_p2p_quarantined_total", "Peers quarantined by reason"),
         &["reason"]
-    ).expect("prometheus metric registration failed");
-    static ref P2P_BUCKET_DIVERSITY: IntGauge = register_int_gauge!(
-        opts!("iona_p2p_bucket_diversity", "Number of distinct diversity buckets")
-    ).expect("prometheus metric registration failed");
+    )
+    .expect("prometheus metric registration failed");
+    static ref P2P_BUCKET_DIVERSITY: IntGauge = register_int_gauge!(opts!(
+        "iona_p2p_bucket_diversity",
+        "Number of distinct diversity buckets"
+    ))
+    .expect("prometheus metric registration failed");
     static ref P2P_PENDING_REQUESTS: IntGaugeVec = register_int_gauge_vec!(
         opts!("iona_p2p_pending_requests", "Pending requests by peer"),
         &["peer"]
-    ).expect("prometheus metric registration failed");
+    )
+    .expect("prometheus metric registration failed");
 }
 
 // ── Constants ──────────────────────────────────────────────────────────────
@@ -410,7 +426,8 @@ fn rr_decide(
     state.req_count += 1;
     state.byte_count += bytes;
 
-    let limited = (max_req > 0 && state.req_count > max_req) || (max_bytes > 0 && state.byte_count > max_bytes);
+    let limited = (max_req > 0 && state.req_count > max_req)
+        || (max_bytes > 0 && state.byte_count > max_bytes);
     if !limited {
         return RateLimitDecision {
             allow: true,
@@ -484,11 +501,15 @@ impl RequestResponseCodec for Codec {
         io.read_exact(&mut len_buf).await?;
         let len = u32::from_be_bytes(len_buf) as usize;
         if len > MAX_MSG_SIZE {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "request too large"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "request too large",
+            ));
         }
         let mut buf = vec![0u8; len];
         io.read_exact(&mut buf).await?;
-        bincode::deserialize(&buf).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("{e}")))
+        bincode::deserialize(&buf)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("{e}")))
     }
 
     async fn read_response<T>(&mut self, _: &StreamProtocol, io: &mut T) -> io::Result<Resp>
@@ -499,20 +520,28 @@ impl RequestResponseCodec for Codec {
         io.read_exact(&mut len_buf).await?;
         let len = u32::from_be_bytes(len_buf) as usize;
         if len > MAX_MSG_SIZE {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "response too large"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "response too large",
+            ));
         }
         let mut buf = vec![0u8; len];
         io.read_exact(&mut buf).await?;
-        bincode::deserialize(&buf).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("{e}")))
+        bincode::deserialize(&buf)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("{e}")))
     }
 
     async fn write_request<T>(&mut self, _: &StreamProtocol, io: &mut T, req: Req) -> io::Result<()>
     where
         T: AsyncWrite + Unpin + Send,
     {
-        let bytes = bincode::serialize(&req).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("{e}")))?;
+        let bytes = bincode::serialize(&req)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("{e}")))?;
         if bytes.len() > MAX_MSG_SIZE {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "request too large"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "request too large",
+            ));
         }
         let len = (bytes.len() as u32).to_be_bytes();
         io.write_all(&len).await?;
@@ -521,13 +550,22 @@ impl RequestResponseCodec for Codec {
         Ok(())
     }
 
-    async fn write_response<T>(&mut self, _: &StreamProtocol, io: &mut T, resp: Resp) -> io::Result<()>
+    async fn write_response<T>(
+        &mut self,
+        _: &StreamProtocol,
+        io: &mut T,
+        resp: Resp,
+    ) -> io::Result<()>
     where
         T: AsyncWrite + Unpin + Send,
     {
-        let bytes = bincode::serialize(&resp).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("{e}")))?;
+        let bytes = bincode::serialize(&resp)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("{e}")))?;
         if bytes.len() > MAX_MSG_SIZE {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "response too large"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "response too large",
+            ));
         }
         let len = (bytes.len() as u32).to_be_bytes();
         io.write_all(&len).await?;
@@ -603,7 +641,9 @@ impl Default for P2pConfig {
     fn default() -> Self {
         Self {
             local_key: libp2p::identity::Keypair::generate_ed25519(),
-            listen: "/ip4/0.0.0.0/tcp/0".parse().expect("valid multiaddr literal"),
+            listen: "/ip4/0.0.0.0/tcp/0"
+                .parse()
+                .expect("valid multiaddr literal"),
             static_peers: vec![],
             bootnodes: vec![],
             enable_mdns: false,
@@ -860,7 +900,13 @@ impl P2p {
         self.scores_dirty = true;
     }
 
-    fn gs_allow_inbound(&mut self, peer: PeerId, bytes: u32, max_msgs: u32, max_bytes: u32) -> bool {
+    fn gs_allow_inbound(
+        &mut self,
+        peer: PeerId,
+        bytes: u32,
+        max_msgs: u32,
+        max_bytes: u32,
+    ) -> bool {
         let now = Instant::now();
         let st = self.gs_in.entry(peer).or_insert_with(|| GsWindow::new(now));
         if now.duration_since(st.window_start) > Duration::from_secs(1) {
@@ -871,7 +917,8 @@ impl P2p {
         st.msg_count = st.msg_count.saturating_add(1);
         st.byte_count = st.byte_count.saturating_add(bytes);
 
-        if (max_msgs > 0 && st.msg_count > max_msgs) || (max_bytes > 0 && st.byte_count > max_bytes) {
+        if (max_msgs > 0 && st.msg_count > max_msgs) || (max_bytes > 0 && st.byte_count > max_bytes)
+        {
             return false;
         }
         true
@@ -889,7 +936,8 @@ impl P2p {
         st.byte_count = st.byte_count.saturating_add(bytes);
 
         if (self.gs_max_publish_msgs_per_sec > 0 && st.msg_count > self.gs_max_publish_msgs_per_sec)
-            || (self.gs_max_publish_bytes_per_sec > 0 && st.byte_count > self.gs_max_publish_bytes_per_sec)
+            || (self.gs_max_publish_bytes_per_sec > 0
+                && st.byte_count > self.gs_max_publish_bytes_per_sec)
         {
             return false;
         }
@@ -928,9 +976,18 @@ impl P2p {
                 Protocol::Ip6(v6) => {
                     let o = v6.octets();
                     return match self.diversity_bucket_kind.as_str() {
-                        "ip16" => Some(format!("ip6:{:02x}{:02x}{:02x}{:02x}", o[0], o[1], o[2], o[3])),
-                        "ip24" => Some(format!("ip6:{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}", o[0], o[1], o[2], o[3], o[4], o[5])),
-                        "asn" => Some(format!("asn48:{:02x}{:02x}:{:02x}{:02x}:{:02x}{:02x}", o[0], o[1], o[2], o[3], o[4], o[5])),
+                        "ip16" => Some(format!(
+                            "ip6:{:02x}{:02x}{:02x}{:02x}",
+                            o[0], o[1], o[2], o[3]
+                        )),
+                        "ip24" => Some(format!(
+                            "ip6:{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+                            o[0], o[1], o[2], o[3], o[4], o[5]
+                        )),
+                        "asn" => Some(format!(
+                            "asn48:{:02x}{:02x}:{:02x}{:02x}:{:02x}{:02x}",
+                            o[0], o[1], o[2], o[3], o[4], o[5]
+                        )),
                         _ => None,
                     };
                 }
@@ -1036,7 +1093,13 @@ impl P2p {
         true
     }
 
-    fn rr_allow_inbound(&mut self, now: Instant, peer: PeerId, kind: ProtoKind, bytes: u32) -> bool {
+    fn rr_allow_inbound(
+        &mut self,
+        now: Instant,
+        peer: PeerId,
+        kind: ProtoKind,
+        bytes: u32,
+    ) -> bool {
         // Global quarantine check
         if self.is_quarantined(peer) {
             warn!(%peer, ?kind, "peer is quarantined; dropping request");
@@ -1046,7 +1109,10 @@ impl P2p {
 
         let key = (peer, kind);
         let (max_req, max_bytes) = self.rr_limits_for(kind);
-        let st = self.rr_abuse.entry(key).or_insert_with(|| AbuseState::new(now));
+        let st = self
+            .rr_abuse
+            .entry(key)
+            .or_insert_with(|| AbuseState::new(now));
 
         let decision = rr_decide(
             st,
@@ -1096,11 +1162,17 @@ impl P2p {
         match major_str.parse::<u32>() {
             Ok(major) => SUPPORTED_PROTOCOL_VERSIONS.contains(&major),
             Err(_) if self.strict_version_check => {
-                warn!(protocol_version, "could not parse protocol version major, rejecting connection");
+                warn!(
+                    protocol_version,
+                    "could not parse protocol version major, rejecting connection"
+                );
                 false
             }
             Err(_) => {
-                warn!(protocol_version, "could not parse protocol version major, allowing connection (strict mode off)");
+                warn!(
+                    protocol_version,
+                    "could not parse protocol version major, allowing connection (strict mode off)"
+                );
                 true
             }
         }
@@ -1184,6 +1256,7 @@ impl P2p {
 
         let kad = if cfg.enable_kad {
             let store = MemoryStore::new(peer_id);
+            #[allow(deprecated)]
             let mut kcfg = kad::Config::default();
             kcfg.set_query_timeout(Duration::from_secs(30));
             Toggle::from(Some(kad::Behaviour::with_config(peer_id, store, kcfg)))
@@ -1320,7 +1393,10 @@ impl P2p {
         if let Ok(bytes) = bincode::serialize(msg) {
             let b = bytes.len() as u32;
             if !self.gs_allow_publish(b) {
-                warn!(bytes = b, "gossipsub publish cap hit; dropping local publish");
+                warn!(
+                    bytes = b,
+                    "gossipsub publish cap hit; dropping local publish"
+                );
                 return;
             }
             #[cfg(feature = "metrics")]
@@ -1445,7 +1521,10 @@ impl P2p {
         if !self.can_send_request(peer) {
             return;
         }
-        let req = Req::State(StateReq::Attest(SnapshotAttestRequest { height, state_root_hex }));
+        let req = Req::State(StateReq::Attest(SnapshotAttestRequest {
+            height,
+            state_root_hex,
+        }));
         self.send_request_impl(peer, req);
     }
 
@@ -1453,7 +1532,10 @@ impl P2p {
         let now = Instant::now();
         let est = bincode::serialized_size(&resp).unwrap_or(0) as u32;
         if !self.rr_allow_global_out(now, est) {
-            warn!(bytes=est, "global RR outbound bandwidth cap hit; dropping response");
+            warn!(
+                bytes = est,
+                "global RR outbound bandwidth cap hit; dropping response"
+            );
             return;
         }
         let _ = self.swarm.behaviour_mut().rr.send_response(ch, resp);
@@ -1481,19 +1563,27 @@ impl P2p {
                         if self.banned_peers.contains(&peer) {
                             continue;
                         }
-                        self.swarm.behaviour_mut().gossipsub.add_explicit_peer(&peer);
+                        self.swarm
+                            .behaviour_mut()
+                            .gossipsub
+                            .add_explicit_peer(&peer);
                         self.peer_scores.entry(peer).or_insert(0);
                         info!(%peer, "mdns discovered");
                     }
                 }
                 SwarmEvent::Behaviour(BehaviourEvent::Mdns(mdns::Event::Expired(list))) => {
                     for (peer, _addr) in list {
-                        self.swarm.behaviour_mut().gossipsub.remove_explicit_peer(&peer);
+                        self.swarm
+                            .behaviour_mut()
+                            .gossipsub
+                            .remove_explicit_peer(&peer);
                         info!(%peer, "mdns expired");
                     }
                 }
                 SwarmEvent::Behaviour(BehaviourEvent::Identify(identify::Event::Received {
-                    peer_id, info, ..
+                    peer_id,
+                    info,
+                    ..
                 })) => {
                     if !self.banned_peers.contains(&peer_id) {
                         if !self.is_version_compatible(&info.protocol_version) {
@@ -1509,12 +1599,20 @@ impl P2p {
                             let _ = k.bootstrap();
                         }
 
-                        self.swarm.behaviour_mut().gossipsub.add_explicit_peer(&peer_id);
+                        self.swarm
+                            .behaviour_mut()
+                            .gossipsub
+                            .add_explicit_peer(&peer_id);
                         self.peer_scores.entry(peer_id).or_insert(0);
                         info!(%peer_id, "identify: peer connected");
                     }
                 }
-                SwarmEvent::ConnectionEstablished { peer_id, connection_id, endpoint, .. } => {
+                SwarmEvent::ConnectionEstablished {
+                    peer_id,
+                    connection_id,
+                    endpoint,
+                    ..
+                } => {
                     if self.banned_peers.contains(&peer_id) {
                         let _ = self.swarm.disconnect_peer_id(peer_id);
                         continue;
@@ -1541,7 +1639,9 @@ impl P2p {
                     }
 
                     // Verifică per peer
-                    let per_peer_count = self.accepted_connections.iter()
+                    let per_peer_count = self
+                        .accepted_connections
+                        .iter()
                         .filter(|(pid, _)| *pid == peer_id)
                         .count();
                     if per_peer_count >= self.max_connections_per_peer {
@@ -1557,7 +1657,8 @@ impl P2p {
                     // Acum acceptăm conexiunea: înregistrăm în accepted_connections
                     self.accepted_connections.insert((peer_id, connection_id));
                     if let Some(ref bucket) = bucket {
-                        self.connection_bucket.insert((peer_id, connection_id), bucket.clone());
+                        self.connection_bucket
+                            .insert((peer_id, connection_id), bucket.clone());
                         match direction {
                             "in" => *self.bucket_inbound.entry(bucket.clone()).or_insert(0) += 1,
                             "out" => *self.bucket_outbound.entry(bucket.clone()).or_insert(0) += 1,
@@ -1571,14 +1672,35 @@ impl P2p {
                     self.peer_scores.entry(peer_id).or_insert(0);
                     info!(%peer_id, "connection established");
                 }
-                SwarmEvent::ConnectionClosed { peer_id, connection_id, endpoint, .. } => {
+                SwarmEvent::ConnectionClosed {
+                    peer_id,
+                    connection_id,
+                    endpoint,
+                    ..
+                } => {
                     let direction = if endpoint.is_dialer() { "out" } else { "in" };
                     // Doar dacă această conexiune a fost acceptată, decrementăm metricile
                     if self.accepted_connections.remove(&(peer_id, connection_id)) {
-                        if let Some(bucket) = self.connection_bucket.remove(&(peer_id, connection_id)) {
+                        if let Some(bucket) =
+                            self.connection_bucket.remove(&(peer_id, connection_id))
+                        {
                             match direction {
-                                "in" => if let Some(c) = self.bucket_inbound.get_mut(&bucket) { *c = c.saturating_sub(1); if *c == 0 { self.bucket_inbound.remove(&bucket); } },
-                                "out" => if let Some(c) = self.bucket_outbound.get_mut(&bucket) { *c = c.saturating_sub(1); if *c == 0 { self.bucket_outbound.remove(&bucket); } },
+                                "in" => {
+                                    if let Some(c) = self.bucket_inbound.get_mut(&bucket) {
+                                        *c = c.saturating_sub(1);
+                                        if *c == 0 {
+                                            self.bucket_inbound.remove(&bucket);
+                                        }
+                                    }
+                                }
+                                "out" => {
+                                    if let Some(c) = self.bucket_outbound.get_mut(&bucket) {
+                                        *c = c.saturating_sub(1);
+                                        if *c == 0 {
+                                            self.bucket_outbound.remove(&bucket);
+                                        }
+                                    }
+                                }
                                 _ => {}
                             }
                         }
@@ -1602,7 +1724,8 @@ impl P2p {
                     }
 
                     let topic = message.topic;
-                    if self.gs_deny_unknown_topics && !self.gs_allowed_topic_hashes.contains(&topic) {
+                    if self.gs_deny_unknown_topics && !self.gs_allowed_topic_hashes.contains(&topic)
+                    {
                         warn!(peer=%propagation_source, ?topic, "gossipsub topic not allowed; dropping");
                         self.bump_score(propagation_source, -2);
                         continue;
@@ -1618,7 +1741,11 @@ impl P2p {
                     if !self.gs_allow_inbound(propagation_source, bytes, lim_msgs, lim_bytes) {
                         warn!(peer=%propagation_source, bytes, "gossipsub inbound cap hit; quarantining");
                         self.bump_score(propagation_source, -3);
-                        self.quarantine_peer(propagation_source, self.peer_quarantine_s.max(1), "gossipsub_abuse");
+                        self.quarantine_peer(
+                            propagation_source,
+                            self.peer_quarantine_s.max(1),
+                            "gossipsub_abuse",
+                        );
                         continue;
                     }
 
@@ -1648,71 +1775,85 @@ impl P2p {
                         }
                     }
                 }
-                SwarmEvent::Behaviour(BehaviourEvent::Rr(request_response::Event::Message { peer, message })) => {
-                    match message {
-                        RequestResponseMessage::Request {
-                            request, channel, ..
-                        } => {
-                            let now = Instant::now();
-                            let kind = ProtoKind::from_req(&request);
-                            let est_bytes = bincode::serialized_size(&request).unwrap_or(0) as u32;
-
-                            #[cfg(feature = "metrics")]
-                            {
-                                P2P_MESSAGE_BYTES
-                                    .with_label_values(&[&format!("rr_{:?}_req", kind), "in"])
-                                    .observe(est_bytes as f64);
-                            }
-
-                            if !self.rr_allow_global_in(now, est_bytes) {
-                                warn!(%peer, ?kind, bytes = est_bytes, "global RR inbound bandwidth cap hit; dropping request");
-                                self.bump_score(peer, -2);
-                                continue;
-                            }
-
-                            if !self.rr_allow_inbound(now, peer, kind, est_bytes) {
-                                continue;
-                            }
-
-                            #[cfg(feature = "metrics")]
-                            P2P_MESSAGES_TOTAL.with_label_values(&[&format!("rr_{:?}", kind), "in"]).inc();
-
-                            return Ok(P2pEvent::Request {
-                                from: peer,
-                                req: request,
-                                channel,
-                            });
-                        }
-                        RequestResponseMessage::Response { response, request_id, .. } => {
-                            let now = Instant::now();
-                            let est_bytes = bincode::serialized_size(&response).unwrap_or(0) as u32;
-                            #[cfg(feature = "metrics")]
-                            {
-                                P2P_MESSAGE_BYTES
-                                    .with_label_values(&["rr_response", "in"])
-                                    .observe(est_bytes as f64);
-                                P2P_MESSAGES_TOTAL
-                                    .with_label_values(&["rr_response", "in"])
-                                    .inc();
-                            }
-                            self.request_completed(&request_id);
-                            return Ok(P2pEvent::Response { from: peer, resp: response });
-                        }
-                    }
-                }
-                SwarmEvent::Behaviour(BehaviourEvent::Rr(request_response::Event::OutboundFailure {
+                SwarmEvent::Behaviour(BehaviourEvent::Rr(request_response::Event::Message {
                     peer,
-                    request_id,
-                    error,
-                })) => {
+                    message,
+                })) => match message {
+                    RequestResponseMessage::Request {
+                        request, channel, ..
+                    } => {
+                        let now = Instant::now();
+                        let kind = ProtoKind::from_req(&request);
+                        let est_bytes = bincode::serialized_size(&request).unwrap_or(0) as u32;
+
+                        #[cfg(feature = "metrics")]
+                        {
+                            P2P_MESSAGE_BYTES
+                                .with_label_values(&[&format!("rr_{:?}_req", kind), "in"])
+                                .observe(est_bytes as f64);
+                        }
+
+                        if !self.rr_allow_global_in(now, est_bytes) {
+                            warn!(%peer, ?kind, bytes = est_bytes, "global RR inbound bandwidth cap hit; dropping request");
+                            self.bump_score(peer, -2);
+                            continue;
+                        }
+
+                        if !self.rr_allow_inbound(now, peer, kind, est_bytes) {
+                            continue;
+                        }
+
+                        #[cfg(feature = "metrics")]
+                        P2P_MESSAGES_TOTAL
+                            .with_label_values(&[&format!("rr_{:?}", kind), "in"])
+                            .inc();
+
+                        return Ok(P2pEvent::Request {
+                            from: peer,
+                            req: request,
+                            channel,
+                        });
+                    }
+                    RequestResponseMessage::Response {
+                        response,
+                        request_id,
+                        ..
+                    } => {
+                        let _now = Instant::now();
+                        let est_bytes = bincode::serialized_size(&response).unwrap_or(0) as u32;
+                        #[cfg(feature = "metrics")]
+                        {
+                            P2P_MESSAGE_BYTES
+                                .with_label_values(&["rr_response", "in"])
+                                .observe(est_bytes as f64);
+                            P2P_MESSAGES_TOTAL
+                                .with_label_values(&["rr_response", "in"])
+                                .inc();
+                        }
+                        self.request_completed(&request_id);
+                        return Ok(P2pEvent::Response {
+                            from: peer,
+                            resp: response,
+                        });
+                    }
+                },
+                SwarmEvent::Behaviour(BehaviourEvent::Rr(
+                    request_response::Event::OutboundFailure {
+                        peer,
+                        request_id,
+                        error,
+                    },
+                )) => {
                     warn!(%peer, ?request_id, ?error, "outbound request failed");
                     self.request_completed(&request_id);
                 }
-                SwarmEvent::Behaviour(BehaviourEvent::Rr(request_response::Event::InboundFailure {
-                    peer,
-                    request_id,
-                    error,
-                })) => {
+                SwarmEvent::Behaviour(BehaviourEvent::Rr(
+                    request_response::Event::InboundFailure {
+                        peer,
+                        request_id,
+                        error,
+                    },
+                )) => {
                     warn!(%peer, ?request_id, ?error, "inbound request failed");
                 }
                 SwarmEvent::NewListenAddr { address, .. } => info!(%address, "listening"),
@@ -1776,12 +1917,14 @@ pub enum P2pEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use libp2p::multiaddr::Protocol;
     use tempfile::tempdir;
 
     // Funcție helper pentru testarea compatibilității cu un set dat de versiuni
     fn version_compatible(protocol_version: &str, supported: &[u32], strict: bool) -> bool {
-        let version_str = protocol_version.split('/').last().unwrap_or(protocol_version);
+        let version_str = protocol_version
+            .split('/')
+            .last()
+            .unwrap_or(protocol_version);
         let major_str = version_str.split('.').next().unwrap_or(version_str);
         match major_str.parse::<u32>() {
             Ok(major) => supported.contains(&major),

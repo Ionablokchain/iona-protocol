@@ -30,11 +30,18 @@ struct MemBlockStore(Arc<Mutex<HashMap<Hash32, Block>>>);
 
 impl BlockStore for MemBlockStore {
     fn get(&self, id: &Hash32) -> Option<Block> {
-        self.0.lock().expect("MemBlockStore lock poisoned").get(id).cloned()
+        self.0
+            .lock()
+            .expect("MemBlockStore lock poisoned")
+            .get(id)
+            .cloned()
     }
     fn put(&self, block: Block) {
         let id = block.id();
-        self.0.lock().expect("MemBlockStore lock poisoned").insert(id, block);
+        self.0
+            .lock()
+            .expect("MemBlockStore lock poisoned")
+            .insert(id, block);
     }
 }
 
@@ -42,13 +49,16 @@ impl BlockStore for MemBlockStore {
 #[derive(Default, Clone)]
 struct RecordingOutbox {
     pub broadcasts: Arc<Mutex<Vec<ConsensusMsg>>>,
-    pub commits:    Arc<Mutex<Vec<CommitCertificate>>>,
-    pub store:      MemBlockStore,
+    pub commits: Arc<Mutex<Vec<CommitCertificate>>>,
+    pub store: MemBlockStore,
 }
 
 impl Outbox for RecordingOutbox {
     fn broadcast(&mut self, msg: ConsensusMsg) {
-        self.broadcasts.lock().expect("RecordingOutbox lock poisoned").push(msg);
+        self.broadcasts
+            .lock()
+            .expect("RecordingOutbox lock poisoned")
+            .push(msg);
     }
     fn request_block(&mut self, _id: Hash32) {}
     fn on_commit(
@@ -59,7 +69,10 @@ impl Outbox for RecordingOutbox {
         _base_fee: u64,
         _receipts: &[Receipt],
     ) {
-        self.commits.lock().expect("RecordingOutbox lock poisoned").push(cert.clone());
+        self.commits
+            .lock()
+            .expect("RecordingOutbox lock poisoned")
+            .push(cert.clone());
     }
 }
 
@@ -149,7 +162,10 @@ fn sample_header() -> Block {
         timestamp: 0,
         protocol_version: 1,
     };
-    Block { header, txs: vec![] }
+    Block {
+        header,
+        txs: vec![],
+    }
 }
 
 /// A sample state with a few KV entries and a balance.
@@ -208,7 +224,17 @@ mod consensus_tests {
 
         let mut engines: Vec<Engine<Ed25519Verifier>> = keys
             .iter()
-            .map(|_| Engine::new(cfg.clone(), vset.clone(), 1, Hash32::zero(), state.clone(), stakes.clone(), None))
+            .map(|_| {
+                Engine::new(
+                    cfg.clone(),
+                    vset.clone(),
+                    1,
+                    Hash32::zero(),
+                    state.clone(),
+                    stakes.clone(),
+                    None,
+                )
+            })
             .collect();
 
         let mut outboxes: Vec<RecordingOutbox> = (0..4)
@@ -219,17 +245,20 @@ mod consensus_tests {
             .collect();
 
         // Determine the proposer for height=1, round=0.
-        let proposer_idx = (0..4).find(|&i| {
-            engines[i].is_proposer(&keys[i].public_key())
-        }).expect("one engine must be the proposer");
+        let proposer_idx = (0..4)
+            .find(|&i| engines[i].is_proposer(&keys[i].public_key()))
+            .expect("one engine must be the proposer");
 
         // Step 1: Tick ONLY the proposer so it produces a proposal + its own prevote.
         // Do NOT tick non-proposers yet — they would vote nil without a proposal.
         {
             let mut ob = outboxes[proposer_idx].clone();
             engines[proposer_idx].tick(
-                &keys[proposer_idx], &stores[proposer_idx], &mut ob,
-                cfg.propose_timeout_ms, |_| vec![],
+                &keys[proposer_idx],
+                &stores[proposer_idx],
+                &mut ob,
+                cfg.propose_timeout_ms,
+                |_| vec![],
             );
         }
         // Step 2: Deliver proposer's messages (Proposal + Prevote) to all engines.
@@ -281,11 +310,7 @@ mod consensus_tests {
         let block_from_store = stores[0]
             .get(first_id)
             .expect("committed block should be in store");
-        assert_eq!(
-            block_from_store.id(),
-            *first_id,
-            "stored block ID mismatch"
-        );
+        assert_eq!(block_from_store.id(), *first_id, "stored block ID mismatch");
     }
 
     /// Deterministic block ID: same header → same ID.
@@ -596,7 +621,10 @@ mod wal_tests {
         }
 
         // Replay events
-        let events = { let w = iona::wal::Wal::open(wal_path).expect("failed to open WAL"); w.replay().expect("replay should succeed") };
+        let events = {
+            let w = iona::wal::Wal::open(wal_path).expect("failed to open WAL");
+            w.replay().expect("replay should succeed")
+        };
         assert_eq!(events.len(), 2, "expected 2 events, got {}", events.len());
 
         match &events[0] {
@@ -604,7 +632,11 @@ mod wal_tests {
             _ => panic!("first event should be Note"),
         }
         match &events[1] {
-            WalEvent::Step { height, round, step } => {
+            WalEvent::Step {
+                height,
+                round,
+                step,
+            } => {
                 assert_eq!(*height, 5, "Step height mismatch");
                 assert_eq!(*round, 0, "Step round mismatch");
                 assert_eq!(step, "Propose", "Step step mismatch");

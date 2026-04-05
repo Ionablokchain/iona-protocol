@@ -23,10 +23,10 @@
 //! 5. **Anti-Backrunning Delay**: A configurable delay window prevents validators
 //!    from inserting their own transactions immediately after seeing a large trade.
 
-use crate::types::{Hash32, Height, Tx, hash_bytes};
+use crate::types::{hash_bytes, Hash32, Height, Tx};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, VecDeque};
-use tracing::{debug, info, warn};
+use tracing::{debug, warn};
 
 // ── Configuration ───────────────────────────────────────────────────────
 
@@ -132,12 +132,18 @@ impl NonceManager {
         let expected = self.next_nonce.get(&sender).copied().unwrap_or(0);
 
         if nonce < expected {
-            debug!("ignoring stale transaction from {} with nonce {} (expected {})", sender, nonce, expected);
+            debug!(
+                "ignoring stale transaction from {} with nonce {} (expected {})",
+                sender, nonce, expected
+            );
             return false;
         }
         if nonce > expected {
             self.pending.insert((sender.clone(), nonce), tx);
-            debug!("queued out-of-order transaction from {} (nonce {}, expected {})", sender, nonce, expected);
+            debug!(
+                "queued out-of-order transaction from {} (nonce {}, expected {})",
+                sender, nonce, expected
+            );
             return false;
         }
         // correct nonce
@@ -150,10 +156,14 @@ impl NonceManager {
     fn flush_pending(&mut self, sender: &str) {
         let mut expected = self.next_nonce.get(sender).copied().unwrap_or(0);
         loop {
-            if let Some(tx) = self.pending.remove(&(sender.to_string(), expected)) {
+            if let Some(_tx) = self.pending.remove(&(sender.to_string(), expected)) {
                 self.next_nonce.insert(sender.to_string(), expected + 1);
                 expected += 1;
-                debug!("flushed pending transaction from {} (nonce {})", sender, expected - 1);
+                debug!(
+                    "flushed pending transaction from {} (nonce {})",
+                    sender,
+                    expected - 1
+                );
             } else {
                 break;
             }
@@ -165,7 +175,8 @@ impl NonceManager {
     pub fn set_expected_nonce(&mut self, sender: &str, new_expected: u64) {
         self.next_nonce.insert(sender.to_string(), new_expected);
         // remove any pending transactions with nonce < new_expected (they are invalid)
-        self.pending.retain(|(s, n), _| s != sender || *n >= new_expected);
+        self.pending
+            .retain(|(s, n), _| s != sender || *n >= new_expected);
         self.flush_pending(sender);
     }
 }
@@ -185,8 +196,8 @@ pub struct EncryptedEnvelope {
 
 /// Encrypt a transaction for threshold-encrypted mempool.
 pub fn encrypt_tx_envelope(tx: &Tx, epoch_secret: &[u8; 32], epoch: u64) -> EncryptedEnvelope {
-    use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
     use aes_gcm::aead::Aead;
+    use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
 
     let plaintext = serde_json::to_vec(tx).unwrap_or_default();
     let tx_hash = crate::types::tx_hash(tx);
@@ -195,7 +206,9 @@ pub fn encrypt_tx_envelope(tx: &Tx, epoch_secret: &[u8; 32], epoch: u64) -> Encr
 
     let cipher = Aes256Gcm::new_from_slice(epoch_secret).expect("valid key size");
     let nonce = Nonce::from_slice(&nonce_bytes);
-    let ciphertext = cipher.encrypt(nonce, plaintext.as_ref()).unwrap_or_default();
+    let ciphertext = cipher
+        .encrypt(nonce, plaintext.as_ref())
+        .unwrap_or_default();
 
     EncryptedEnvelope {
         ciphertext,
@@ -208,8 +221,8 @@ pub fn encrypt_tx_envelope(tx: &Tx, epoch_secret: &[u8; 32], epoch: u64) -> Encr
 
 /// Decrypt a transaction from a threshold-encrypted envelope.
 pub fn decrypt_tx_envelope(envelope: &EncryptedEnvelope, epoch_secret: &[u8; 32]) -> Option<Tx> {
-    use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
     use aes_gcm::aead::Aead;
+    use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
 
     let cipher = Aes256Gcm::new_from_slice(epoch_secret).ok()?;
     let nonce = Nonce::from_slice(&envelope.nonce);
@@ -220,11 +233,7 @@ pub fn decrypt_tx_envelope(envelope: &EncryptedEnvelope, epoch_secret: &[u8; 32]
 // ── Fair Ordering ───────────────────────────────────────────────────────
 
 /// Deterministic shuffle within a jitter window.
-fn fair_order_shuffle(
-    commits: &mut [(u64, TxCommit)],
-    jitter_ms: u64,
-    block_hash_seed: &Hash32,
-) {
+fn fair_order_shuffle(commits: &mut [(u64, TxCommit)], jitter_ms: u64, block_hash_seed: &Hash32) {
     if commits.len() <= 1 || jitter_ms == 0 {
         return;
     }
@@ -249,11 +258,7 @@ fn fair_order_shuffle(
 }
 
 /// Deterministic Fisher-Yates shuffle using block hash as seed.
-fn deterministic_shuffle(
-    items: &mut [(u64, TxCommit)],
-    seed: &Hash32,
-    extra_nonce: u64,
-) {
+fn deterministic_shuffle(items: &mut [(u64, TxCommit)], seed: &Hash32, extra_nonce: u64) {
     let n = items.len();
     if n <= 1 {
         return;
@@ -268,7 +273,8 @@ fn deterministic_shuffle(
 
     for i in (1..n).rev() {
         state = hash_bytes(&state.0);
-        let rand_val = u64::from_le_bytes(state.0[..8].try_into().expect("state hash is >= 8 bytes"));
+        let rand_val =
+            u64::from_le_bytes(state.0[..8].try_into().expect("state hash is >= 8 bytes"));
         let j = (rand_val as usize) % (i + 1);
         items.swap(i, j);
     }
@@ -333,7 +339,8 @@ impl MevMempool {
 
         self.metrics.commits_received += 1;
         let commit_hash_for_log = commit.commit_hash.clone();
-        self.pending_commits.insert(commit.commit_hash.clone(), commit);
+        self.pending_commits
+            .insert(commit.commit_hash.clone(), commit);
         debug!(hash = ?commit_hash_for_log, "commit submitted");
         Ok(())
     }
@@ -341,7 +348,9 @@ impl MevMempool {
     /// Submit a reveal (phase 2 of commit-reveal).
     pub fn submit_reveal(&mut self, reveal: TxReveal) -> Result<(), &'static str> {
         // Verify the commit exists
-        let commit = self.pending_commits.get(&reveal.commit_hash)
+        let commit = self
+            .pending_commits
+            .get(&reveal.commit_hash)
             .ok_or("commit not found")?;
 
         // Verify the reveal matches the commit
@@ -358,7 +367,8 @@ impl MevMempool {
         }
 
         // Check TTL
-        if self.current_height.saturating_sub(commit.commit_height) > self.config.commit_ttl_blocks {
+        if self.current_height.saturating_sub(commit.commit_height) > self.config.commit_ttl_blocks
+        {
             self.metrics.commits_expired += 1;
             self.pending_commits.remove(&reveal.commit_hash);
             return Err("commit expired");
@@ -460,33 +470,50 @@ impl MevMempool {
             let mut ordering: Vec<(u64, TxCommit)> = candidates
                 .iter()
                 .map(|(order, tx)| {
-                    (*order, TxCommit {
-                        commit_hash: crate::types::tx_hash(tx),
-                        sender: tx.from.clone(),
-                        received_order: *order,
-                        commit_height: self.current_height,
-                        encrypted_tx: None,
-                    })
+                    (
+                        *order,
+                        TxCommit {
+                            commit_hash: crate::types::tx_hash(tx),
+                            sender: tx.from.clone(),
+                            received_order: *order,
+                            commit_height: self.current_height,
+                            encrypted_tx: None,
+                        },
+                    )
                 })
                 .collect();
 
             // Apply fair ordering with jitter
-            fair_order_shuffle(&mut ordering, self.config.ordering_jitter_ms, &self.last_block_hash);
+            fair_order_shuffle(
+                &mut ordering,
+                self.config.ordering_jitter_ms,
+                &self.last_block_hash,
+            );
             self.metrics.fair_order_shuffles += 1;
 
             // Reorder candidates according to shuffled order
             candidates.sort_by_key(|(order, _)| {
-                ordering.iter().position(|(o, _)| *o == *order).unwrap_or(usize::MAX)
+                ordering
+                    .iter()
+                    .position(|(o, _)| *o == *order)
+                    .unwrap_or(usize::MAX)
             });
         }
 
         // Optional priority sorting based on gas price (may reduce MEV resistance)
         if self.config.enable_priority_sorting {
-            candidates.sort_by(|a, b| b.1.max_priority_fee_per_gas.cmp(&a.1.max_priority_fee_per_gas));
+            candidates.sort_by(|a, b| {
+                b.1.max_priority_fee_per_gas
+                    .cmp(&a.1.max_priority_fee_per_gas)
+            });
         }
 
         // Truncate
-        let taken = candidates.into_iter().take(n).map(|(_, tx)| tx).collect::<Vec<_>>();
+        let taken = candidates
+            .into_iter()
+            .take(n)
+            .map(|(_, tx)| tx)
+            .collect::<Vec<_>>();
 
         // Remove stale revealed transactions that have not been included for too long
         self.purge_old_revealed();
@@ -501,7 +528,9 @@ impl MevMempool {
             return;
         }
         let threshold_height = self.current_height.saturating_sub(max_age);
-        let old_count = self.revealed_txs.iter()
+        let _old_count = self
+            .revealed_txs
+            .iter()
             .filter(|(_, tx)| tx.nonce < threshold_height) // nonce is not a height, we need proper age tracking
             .count();
         // Actually we need to store the block height when a tx was revealed.
@@ -511,7 +540,12 @@ impl MevMempool {
     }
 
     /// Advance to a new height. Expires old commits and updates nonce manager.
-    pub fn advance_height(&mut self, height: Height, block_hash: &Hash32, applied_nonces: &HashMap<String, u64>) {
+    pub fn advance_height(
+        &mut self,
+        height: Height,
+        block_hash: &Hash32,
+        applied_nonces: &HashMap<String, u64>,
+    ) {
         self.current_height = height;
         self.last_block_hash = block_hash.clone();
 
@@ -522,7 +556,8 @@ impl MevMempool {
 
         // Expire old commits
         let ttl = self.config.commit_ttl_blocks;
-        let expired: Vec<Hash32> = self.pending_commits
+        let expired: Vec<Hash32> = self
+            .pending_commits
             .iter()
             .filter(|(_, c)| height.saturating_sub(c.commit_height) > ttl)
             .map(|(h, _)| h.clone())
@@ -600,7 +635,11 @@ pub fn generate_random_salt() -> Vec<u8> {
     let mut salt = [0u8; 16];
     #[cfg(not(target_arch = "wasm32"))]
     {
-        if let Err(e) = { use rand::RngCore; rand::thread_rng().fill_bytes(&mut salt); Ok::<(), ()>(()) } {
+        if let Err(e) = {
+            use rand::RngCore;
+            rand::thread_rng().fill_bytes(&mut salt);
+            Ok::<(), ()>(())
+        } {
             // fallback: use a deterministic but unpredictable? We'll just zero and warn.
             warn!("getrandom failed: {:?}, using zero salt (not secure)", e);
         }
@@ -683,7 +722,7 @@ mod tests {
 
         assert!(!manager.add_revealed_tx(tx1)); // nonce 1 before 0 → queued
         assert!(manager.add_revealed_tx(tx0)); // nonce 0 now accepted
-        // Now the pending tx with nonce 1 should be automatically flushed
+                                               // Now the pending tx with nonce 1 should be automatically flushed
         assert_eq!(manager.next_nonce.get("alice"), Some(&2));
     }
 
@@ -713,13 +752,16 @@ mod tests {
         let seed = Hash32([42; 32]);
         let mut commits1: Vec<(u64, TxCommit)> = (0..10)
             .map(|i| {
-                (i * 10, TxCommit {
-                    commit_hash: Hash32([i as u8; 32]),
-                    sender: format!("sender_{i}"),
-                    received_order: i,
-                    commit_height: 0,
-                    encrypted_tx: None,
-                })
+                (
+                    i * 10,
+                    TxCommit {
+                        commit_hash: Hash32([i as u8; 32]),
+                        sender: format!("sender_{i}"),
+                        received_order: i,
+                        commit_height: 0,
+                        encrypted_tx: None,
+                    },
+                )
             })
             .collect();
         let mut commits2 = commits1.clone();

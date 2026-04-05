@@ -27,9 +27,8 @@
 //! ```
 
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
 
-use super::version::{ProtocolActivation, version_for_height, CURRENT_PROTOCOL_VERSION, SUPPORTED_PROTOCOL_VERSIONS};
+use super::version::{version_for_height, ProtocolActivation, SUPPORTED_PROTOCOL_VERSIONS};
 
 // Number of blocks before activation to enter PreActivation state.
 const PRE_ACTIVATION_WINDOW: u64 = 1000;
@@ -62,19 +61,11 @@ pub enum TransitionState {
         activation_height: u64,
     },
     /// New PV is active; grace window still open for old-PV blocks.
-    Active {
-        pv: u32,
-        grace_remaining: u64,
-    },
+    Active { pv: u32, grace_remaining: u64 },
     /// Transition fully finalized; grace window expired.
-    Finalized {
-        pv: u32,
-    },
+    Finalized { pv: u32 },
     /// Transition was cancelled before activation.
-    Cancelled {
-        target_pv: u32,
-        reason: String,
-    },
+    Cancelled { target_pv: u32, reason: String },
     /// Transition was rolled back (requires snapshot).
     RolledBack {
         from_pv: u32,
@@ -87,20 +78,34 @@ impl std::fmt::Display for TransitionState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Idle => write!(f, "Idle"),
-            Self::Scheduled { target_pv, activation_height } =>
-                write!(f, "Scheduled(PV={target_pv} at height={activation_height})"),
-            Self::PreActivation { target_pv, blocks_remaining, .. } =>
-                write!(f, "PreActivation(PV={target_pv}, {blocks_remaining} blocks remaining)"),
-            Self::Activating { from_pv, to_pv, .. } =>
-                write!(f, "Activating(PV {from_pv} -> {to_pv})"),
-            Self::Active { pv, grace_remaining } =>
-                write!(f, "Active(PV={pv}, grace={grace_remaining} blocks)"),
-            Self::Finalized { pv } =>
-                write!(f, "Finalized(PV={pv})"),
-            Self::Cancelled { target_pv, reason } =>
-                write!(f, "Cancelled(PV={target_pv}: {reason})"),
-            Self::RolledBack { from_pv, to_pv, reason } =>
-                write!(f, "RolledBack(PV {from_pv} -> {to_pv}: {reason})"),
+            Self::Scheduled {
+                target_pv,
+                activation_height,
+            } => write!(f, "Scheduled(PV={target_pv} at height={activation_height})"),
+            Self::PreActivation {
+                target_pv,
+                blocks_remaining,
+                ..
+            } => write!(
+                f,
+                "PreActivation(PV={target_pv}, {blocks_remaining} blocks remaining)"
+            ),
+            Self::Activating { from_pv, to_pv, .. } => {
+                write!(f, "Activating(PV {from_pv} -> {to_pv})")
+            }
+            Self::Active {
+                pv,
+                grace_remaining,
+            } => write!(f, "Active(PV={pv}, grace={grace_remaining} blocks)"),
+            Self::Finalized { pv } => write!(f, "Finalized(PV={pv})"),
+            Self::Cancelled { target_pv, reason } => {
+                write!(f, "Cancelled(PV={target_pv}: {reason})")
+            }
+            Self::RolledBack {
+                from_pv,
+                to_pv,
+                reason,
+            } => write!(f, "RolledBack(PV {from_pv} -> {to_pv}: {reason})"),
         }
     }
 }
@@ -113,11 +118,21 @@ impl std::fmt::Display for TransitionState {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TransitionEvent {
     /// Transition scheduled for future activation.
-    TransitionScheduled { target_pv: u32, activation_height: u64 },
+    TransitionScheduled {
+        target_pv: u32,
+        activation_height: u64,
+    },
     /// Entered pre-activation window.
-    EnteredPreActivation { target_pv: u32, blocks_remaining: u64 },
+    EnteredPreActivation {
+        target_pv: u32,
+        blocks_remaining: u64,
+    },
     /// Activation height reached.
-    ActivationReached { from_pv: u32, to_pv: u32, height: u64 },
+    ActivationReached {
+        from_pv: u32,
+        to_pv: u32,
+        height: u64,
+    },
     /// New PV is now active (grace window open).
     PvActivated { pv: u32, grace_blocks: u64 },
     /// Grace window expired; old PV blocks rejected.
@@ -161,7 +176,11 @@ impl ReadinessReport {
 
 impl std::fmt::Display for ReadinessReport {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        writeln!(f, "Readiness: {}", if self.ready { "READY" } else { "NOT READY" })?;
+        writeln!(
+            f,
+            "Readiness: {}",
+            if self.ready { "READY" } else { "NOT READY" }
+        )?;
         for c in &self.checks {
             let mark = if c.passed { "OK" } else { "FAIL" };
             writeln!(f, "  [{mark}] {}: {}", c.name, c.detail)?;
@@ -279,7 +298,9 @@ impl TransitionManager {
 
         match next_activation {
             Some(act) => {
-                let ah = act.activation_height.expect("activation_height validated at registration");
+                let ah = act
+                    .activation_height
+                    .expect("activation_height validated at registration");
                 let target_pv = act.protocol_version;
 
                 if height < ah {
@@ -378,15 +399,23 @@ impl TransitionManager {
     /// Compute the next state based on current height and PV.
     fn compute_next_state(&self, height: u64, old_pv: u32, new_pv: u32) -> TransitionState {
         // Find the activation that corresponds to the current new_pv.
-        let current_activation = self.activations.iter().find(|a| a.protocol_version == new_pv);
+        let current_activation = self
+            .activations
+            .iter()
+            .find(|a| a.protocol_version == new_pv);
         // Find the next activation after current new_pv.
-        let next_activation = self.activations.iter().find(|a| a.protocol_version > new_pv);
+        let next_activation = self
+            .activations
+            .iter()
+            .find(|a| a.protocol_version > new_pv);
 
         match &self.state {
             // Idle: if there is a next activation, move to Scheduled/PreActivation.
             TransitionState::Idle => {
                 if let Some(next) = next_activation {
-                    let ah = next.activation_height.expect("activation_height validated at registration");
+                    let ah = next
+                        .activation_height
+                        .expect("activation_height validated at registration");
                     if height < ah {
                         let blocks_remaining = ah - height;
                         if blocks_remaining <= PRE_ACTIVATION_WINDOW {
@@ -411,7 +440,10 @@ impl TransitionManager {
             }
 
             // Scheduled: check if we've entered pre-activation window or reached activation.
-            TransitionState::Scheduled { target_pv, activation_height } => {
+            TransitionState::Scheduled {
+                target_pv,
+                activation_height,
+            } => {
                 let ah = *activation_height;
                 if height < ah {
                     let blocks_remaining = ah - height;
@@ -435,7 +467,11 @@ impl TransitionManager {
             }
 
             // PreActivation: check if activation reached.
-            TransitionState::PreActivation { target_pv, activation_height, .. } => {
+            TransitionState::PreActivation {
+                target_pv,
+                activation_height,
+                ..
+            } => {
                 let ah = *activation_height;
                 if height >= ah {
                     TransitionState::Activating {
@@ -449,11 +485,17 @@ impl TransitionManager {
             }
 
             // Activating: move to Active after activation.
-            TransitionState::Activating { to_pv, activation_height, .. } => {
+            TransitionState::Activating {
+                to_pv,
+                activation_height,
+                ..
+            } => {
                 let ah = *activation_height;
                 if height >= ah {
                     // Find grace blocks for this activation.
-                    let grace = self.activations.iter()
+                    let grace = self
+                        .activations
+                        .iter()
                         .find(|a| a.protocol_version == *to_pv)
                         .map(|a| a.grace_blocks)
                         .unwrap_or(0);
@@ -515,9 +557,11 @@ impl TransitionManager {
             }
 
             // Finalized: check if there is another activation coming.
-            TransitionState::Finalized { pv } => {
+            TransitionState::Finalized { pv: _ } => {
                 if let Some(next) = next_activation {
-                    let ah = next.activation_height.expect("activation_height validated at registration");
+                    let ah = next
+                        .activation_height
+                        .expect("activation_height validated at registration");
                     if height < ah {
                         let blocks_remaining = ah - height;
                         if blocks_remaining <= PRE_ACTIVATION_WINDOW {
@@ -548,40 +592,55 @@ impl TransitionManager {
     /// Emit events for a state transition.
     fn emit_transition_events(
         &mut self,
-        old: &TransitionState,
+        _old: &TransitionState,
         new: &TransitionState,
-        height: u64,
-        old_pv: u32,
-        new_pv: u32,
+        _height: u64,
+        _old_pv: u32,
+        _new_pv: u32,
     ) {
         match new {
-            TransitionState::Scheduled { target_pv, activation_height } => {
+            TransitionState::Scheduled {
+                target_pv,
+                activation_height,
+            } => {
                 self.events.push(TransitionEvent::TransitionScheduled {
                     target_pv: *target_pv,
                     activation_height: *activation_height,
                 });
             }
-            TransitionState::PreActivation { target_pv, blocks_remaining, .. } => {
+            TransitionState::PreActivation {
+                target_pv,
+                blocks_remaining,
+                ..
+            } => {
                 self.events.push(TransitionEvent::EnteredPreActivation {
                     target_pv: *target_pv,
                     blocks_remaining: *blocks_remaining,
                 });
             }
-            TransitionState::Activating { from_pv, to_pv, activation_height } => {
+            TransitionState::Activating {
+                from_pv,
+                to_pv,
+                activation_height,
+            } => {
                 self.events.push(TransitionEvent::ActivationReached {
                     from_pv: *from_pv,
                     to_pv: *to_pv,
                     height: *activation_height,
                 });
             }
-            TransitionState::Active { pv, grace_remaining } => {
+            TransitionState::Active {
+                pv,
+                grace_remaining,
+            } => {
                 self.events.push(TransitionEvent::PvActivated {
                     pv: *pv,
                     grace_blocks: *grace_remaining,
                 });
             }
             TransitionState::Finalized { pv } => {
-                self.events.push(TransitionEvent::TransitionFinalized { pv: *pv });
+                self.events
+                    .push(TransitionEvent::TransitionFinalized { pv: *pv });
             }
             TransitionState::Cancelled { target_pv, reason } => {
                 self.events.push(TransitionEvent::TransitionCancelled {
@@ -624,18 +683,19 @@ impl TransitionManager {
     pub fn rollback(&mut self, reason: &str) -> Result<u64, String> {
         // Find the latest snapshot before the activation height.
         let activation_height = match &self.state {
-            TransitionState::Active { .. }
-            | TransitionState::Activating { .. } => {
-                self.activations.iter()
-                    .filter(|a| a.protocol_version == self.current_pv)
-                    .filter_map(|a| a.activation_height)
-                    .max()
-                    .ok_or("no activation height found")?
-            }
+            TransitionState::Active { .. } | TransitionState::Activating { .. } => self
+                .activations
+                .iter()
+                .filter(|a| a.protocol_version == self.current_pv)
+                .filter_map(|a| a.activation_height)
+                .max()
+                .ok_or("no activation height found")?,
             _ => return Err(format!("cannot rollback in state: {}", self.state)),
         };
 
-        let snapshot = self.snapshot_heights.iter()
+        let snapshot = self
+            .snapshot_heights
+            .iter()
             .rev()
             .find(|&&h| h < activation_height)
             .copied()
@@ -650,7 +710,8 @@ impl TransitionManager {
             to_pv,
             reason: reason.to_string(),
         };
-        self.events.push(TransitionEvent::TransitionRolledBack { from_pv, to_pv });
+        self.events
+            .push(TransitionEvent::TransitionRolledBack { from_pv, to_pv });
         self.current_pv = to_pv;
 
         Ok(snapshot)
@@ -671,9 +732,7 @@ impl TransitionManager {
             checks.push(ReadinessCheck {
                 name: "binary_supports_target_pv".into(),
                 passed: SUPPORTED_PROTOCOL_VERSIONS.contains(&tpv),
-                detail: format!(
-                    "target PV={tpv}, supported={SUPPORTED_PROTOCOL_VERSIONS:?}"
-                ),
+                detail: format!("target PV={tpv}, supported={SUPPORTED_PROTOCOL_VERSIONS:?}"),
             });
         }
 
@@ -701,7 +760,10 @@ impl TransitionManager {
         // Check 5: No pending migration.
         checks.push(ReadinessCheck {
             name: "no_pending_state".into(),
-            passed: !matches!(self.state, TransitionState::Cancelled { .. } | TransitionState::RolledBack { .. }),
+            passed: !matches!(
+                self.state,
+                TransitionState::Cancelled { .. } | TransitionState::RolledBack { .. }
+            ),
             detail: format!("current state: {}", self.state),
         });
 
@@ -746,13 +808,11 @@ mod tests {
     use super::*;
 
     fn basic_activations() -> Vec<ProtocolActivation> {
-        vec![
-            ProtocolActivation {
-                protocol_version: 1,
-                activation_height: None,
-                grace_blocks: 0,
-            },
-        ]
+        vec![ProtocolActivation {
+            protocol_version: 1,
+            activation_height: None,
+            grace_blocks: 0,
+        }]
     }
 
     fn upgrade_activations() -> Vec<ProtocolActivation> {
@@ -798,13 +858,11 @@ mod tests {
 
     #[test]
     fn test_validate_activations_invalid_first() {
-        let acts = vec![
-            ProtocolActivation {
-                protocol_version: 2,
-                activation_height: None,
-                grace_blocks: 0,
-            },
-        ];
+        let acts = vec![ProtocolActivation {
+            protocol_version: 2,
+            activation_height: None,
+            grace_blocks: 0,
+        }];
         assert!(TransitionManager::validate_activations(&acts).is_err());
     }
 
@@ -853,7 +911,13 @@ mod tests {
             },
         ];
         let mgr = TransitionManager::new(activations, 1).unwrap();
-        assert!(matches!(mgr.state(), TransitionState::Scheduled { target_pv: 2, activation_height: 2000 }));
+        assert!(matches!(
+            mgr.state(),
+            TransitionState::Scheduled {
+                target_pv: 2,
+                activation_height: 2000
+            }
+        ));
     }
 
     #[test]
@@ -872,7 +936,14 @@ mod tests {
             },
         ];
         let mgr = TransitionManager::new(activations, 1).unwrap();
-        assert!(matches!(mgr.state(), TransitionState::PreActivation { target_pv: 2, activation_height: 500, .. }));
+        assert!(matches!(
+            mgr.state(),
+            TransitionState::PreActivation {
+                target_pv: 2,
+                activation_height: 500,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -893,7 +964,13 @@ mod tests {
             },
         ];
         let mgr = TransitionManager::new(activations, 105).unwrap();
-        assert!(matches!(mgr.state(), TransitionState::Active { pv: 2, grace_remaining: 5 }));
+        assert!(matches!(
+            mgr.state(),
+            TransitionState::Active {
+                pv: 2,
+                grace_remaining: 5
+            }
+        ));
     }
 
     #[test]
@@ -923,7 +1000,14 @@ mod tests {
 
         // Advance to pre-activation window (height 1001)
         mgr.on_block(1001);
-        assert!(matches!(mgr.state(), TransitionState::PreActivation { target_pv: 2, activation_height: 2000, blocks_remaining: 999 }));
+        assert!(matches!(
+            mgr.state(),
+            TransitionState::PreActivation {
+                target_pv: 2,
+                activation_height: 2000,
+                blocks_remaining: 999
+            }
+        ));
     }
 
     #[test]
@@ -933,7 +1017,14 @@ mod tests {
         mgr.on_block(99);
         assert!(matches!(mgr.state(), TransitionState::PreActivation { .. }));
         mgr.on_block(100);
-        assert!(matches!(mgr.state(), TransitionState::Activating { from_pv: 1, to_pv: 2, .. }));
+        assert!(matches!(
+            mgr.state(),
+            TransitionState::Activating {
+                from_pv: 1,
+                to_pv: 2,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -947,17 +1038,35 @@ mod tests {
         // Let's check: compute_initial_state at height 100: next_activation PV=2, ah=100, height=100, so we go to Active? No, in compute_initial_state we handle height < ah? height=100, ah=100, so not less, then check grace: grace 10, height=100 < 110 => Active. So initial state is Active. That's fine.
         // Then on_block(101) should keep Active with decreasing grace.
         mgr.on_block(101);
-        assert!(matches!(mgr.state(), TransitionState::Active { pv: 2, grace_remaining: 9 }));
+        assert!(matches!(
+            mgr.state(),
+            TransitionState::Active {
+                pv: 2,
+                grace_remaining: 9
+            }
+        ));
     }
 
     #[test]
     fn test_grace_countdown() {
         let activations = upgrade_activations();
         let mut mgr = TransitionManager::new(activations, 101).unwrap();
-        assert!(matches!(mgr.state(), TransitionState::Active { grace_remaining: 9, .. }));
+        assert!(matches!(
+            mgr.state(),
+            TransitionState::Active {
+                grace_remaining: 9,
+                ..
+            }
+        ));
 
         mgr.on_block(102);
-        assert!(matches!(mgr.state(), TransitionState::Active { grace_remaining: 8, .. }));
+        assert!(matches!(
+            mgr.state(),
+            TransitionState::Active {
+                grace_remaining: 8,
+                ..
+            }
+        ));
 
         // ... down to 0
         for i in 0..8 {
@@ -965,7 +1074,13 @@ mod tests {
         }
         // After 9 more blocks, we should reach height 111 -> grace_remaining 0? Let's calculate: start at 101 with 9, after 1 block at 102 ->8, ... at 110 ->1, at 111 ->0, should transition to Finalized.
         mgr.on_block(110);
-        assert!(matches!(mgr.state(), TransitionState::Active { grace_remaining: 1, .. }));
+        assert!(matches!(
+            mgr.state(),
+            TransitionState::Active {
+                grace_remaining: 1,
+                ..
+            }
+        ));
         mgr.on_block(111);
         assert!(matches!(mgr.state(), TransitionState::Finalized { pv: 2 }));
     }
@@ -989,10 +1104,15 @@ mod tests {
 
         let result = mgr.cancel("critical bug found");
         assert!(result.is_ok());
-        assert!(matches!(mgr.state(), TransitionState::Cancelled { target_pv: 2, .. }));
+        assert!(matches!(
+            mgr.state(),
+            TransitionState::Cancelled { target_pv: 2, .. }
+        ));
 
         let events = mgr.drain_events();
-        assert!(events.iter().any(|e| matches!(e, TransitionEvent::TransitionCancelled { .. })));
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, TransitionEvent::TransitionCancelled { .. })));
     }
 
     #[test]
@@ -1009,11 +1129,20 @@ mod tests {
 
         let report = mgr.check_readiness();
         // current_pv_supported should pass
-        assert!(report.checks.iter().any(|c| c.name == "current_pv_supported" && c.passed));
+        assert!(report
+            .checks
+            .iter()
+            .any(|c| c.name == "current_pv_supported" && c.passed));
         // snapshot_available should pass
-        assert!(report.checks.iter().any(|c| c.name == "snapshot_available" && c.passed));
+        assert!(report
+            .checks
+            .iter()
+            .any(|c| c.name == "snapshot_available" && c.passed));
         // target PV check should be present because state is PreActivation? Actually at height 50, activation at 100, we are in PreActivation. So yes.
-        assert!(report.checks.iter().any(|c| c.name == "binary_supports_target_pv" && c.passed));
+        assert!(report
+            .checks
+            .iter()
+            .any(|c| c.name == "binary_supports_target_pv" && c.passed));
     }
 
     #[test]
@@ -1060,29 +1189,69 @@ mod tests {
         let activations = multi_upgrade_activations();
         let mut mgr = TransitionManager::new(activations, 1).unwrap();
         // Height 1: activation at 100 (PV2) and 200 (PV3). At 1, PV2 is Scheduled? 100-1=99 <1000, so PreActivation for PV2.
-        assert!(matches!(mgr.state(), TransitionState::PreActivation { target_pv: 2, activation_height: 100, .. }));
+        assert!(matches!(
+            mgr.state(),
+            TransitionState::PreActivation {
+                target_pv: 2,
+                activation_height: 100,
+                ..
+            }
+        ));
 
         mgr.on_block(100);
         // At 100, should become Activating for PV2.
-        assert!(matches!(mgr.state(), TransitionState::Activating { from_pv: 1, to_pv: 2, .. }));
+        assert!(matches!(
+            mgr.state(),
+            TransitionState::Activating {
+                from_pv: 1,
+                to_pv: 2,
+                ..
+            }
+        ));
 
         mgr.on_block(101);
         // At 101, grace for PV2: 10 blocks, so Active with grace 9.
-        assert!(matches!(mgr.state(), TransitionState::Active { pv: 2, grace_remaining: 9 }));
+        assert!(matches!(
+            mgr.state(),
+            TransitionState::Active {
+                pv: 2,
+                grace_remaining: 9
+            }
+        ));
 
         // Fast forward to after grace (111)
         for h in 102..=111 {
             mgr.on_block(h);
         }
         // At 111, PV2 should be Finalized, and next activation PV3 should be Scheduled/PreActivation? At 111, next activation PV3 at 200, distance 89 < 1000 -> PreActivation.
-        assert!(matches!(mgr.state(), TransitionState::PreActivation { target_pv: 3, activation_height: 200, .. }));
+        assert!(matches!(
+            mgr.state(),
+            TransitionState::PreActivation {
+                target_pv: 3,
+                activation_height: 200,
+                ..
+            }
+        ));
 
         mgr.on_block(200);
         // At 200, should become Activating for PV3.
-        assert!(matches!(mgr.state(), TransitionState::Activating { from_pv: 2, to_pv: 3, .. }));
+        assert!(matches!(
+            mgr.state(),
+            TransitionState::Activating {
+                from_pv: 2,
+                to_pv: 3,
+                ..
+            }
+        ));
 
         mgr.on_block(201);
         // At 201, grace 20 -> Active.
-        assert!(matches!(mgr.state(), TransitionState::Active { pv: 3, grace_remaining: 19 }));
+        assert!(matches!(
+            mgr.state(),
+            TransitionState::Active {
+                pv: 3,
+                grace_remaining: 19
+            }
+        ));
     }
 }

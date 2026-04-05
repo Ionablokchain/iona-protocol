@@ -1,5 +1,5 @@
-use rlp::RlpStream;
 use crate::rpc::eth_rpc::{Log, Receipt};
+use rlp::RlpStream;
 
 /// Convert a hex string to bytes, with validation.
 fn hex_to_bytes(hex: &str) -> Result<Vec<u8>, String> {
@@ -76,13 +76,15 @@ mod tests {
     fn test_rlp_encode_log() {
         let log = Log {
             address: "0x0000000000000000000000000000000000000000".to_string(),
-            topics: vec!["0x0000000000000000000000000000000000000000000000000000000000000000".to_string()],
+            topics: vec![
+                "0x0000000000000000000000000000000000000000000000000000000000000000".to_string(),
+            ],
             data: "0x".to_string(),
             block_number: 0,
             log_index: 0,
             tx_hash: String::new(),
         };
-        let encoded = rlp_encode_log(&log).unwrap();
+        let encoded = rlp_encode_log(&log).expect("RPC error");
         assert!(!encoded.is_empty());
     }
 
@@ -105,7 +107,7 @@ mod tests {
             tx_type: 0,
             effective_gas_price: "0".to_string(),
         };
-        let encoded = rlp_encode_receipt(&receipt).unwrap();
+        let encoded = rlp_encode_receipt(&receipt).expect("RPC error");
         assert!(!encoded.is_empty());
     }
 

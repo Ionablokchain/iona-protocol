@@ -7,18 +7,16 @@
 //! - Atomic writes with temporary files
 
 use crate::crypto::ed25519::Ed25519Signer;
-use crate::crypto::PublicKeyBytes;
 use aes_gcm::aead::{Aead, KeyInit};
 use aes_gcm::{Aes256Gcm, Nonce};
 use argon2::{
-    password_hash::{rand_core::OsRng, PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
+    password_hash::{rand_core::OsRng, PasswordHasher, SaltString},
     Argon2,
 };
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
-use zeroize::Zeroizing;
 
 /// Key type stored in the keystore.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -151,11 +149,10 @@ impl Keystore {
     /// Return the first Ed25519 signer found (if any).
     pub fn first_ed25519(&self) -> Option<Ed25519Signer> {
         for key in &self.keys {
-            if let KeyEntry::Ed25519(seed) = key {
-                let mut seed_arr = [0u8; 32];
-                seed_arr.copy_from_slice(seed);
-                return Some(Ed25519Signer::from_seed(seed_arr));
-            }
+            let KeyEntry::Ed25519(seed) = key;
+            let mut seed_arr = [0u8; 32];
+            seed_arr.copy_from_slice(seed);
+            return Some(Ed25519Signer::from_seed(seed_arr));
         }
         None
     }
@@ -183,8 +180,8 @@ impl Keystore {
         let mut salt = [0u8; 16];
         rand::RngCore::fill_bytes(&mut OsRng, &mut salt);
         let key = Self::derive_key(password, &salt);
-        let cipher = Aes256Gcm::new_from_slice(&key)
-            .map_err(|e| format!("failed to create cipher: {e}"))?;
+        let cipher =
+            Aes256Gcm::new_from_slice(&key).map_err(|e| format!("failed to create cipher: {e}"))?;
         let nonce_bytes: [u8; 12] = OsRng.gen();
         let nonce = Nonce::from_slice(&nonce_bytes);
         let ciphertext = cipher
@@ -206,8 +203,8 @@ impl Keystore {
         let nonce_bytes = &data[16..28];
         let ciphertext = &data[28..];
         let key = Self::derive_key(password, salt);
-        let cipher = Aes256Gcm::new_from_slice(&key)
-            .map_err(|e| format!("failed to create cipher: {e}"))?;
+        let cipher =
+            Aes256Gcm::new_from_slice(&key).map_err(|e| format!("failed to create cipher: {e}"))?;
         let nonce = Nonce::from_slice(nonce_bytes);
         let plaintext = cipher
             .decrypt(nonce, ciphertext)
@@ -218,8 +215,8 @@ impl Keystore {
 
 #[cfg(test)]
 mod tests {
-    use crate::crypto::Signer;
     use super::*;
+    use crate::crypto::Signer;
     use tempfile::tempdir;
 
     #[test]
@@ -260,7 +257,10 @@ mod tests {
     }
 }
 
-pub fn decrypt_seed32_from_file(path: &std::path::Path, password: &str) -> std::io::Result<[u8; 32]> {
+pub fn decrypt_seed32_from_file(
+    path: &std::path::Path,
+    password: &str,
+) -> std::io::Result<[u8; 32]> {
     let data = std::fs::read(path)?;
     // Simple XOR-based encryption for demo purposes
     let key_hash = {
@@ -274,7 +274,11 @@ pub fn decrypt_seed32_from_file(path: &std::path::Path, password: &str) -> std::
     Ok(seed)
 }
 
-pub fn encrypt_seed32_to_file(path: &std::path::Path, seed: [u8; 32], password: &str) -> std::io::Result<()> {
+pub fn encrypt_seed32_to_file(
+    path: &std::path::Path,
+    seed: [u8; 32],
+    password: &str,
+) -> std::io::Result<()> {
     let key_hash = {
         use sha2::{Digest, Sha256};
         Sha256::digest(password.as_bytes())

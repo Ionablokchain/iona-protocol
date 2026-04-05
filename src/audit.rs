@@ -209,7 +209,7 @@ impl AuditLogger {
     }
 
     /// Open the audit log file with the appropriate permissions.
-    fn open_log_file(path: &Path, config: &AuditConfig) -> std::io::Result<File> {
+    fn open_log_file(path: &Path, _config: &AuditConfig) -> std::io::Result<File> {
         let mut opts = OpenOptions::new();
         opts.create(true).append(true);
         #[cfg(unix)]
@@ -250,8 +250,22 @@ impl AuditLogger {
                 if let Some(path) = &self.config.file_path {
                     // Rotate existing files: .1, .2, ...
                     for i in (1..self.config.rotate_count).rev() {
-                        let src = path.with_extension(format!("{}.{}", path.extension().unwrap_or_default().to_str().unwrap_or("log"), i));
-                        let dst = path.with_extension(format!("{}.{}", path.extension().unwrap_or_default().to_str().unwrap_or("log"), i + 1));
+                        let src = path.with_extension(format!(
+                            "{}.{}",
+                            path.extension()
+                                .unwrap_or_default()
+                                .to_str()
+                                .unwrap_or("log"),
+                            i
+                        ));
+                        let dst = path.with_extension(format!(
+                            "{}.{}",
+                            path.extension()
+                                .unwrap_or_default()
+                                .to_str()
+                                .unwrap_or("log"),
+                            i + 1
+                        ));
                         let _ = std::fs::rename(src, dst);
                     }
                     let old = path.with_extension("log.1");
@@ -293,12 +307,27 @@ impl AuditLogger {
                     // Check rotation inline (we already hold the lock)
                     let max_size = self.config.max_file_size_bytes;
                     if max_size > 0 {
-                        let current = self.current_size.load(std::sync::atomic::Ordering::Relaxed) as u64;
+                        let current =
+                            self.current_size.load(std::sync::atomic::Ordering::Relaxed) as u64;
                         if current >= max_size {
                             if let Some(path) = &self.config.file_path {
                                 for i in (1..self.config.rotate_count).rev() {
-                                    let src = path.with_extension(format!("{}.{}", path.extension().unwrap_or_default().to_str().unwrap_or("log"), i));
-                                    let dst = path.with_extension(format!("{}.{}", path.extension().unwrap_or_default().to_str().unwrap_or("log"), i + 1));
+                                    let src = path.with_extension(format!(
+                                        "{}.{}",
+                                        path.extension()
+                                            .unwrap_or_default()
+                                            .to_str()
+                                            .unwrap_or("log"),
+                                        i
+                                    ));
+                                    let dst = path.with_extension(format!(
+                                        "{}.{}",
+                                        path.extension()
+                                            .unwrap_or_default()
+                                            .to_str()
+                                            .unwrap_or("log"),
+                                        i + 1
+                                    ));
                                     let _ = std::fs::rename(src, dst);
                                 }
                                 let old = path.with_extension("log.1");
@@ -306,7 +335,8 @@ impl AuditLogger {
                                 match Self::open_log_file(path, &self.config) {
                                     Ok(file) => {
                                         *writer = std::io::BufWriter::new(file);
-                                        self.current_size.store(0, std::sync::atomic::Ordering::Relaxed);
+                                        self.current_size
+                                            .store(0, std::sync::atomic::Ordering::Relaxed);
                                     }
                                     Err(e) => {
                                         error!("Failed to rotate audit log: {}", e);
@@ -412,48 +442,68 @@ pub fn audit_key_imported(logger: &AuditLogger, source: &str, address: &str) {
 /// Log a block committed event.
 pub fn audit_block_committed(logger: &AuditLogger, height: u64, hash: &str, txs: usize) {
     logger.log(
-        AuditEvent::new(AuditLevel::Info, AuditCategory::Consensus, "block_committed")
-            .with_detail("height", height.to_string())
-            .with_detail("hash", hash)
-            .with_detail("tx_count", txs.to_string()),
+        AuditEvent::new(
+            AuditLevel::Info,
+            AuditCategory::Consensus,
+            "block_committed",
+        )
+        .with_detail("height", height.to_string())
+        .with_detail("hash", hash)
+        .with_detail("tx_count", txs.to_string()),
     );
 }
 
 /// Log a finality event.
 pub fn audit_finality(logger: &AuditLogger, height: u64, latency_ms: u64) {
     logger.log(
-        AuditEvent::new(AuditLevel::Info, AuditCategory::Consensus, "block_finalized")
-            .with_detail("height", height.to_string())
-            .with_detail("latency_ms", latency_ms.to_string()),
+        AuditEvent::new(
+            AuditLevel::Info,
+            AuditCategory::Consensus,
+            "block_finalized",
+        )
+        .with_detail("height", height.to_string())
+        .with_detail("latency_ms", latency_ms.to_string()),
     );
 }
 
 /// Log an equivocation (double-sign) detection.
 pub fn audit_equivocation(logger: &AuditLogger, validator: &str, height: u64) {
     logger.log(
-        AuditEvent::new(AuditLevel::Critical, AuditCategory::Consensus, "equivocation_detected")
-            .with_detail("validator", validator)
-            .with_detail("height", height.to_string()),
+        AuditEvent::new(
+            AuditLevel::Critical,
+            AuditCategory::Consensus,
+            "equivocation_detected",
+        )
+        .with_detail("validator", validator)
+        .with_detail("height", height.to_string()),
     );
 }
 
 /// Log a schema migration event.
 pub fn audit_migration(logger: &AuditLogger, from_sv: u32, to_sv: u32, status: &str) {
     logger.log(
-        AuditEvent::new(AuditLevel::Warning, AuditCategory::Migration, "schema_migration")
-            .with_detail("from_sv", from_sv.to_string())
-            .with_detail("to_sv", to_sv.to_string())
-            .with_detail("status", status),
+        AuditEvent::new(
+            AuditLevel::Warning,
+            AuditCategory::Migration,
+            "schema_migration",
+        )
+        .with_detail("from_sv", from_sv.to_string())
+        .with_detail("to_sv", to_sv.to_string())
+        .with_detail("status", status),
     );
 }
 
 /// Log a protocol upgrade activation.
 pub fn audit_protocol_upgrade(logger: &AuditLogger, from_pv: u32, to_pv: u32, height: u64) {
     logger.log(
-        AuditEvent::new(AuditLevel::Critical, AuditCategory::Migration, "protocol_upgrade")
-            .with_detail("from_pv", from_pv.to_string())
-            .with_detail("to_pv", to_pv.to_string())
-            .with_detail("activation_height", height.to_string()),
+        AuditEvent::new(
+            AuditLevel::Critical,
+            AuditCategory::Migration,
+            "protocol_upgrade",
+        )
+        .with_detail("from_pv", from_pv.to_string())
+        .with_detail("to_pv", to_pv.to_string())
+        .with_detail("activation_height", height.to_string()),
     );
 }
 
@@ -528,8 +578,12 @@ mod tests {
 
     #[test]
     fn test_audit_event_display() {
-        let event = AuditEvent::new(AuditLevel::Critical, AuditCategory::Consensus, "equivocation")
-            .with_detail("validator", "abc123");
+        let event = AuditEvent::new(
+            AuditLevel::Critical,
+            AuditCategory::Consensus,
+            "equivocation",
+        )
+        .with_detail("validator", "abc123");
         let s = format!("{}", event);
         assert!(s.contains("CRITICAL"));
         assert!(s.contains("CONSENSUS"));

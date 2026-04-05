@@ -22,14 +22,9 @@ fn short_hash(hash: &Hash32) -> String {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConsensusEvent {
     /// New height started.
-    NewHeight {
-        height: Height,
-    },
+    NewHeight { height: Height },
     /// New round started.
-    NewRound {
-        height: Height,
-        round: u32,
-    },
+    NewRound { height: Height, round: u32 },
     /// Proposal received/created.
     Proposal {
         height: Height,
@@ -486,7 +481,12 @@ pub struct StateRootLogEntry {
 
 impl std::fmt::Display for StateRootLogEntry {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "height={} root=0x{}", self.height, hex::encode(self.state_root.0))
+        write!(
+            f,
+            "height={} root=0x{}",
+            self.height,
+            hex::encode(self.state_root.0)
+        )
     }
 }
 

@@ -13,10 +13,13 @@
 //! - **M2 (Value Conservation)**: Token supply is conserved across state transitions.
 //! - **M3 (Root Equivalence)**: Format‑only migrations preserve the state root.
 
-use crate::types::{Height, Hash32};
-use crate::protocol::version::{self, ProtocolActivation};
 use crate::execution::KvState;
+use crate::protocol::version::{self, ProtocolActivation};
+use crate::types::{Hash32, Height};
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 
+#[cfg(feature = "prometheus")]
+use lazy_static::lazy_static;
 #[cfg(feature = "prometheus")]
 use prometheus::{register_int_counter_vec, IntCounterVec, Opts};
 
@@ -24,9 +27,19 @@ use prometheus::{register_int_counter_vec, IntCounterVec, Opts};
 // Prometheus metrics (optional)
 // -----------------------------------------------------------------------------
 
-use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+#[cfg(feature = "prometheus")]
+lazy_static! {
+    static ref SAFETY_VIOLATIONS: IntCounterVec = register_int_counter_vec!(
+        Opts::new(
+            "iona_safety_violations",
+            "Number of safety violations by invariant"
+        ),
+        &["invariant"]
+    )
+    .expect("failed to register safety violations metric");
+}
 
-/// Safety violation counter.
+/// Safety violation counter (simple atomic, always available).
 pub static SAFETY_VIOLATION_COUNT: AtomicU64 = AtomicU64::new(0);
 
 pub fn record_safety_violation(_kind: &str) {
@@ -157,7 +170,10 @@ pub fn check_state_integrity(
     // S5‑1: root non‑zero (except genesis)
     let root = state.root();
     if !is_genesis && root.0 == [0u8; 32] {
-        let msg = format!("SAFETY VIOLATION S5: state root is zero at height {}", height);
+        let msg = format!(
+            "SAFETY VIOLATION S5: state root is zero at height {}",
+            height
+        );
         #[cfg(feature = "prometheus")]
         SAFETY_VIOLATIONS.with_label_values(&["S5_root"]).inc();
         return Err(msg);
@@ -168,7 +184,7 @@ pub fn check_state_integrity(
         if k.is_empty() {
             let msg = format!("SAFETY VIOLATION S5: empty key in KV at height {}", height);
             #[cfg(feature = "prometheus")]
-        SAFETY_VIOLATIONS.with_label_values(&["S5_empty_key"]).inc();
+            SAFETY_VIOLATIONS.with_label_values(&["S5_empty_key"]).inc();
             return Err(msg);
         }
     }
@@ -312,9 +328,8 @@ fn total_supply(state: &KvState) -> u128 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::version::default_activations;
     use crate::execution::KvState;
-    use std::collections::HashMap;
+    use crate::protocol::version::default_activations;
 
     fn sample_state() -> KvState {
         let mut s = KvState::default();
@@ -351,14 +366,6 @@ mod tests {
     fn test_state_integrity_ok() {
         let s = sample_state();
         assert!(check_state_integrity(&s, 100, false).is_ok());
-    }
-
-    #[test]
-    fn test_state_integrity_zero_root_non_genesis() {
-        let mut s = sample_state();
-        // Normally root() would compute something; for test we can't easily set it.
-        // This is a placeholder; actual root is computed by KvState.
-        // We'll skip this test or mock.
     }
 
     #[test]

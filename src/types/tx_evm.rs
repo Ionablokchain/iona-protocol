@@ -41,7 +41,10 @@ pub struct AccessListItem {
 impl AccessListItem {
     /// Creates a new access list item.
     pub fn new(address: Address20, storage_keys: Vec<H256>) -> Self {
-        Self { address, storage_keys }
+        Self {
+            address,
+            storage_keys,
+        }
     }
 
     /// Returns `true` if the access list item is valid (no additional checks needed).
@@ -190,13 +193,21 @@ impl EvmTx {
         // All addresses are fixed-size arrays, so they are always valid.
         // Additional checks:
         match self {
-            EvmTx::Eip2930 { gas_limit, access_list, .. }
-            | EvmTx::Eip1559 { gas_limit, access_list, .. } => {
+            EvmTx::Eip2930 {
+                gas_limit,
+                access_list: _,
+                ..
+            }
+            | EvmTx::Eip1559 {
+                gas_limit,
+                access_list: _,
+                ..
+            } => {
                 if *gas_limit == 0 {
                     return false; // Gas limit must be positive
                 }
             }
-        
+
             EvmTx::Legacy { gas_limit, .. } => {
                 if *gas_limit == 0 {
                     return false;
@@ -206,7 +217,12 @@ impl EvmTx {
 
         // Access list items are always valid (just containers).
         // For EIP-1559, max_fee_per_gas must be >= max_priority_fee_per_gas.
-        if let EvmTx::Eip1559 { max_fee_per_gas, max_priority_fee_per_gas, .. } = self {
+        if let EvmTx::Eip1559 {
+            max_fee_per_gas,
+            max_priority_fee_per_gas,
+            ..
+        } = self
+        {
             if max_fee_per_gas < max_priority_fee_per_gas {
                 return false;
             }
@@ -219,9 +235,9 @@ impl EvmTx {
     /// Returns the type of the transaction as a string (for logging/debugging).
     pub fn type_str(&self) -> &'static str {
         match self {
-            EvmTx::Eip2930 { .. } => "eip2930",
             EvmTx::Legacy { .. } => "legacy",
-            EvmTx::Legacy { .. } | EvmTx::Eip1559 { .. } => "eip1559",
+            EvmTx::Eip2930 { .. } => "eip2930",
+            EvmTx::Eip1559 { .. } => "eip1559",
         }
     }
 
@@ -295,7 +311,9 @@ impl EvmTx {
         /// RLP-encode an access list item.
         fn rlp_access_item(item: &AccessListItem) -> Vec<u8> {
             let addr_enc = rlp_bytes_encode(&item.address);
-            let keys_items: Vec<Vec<u8>> = item.storage_keys.iter()
+            let keys_items: Vec<Vec<u8>> = item
+                .storage_keys
+                .iter()
                 .map(|k| rlp_bytes_encode(k))
                 .collect();
             let keys_enc = rlp_list(&keys_items);
@@ -310,7 +328,16 @@ impl EvmTx {
 
         let rlp_bytes = match self {
             // EIP-155 Legacy: hash = keccak256(rlp([nonce, gas_price, gas_limit, to, value, data, chain_id, 0, 0]))
-            EvmTx::Legacy { nonce, gas_price, gas_limit, to, value, data, chain_id, .. } => {
+            EvmTx::Legacy {
+                nonce,
+                gas_price,
+                gas_limit,
+                to,
+                value,
+                data,
+                chain_id,
+                ..
+            } => {
                 rlp_list(&[
                     rlp_uint64(*nonce),
                     rlp_uint(*gas_price),
@@ -318,13 +345,23 @@ impl EvmTx {
                     rlp_addr(to),
                     rlp_uint(*value),
                     rlp_bytes_encode(data),
-                    rlp_uint64(*chain_id),  // v = chain_id for EIP-155 signing
-                    vec![0x80],              // r = 0
-                    vec![0x80],              // s = 0
+                    rlp_uint64(*chain_id), // v = chain_id for EIP-155 signing
+                    vec![0x80],            // r = 0
+                    vec![0x80],            // s = 0
                 ])
             }
             // EIP-2930: hash = keccak256(0x01 || rlp([chain_id, nonce, gas_price, gas_limit, to, value, data, access_list]))
-            EvmTx::Eip2930 { chain_id, nonce, gas_price, gas_limit, to, value, data, access_list, .. } => {
+            EvmTx::Eip2930 {
+                chain_id,
+                nonce,
+                gas_price,
+                gas_limit,
+                to,
+                value,
+                data,
+                access_list,
+                ..
+            } => {
                 let mut payload = vec![0x01u8];
                 payload.extend_from_slice(&rlp_list(&[
                     rlp_uint64(*chain_id),
@@ -339,7 +376,18 @@ impl EvmTx {
                 payload
             }
             // EIP-1559: hash = keccak256(0x02 || rlp([chain_id, nonce, max_priority_fee_per_gas, max_fee_per_gas, gas_limit, to, value, data, access_list]))
-            EvmTx::Eip1559 { chain_id, nonce, max_priority_fee_per_gas, max_fee_per_gas, gas_limit, to, value, data, access_list, .. } => {
+            EvmTx::Eip1559 {
+                chain_id,
+                nonce,
+                max_priority_fee_per_gas,
+                max_fee_per_gas,
+                gas_limit,
+                to,
+                value,
+                data,
+                access_list,
+                ..
+            } => {
                 let mut payload = vec![0x02u8];
                 payload.extend_from_slice(&rlp_list(&[
                     rlp_uint64(*chain_id),

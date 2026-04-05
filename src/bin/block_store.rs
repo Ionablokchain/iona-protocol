@@ -29,7 +29,11 @@ impl MemBlockStore {
 
 impl BlockStore for MemBlockStore {
     fn get(&self, id: &Hash32) -> Option<Block> {
-        self.by_hash.read().expect("rwlock read poisoned").get(id).cloned()
+        self.by_hash
+            .read()
+            .expect("rwlock read poisoned")
+            .get(id)
+            .cloned()
     }
 
     fn put(&self, block: Block) {
@@ -59,7 +63,12 @@ impl MemBlockStore {
 
     /// Return the highest height stored.
     pub fn latest_height(&self) -> Option<Height> {
-        self.by_height.read().expect("rwlock read poisoned").keys().next_back().copied()
+        self.by_height
+            .read()
+            .expect("rwlock read poisoned")
+            .keys()
+            .next_back()
+            .copied()
     }
 
     /// Number of blocks stored.
@@ -121,9 +130,20 @@ impl FileBlockStore {
 impl BlockStore for FileBlockStore {
     fn get(&self, id: &Hash32) -> Option<Block> {
         // Find height from index first.
-        let height = self.index.read().expect("rwlock read poisoned").iter().find_map(|(h, stored_id)| {
-            if stored_id == id { Some(*h) } else { None }
-        })?;
+        let height = self
+            .index
+            .read()
+            .expect("rwlock read poisoned")
+            .iter()
+            .find_map(
+                |(h, stored_id)| {
+                    if stored_id == id {
+                        Some(*h)
+                    } else {
+                        None
+                    }
+                },
+            )?;
         let path = self.block_path(height);
         let data = fs::read_to_string(&path).ok()?;
         serde_json::from_str(&data).ok()
@@ -166,12 +186,23 @@ impl FileBlockStore {
 
     /// Latest height stored.
     pub fn latest_height(&self) -> Option<Height> {
-        self.index.read().expect("rwlock read poisoned").keys().next_back().copied()
+        self.index
+            .read()
+            .expect("rwlock read poisoned")
+            .keys()
+            .next_back()
+            .copied()
     }
 
     /// Prune blocks older than `keep` (keep the last `keep` blocks).
     pub fn prune(&self, keep: usize) -> std::io::Result<()> {
-        let heights: Vec<Height> = self.index.read().expect("rwlock read poisoned").keys().copied().collect();
+        let heights: Vec<Height> = self
+            .index
+            .read()
+            .expect("rwlock read poisoned")
+            .keys()
+            .copied()
+            .collect();
         let total = heights.len();
         if total <= keep {
             return Ok(());
@@ -231,7 +262,10 @@ mod tests {
             pv: 0,
         };
         header.height = height;
-        let mut block = Block { header, txs: vec![] };
+        let mut block = Block {
+            header,
+            txs: vec![],
+        };
         // Override id with given hash (simulate)
         let id = Hash32([hash; 32]);
         // In reality, block.id() would compute from header, but for testing we can't change it easily.

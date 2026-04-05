@@ -10,6 +10,7 @@ pub fn migrate(layout: &DataLayout, meta: &mut SchemaMeta) -> io::Result<()> {
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
         DataLayout::atomic_write(&tx_index_path, json.as_bytes())?;
     }
-    meta.migration_log.push(format!("v4 → v5: tx_index.json created"));
+    meta.migration_log
+        .push(format!("v4 → v5: tx_index.json created"));
     Ok(())
 }

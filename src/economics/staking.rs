@@ -147,7 +147,8 @@ impl StakingState {
             return Err(StakingError::InsufficientBalance);
         }
 
-        let v = self.validators
+        let v = self
+            .validators
             .get_mut(&validator)
             .ok_or_else(|| StakingError::ValidatorNotFound(validator.clone()))?;
         if v.jailed {
@@ -187,7 +188,8 @@ impl StakingState {
         }
 
         let key = (delegator, validator.clone());
-        let delegation = self.delegations
+        let delegation = self
+            .delegations
             .get_mut(&key)
             .ok_or(StakingError::ValidatorNotFound(validator.clone()))?;
 
@@ -212,12 +214,7 @@ impl StakingState {
     /// Withdraws any unbonded tokens that have reached their unlock epoch.
     ///
     /// Returns the total amount withdrawn.
-    pub fn withdraw(
-        &mut self,
-        delegator: String,
-        validator: String,
-        current_epoch: u64,
-    ) -> u128 {
+    pub fn withdraw(&mut self, delegator: String, validator: String, current_epoch: u64) -> u128 {
         let key = (delegator, validator);
         let delegation = match self.delegations.get_mut(&key) {
             Some(d) => d,
@@ -242,7 +239,8 @@ impl StakingState {
     /// The slash amount is calculated as `total_stake * slash_bps / 10_000`.
     /// The slashed tokens are removed from both self‑stake and delegations.
     pub fn slash(&mut self, validator: &str, slash_bps: u64) -> Result<(), StakingError> {
-        let v = self.validators
+        let v = self
+            .validators
             .get_mut(validator)
             .ok_or_else(|| StakingError::ValidatorNotFound(validator.to_string()))?;
 
@@ -251,7 +249,7 @@ impl StakingState {
             return Err(StakingError::CommissionOutOfRange);
         }
 
-        let slash_ratio = slash_bps as u128 / 10_000u128;
+        let _slash_ratio = slash_bps as u128 / 10_000u128;
         let total_stake = v.total_stake;
         let slash_amount = total_stake.saturating_mul(slash_bps as u128) / 10_000u128;
 
@@ -269,7 +267,7 @@ impl StakingState {
         v.total_stake = v.total_stake.saturating_sub(slash_amount);
 
         // Reduce delegations proportionally
-        for ((delegator, val_operator), delegation) in self.delegations.iter_mut() {
+        for ((_delegator, val_operator), delegation) in self.delegations.iter_mut() {
             if val_operator == validator {
                 let delegation_slash = (delegation.amount * slash_amount) / total_stake;
                 delegation.amount = delegation.amount.saturating_sub(delegation_slash);
@@ -287,7 +285,8 @@ impl StakingState {
 
     /// Unjails a validator, allowing it to re‑enter consensus.
     pub fn unjail(&mut self, validator: &str) -> Result<(), StakingError> {
-        let v = self.validators
+        let v = self
+            .validators
             .get_mut(validator)
             .ok_or_else(|| StakingError::ValidatorNotFound(validator.to_string()))?;
         v.jailed = false;
@@ -306,7 +305,7 @@ mod tests {
     fn balance_of(addr: &str) -> u128 {
         match addr {
             "alice" => 10_000,
-            "bob"   => 5_000,
+            "bob" => 5_000,
             "charlie" => 100_000,
             _ => 0,
         }
@@ -320,7 +319,10 @@ mod tests {
 
         let res = state.delegate("alice".to_string(), "val1".to_string(), 500, balance_of);
         assert!(res.is_ok());
-        let delegation = state.delegations.get(&("alice".to_string(), "val1".to_string())).unwrap();
+        let delegation = state
+            .delegations
+            .get(&("alice".to_string(), "val1".to_string()))
+            .unwrap();
         assert_eq!(delegation.amount, 500);
         assert_eq!(state.validators.get("val1").unwrap().total_stake, 1_500);
     }
@@ -330,12 +332,17 @@ mod tests {
         let mut state = StakingState::default();
         let val = Validator::new("val1".to_string(), 1_000, 500).unwrap();
         state.validators.insert("val1".to_string(), val);
-        state.delegate("alice".to_string(), "val1".to_string(), 500, balance_of).unwrap();
+        state
+            .delegate("alice".to_string(), "val1".to_string(), 500, balance_of)
+            .unwrap();
 
         let res = state.undelegate("alice".to_string(), "val1".to_string(), 200, 100, 14);
         assert!(res.is_ok());
 
-        let delegation = state.delegations.get(&("alice".to_string(), "val1".to_string())).unwrap();
+        let delegation = state
+            .delegations
+            .get(&("alice".to_string(), "val1".to_string()))
+            .unwrap();
         assert_eq!(delegation.amount, 300);
         assert_eq!(delegation.unbondings.len(), 1);
         assert_eq!(delegation.unbondings[0].amount, 200);
@@ -347,15 +354,20 @@ mod tests {
         let mut state = StakingState::default();
         let val = Validator::new("val1".to_string(), 1_000, 500).unwrap();
         state.validators.insert("val1".to_string(), val);
-        state.delegate("alice".to_string(), "val1".to_string(), 500, balance_of).unwrap();
+        state
+            .delegate("alice".to_string(), "val1".to_string(), 500, balance_of)
+            .unwrap();
 
         state.slash("val1", 1000).unwrap(); // 10% slash
 
         let v = state.validators.get("val1").unwrap();
-        assert_eq!(v.self_stake, 900);  // 10% of 1_000 = 100
+        assert_eq!(v.self_stake, 900); // 10% of 1_000 = 100
         assert_eq!(v.total_stake, 1_350); // 1_500 - 150
 
-        let delegation = state.delegations.get(&("alice".to_string(), "val1".to_string())).unwrap();
+        let delegation = state
+            .delegations
+            .get(&("alice".to_string(), "val1".to_string()))
+            .unwrap();
         assert_eq!(delegation.amount, 450); // 500 - 50 (10% of 500)
         assert!(v.jailed);
     }
@@ -364,44 +376,76 @@ mod tests {
 /// Legacy alias.
 pub type StakeLedger = StakingState;
 
-pub fn apply_staking_tx(state: &mut StakingState, tx: crate::economics::staking_tx::StakingTx) -> Result<(), StakingError> {
+pub fn apply_staking_tx(
+    state: &mut StakingState,
+    tx: crate::economics::staking_tx::StakingTx,
+) -> Result<(), StakingError> {
     use crate::economics::staking_tx::StakingTxKind;
     match tx.kind {
         StakingTxKind::Delegate => {
-            let validator = tx.validator.ok_or(StakingError::MissingArgument("validator"))?;
+            let validator = tx
+                .validator
+                .ok_or(StakingError::MissingArgument("validator"))?;
             let amount = tx.amount.ok_or(StakingError::MissingArgument("amount"))?;
-            let val = state.validators.get_mut(&validator).ok_or(StakingError::ValidatorNotFound(validator.clone()))?;
+            let val = state
+                .validators
+                .get_mut(&validator)
+                .ok_or(StakingError::ValidatorNotFound(validator.clone()))?;
             val.total_stake += amount;
             let key = (tx.from.clone(), validator);
-            state.delegations.entry(key).or_insert(Delegation { amount: 0, unbondings: vec![] }).amount += amount;
+            state
+                .delegations
+                .entry(key)
+                .or_insert(Delegation {
+                    amount: 0,
+                    unbondings: vec![],
+                })
+                .amount += amount;
             Ok(())
         }
         StakingTxKind::Undelegate => {
-            let validator = tx.validator.ok_or(StakingError::MissingArgument("validator"))?;
+            let validator = tx
+                .validator
+                .ok_or(StakingError::MissingArgument("validator"))?;
             let amount = tx.amount.ok_or(StakingError::MissingArgument("amount"))?;
             let key = (tx.from.clone(), validator.clone());
-            let del = state.delegations.get_mut(&key).ok_or(StakingError::DelegationNotFound)?;
-            if del.amount < amount { return Err(StakingError::InsufficientDelegation); }
+            let del = state
+                .delegations
+                .get_mut(&key)
+                .ok_or(StakingError::DelegationNotFound)?;
+            if del.amount < amount {
+                return Err(StakingError::InsufficientDelegation);
+            }
             del.amount -= amount;
-            if let Some(val) = state.validators.get_mut(&validator) { val.total_stake = val.total_stake.saturating_sub(amount); }
+            if let Some(val) = state.validators.get_mut(&validator) {
+                val.total_stake = val.total_stake.saturating_sub(amount);
+            }
             Ok(())
         }
         StakingTxKind::Register => {
-            if state.validators.contains_key(&tx.from) { return Err(StakingError::ValidatorAlreadyExists); }
-            state.validators.insert(tx.from.clone(), Validator {
-                tombstoned: false,
-                jailed: false,
-                jailed_until: None,
-                pubkey: tx.from.as_bytes().to_vec(),
-                operator: tx.from.clone(),
-                self_stake: 0,
-                total_stake: 0,
-                commission_bps: tx.commission_bps.unwrap_or(1000),
-            });
+            if state.validators.contains_key(&tx.from) {
+                return Err(StakingError::ValidatorAlreadyExists);
+            }
+            state.validators.insert(
+                tx.from.clone(),
+                Validator {
+                    tombstoned: false,
+                    jailed: false,
+                    jailed_until: None,
+                    pubkey: tx.from.as_bytes().to_vec(),
+                    operator: tx.from.clone(),
+                    self_stake: 0,
+                    total_stake: 0,
+                    commission_bps: tx.commission_bps.unwrap_or(1000),
+                },
+            );
             Ok(())
         }
-        StakingTxKind::Deregister => { state.validators.remove(&tx.from); Ok(()) }
-        StakingTxKind::Withdraw => { Ok(()) }
+        StakingTxKind::Deregister => {
+            state.validators.remove(&tx.from);
+            Ok(())
+        }
+        StakingTxKind::Withdraw => Ok(()),
     }
 }
 

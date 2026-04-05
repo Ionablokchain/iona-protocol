@@ -8,7 +8,7 @@
 //! It provides detailed diagnostics for quorum analysis and validator
 //! connectivity, helping operators quickly identify the cause of stalls.
 
-use crate::consensus::validator_set::{Validator, ValidatorSet, VotingPower};
+use crate::consensus::{ValidatorSet, VotingPower};
 use crate::crypto::PublicKeyBytes;
 use crate::types::Hash32;
 use serde::{Deserialize, Serialize};
@@ -165,6 +165,7 @@ impl QuorumCalculator {
             .filter(|(_, bid)| bid.as_ref() == Some(target_block))
             .map(|(pk, _)| pk.clone())
             .collect();
+
         self.check(&voters)
     }
 
@@ -176,7 +177,7 @@ impl QuorumCalculator {
     }
 
     /// Can quorum still be reached if the given validators come online?
-    /// Always returns `true` for a valid validator set (the total power is always ≥ threshold).
+    /// Always returns `true` for a valid validator set (the total power is always >= threshold).
     #[must_use]
     pub fn can_reach_quorum(&self, _current_voters: &[PublicKeyBytes]) -> bool {
         self.vset.total_power() >= self.threshold
@@ -185,7 +186,7 @@ impl QuorumCalculator {
     /// Minimum number of additional validators needed to reach quorum.
     ///
     /// This returns the smallest number of *distinct* validators that, if they voted,
-    /// would bring the current power to at least the threshold. It picks the highest‑power
+    /// would bring the current power to at least the threshold. It picks the highest-power
     /// missing validators first.
     #[must_use]
     pub fn validators_needed(&self, current_voters: &[PublicKeyBytes]) -> usize {
@@ -195,25 +196,26 @@ impl QuorumCalculator {
         }
 
         let voter_set: HashSet<&PublicKeyBytes> = current_voters.iter().collect();
-        let mut remaining: Vec<VotingPower> = self.vset.vals
+        let mut remaining: Vec<VotingPower> = self
+            .vset
+            .vals
             .iter()
             .filter(|v| !voter_set.contains(&v.pk))
             .map(|v| v.power)
             .collect();
 
-        // Sort descending — we want the minimum count by taking the biggest first.
         remaining.sort_unstable_by(|a, b| b.cmp(a));
 
         let deficit = self.threshold.saturating_sub(diag.current_power);
-        let mut accumulated = 0u64;
+        let mut accumulated: VotingPower = 0;
+
         for (i, p) in remaining.iter().enumerate() {
-            accumulated += p;
+            accumulated += *p;
             if accumulated >= deficit {
                 return i + 1;
             }
         }
 
-        // This should never happen because total power >= threshold.
         remaining.len() + 1
     }
 }
@@ -237,9 +239,7 @@ impl fmt::Display for ValidatorConnectivity {
         write!(
             f,
             "validators: {}/{} connected, quorum_ok={}",
-            self.connected_validators,
-            self.total_validators,
-            self.has_quorum_connectivity
+            self.connected_validators, self.total_validators, self.has_quorum_connectivity
         )
     }
 }
@@ -282,23 +282,27 @@ pub fn check_validator_connectivity(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::crypto::Signer;
+    use crate::consensus::Validator;
     use crate::crypto::ed25519::Ed25519Keypair;
+    use crate::crypto::Signer;
 
     fn make_vset(n: usize) -> (ValidatorSet, Vec<PublicKeyBytes>) {
         let mut vals = Vec::new();
         let mut pks = Vec::new();
+
         for i in 0..n {
             let mut seed = [0u8; 32];
             seed[0] = (i + 1) as u8;
             let kp = Ed25519Keypair::from_seed(seed);
             let pk = kp.public_key();
+
             vals.push(Validator {
                 pk: pk.clone(),
                 power: 1,
             });
             pks.push(pk);
         }
+
         (ValidatorSet { vals }, pks)
     }
 
@@ -381,9 +385,11 @@ mod tests {
         seed2[0] = 2;
         let mut seed3 = [0u8; 32];
         seed3[0] = 3;
+
         let pk1 = Ed25519Keypair::from_seed(seed1).public_key();
         let pk2 = Ed25519Keypair::from_seed(seed2).public_key();
         let pk3 = Ed25519Keypair::from_seed(seed3).public_key();
+
         let vset = ValidatorSet {
             vals: vec![
                 Validator {
@@ -400,6 +406,7 @@ mod tests {
                 },
             ],
         };
+
         let qc = QuorumCalculator::new(&vset);
         assert_eq!(qc.threshold(), 14);
 
@@ -412,6 +419,7 @@ mod tests {
     fn test_display_impls() {
         let (vset, pks) = make_vset(3);
         let qc = QuorumCalculator::new(&vset);
+
         let diag = qc.check(&pks[..1]);
         let s = format!("{}", diag);
         assert!(s.contains("NO_QUORUM"));

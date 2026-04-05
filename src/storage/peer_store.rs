@@ -19,9 +19,9 @@ use crate::storage::layout::DataLayout;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error};
 
 // -----------------------------------------------------------------------------
 // Internal file representation
@@ -42,8 +42,7 @@ struct PeerStoreFile {
 ///
 /// All operations that modify the store acquire an internal mutex,
 /// so it is safe to share across threads.
-#[derive(Clone)]
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct PeerStore {
     inner: Arc<Mutex<PeerStoreInner>>,
 }
@@ -162,8 +161,9 @@ impl PeerStoreInner {
         }
 
         // Serialize to JSON.
-        let json = serde_json::to_string_pretty(&self.data)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("encode error: {}", e)))?;
+        let json = serde_json::to_string_pretty(&self.data).map_err(|e| {
+            io::Error::new(io::ErrorKind::InvalidData, format!("encode error: {}", e))
+        })?;
 
         // Write atomically: temp file then rename.
         let tmp_path = self.path.with_extension("tmp");
@@ -241,7 +241,9 @@ mod tests {
         let path = dir.path().join("peers.json");
         let store = PeerStore::open_path(&path).unwrap();
 
-        store.set_addrs(vec!["a".to_string(), "b".to_string()]).unwrap();
+        store
+            .set_addrs(vec!["a".to_string(), "b".to_string()])
+            .unwrap();
         assert_eq!(store.addrs(), vec!["a", "b"]);
         assert_eq!(store.len(), 2);
     }

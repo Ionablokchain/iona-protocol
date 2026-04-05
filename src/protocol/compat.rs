@@ -117,11 +117,16 @@ pub struct CompatReport {
 impl CompatReport {
     pub fn from_results(results: Vec<CompatCheckResult>) -> Self {
         let passed = results.iter().all(|r| r.passed);
-        let overall_level = results.iter()
+        let overall_level = results
+            .iter()
             .map(|r| r.level)
             .max()
             .unwrap_or(CompatLevel::Full);
-        Self { results, overall_level, passed }
+        Self {
+            results,
+            overall_level,
+            passed,
+        }
     }
 
     /// Get results filtered by domain.
@@ -137,7 +142,8 @@ impl CompatReport {
     /// Get only enforced checks that failed.
     pub fn enforced_failures(&self, rules: &[CompatRule]) -> Vec<&CompatCheckResult> {
         let enforced_ids: HashSet<_> = rules.iter().filter(|r| r.enforced).map(|r| &r.id).collect();
-        self.results.iter()
+        self.results
+            .iter()
             .filter(|r| !r.passed && enforced_ids.contains(&r.rule_id))
             .collect()
     }
@@ -160,13 +166,19 @@ impl CompatReport {
 
 impl std::fmt::Display for CompatReport {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        writeln!(f, "Compatibility Report: {} ({})",
+        writeln!(
+            f,
+            "Compatibility Report: {} ({})",
             if self.passed { "PASS" } else { "FAIL" },
             self.overall_level
         )?;
         for r in &self.results {
             let mark = if r.passed { "OK" } else { "FAIL" };
-            writeln!(f, "  [{mark}] [{}] {}: {} ({})", r.domain, r.rule_id, r.detail, r.level)?;
+            writeln!(
+                f,
+                "  [{mark}] [{}] {}: {} ({})",
+                r.domain, r.rule_id, r.detail, r.level
+            )?;
             if let Some(rec) = &r.recommendation {
                 writeln!(f, "        Recommendation: {}", rec)?;
             }
@@ -200,7 +212,17 @@ impl CompatChecker {
             "iona_compat_check_failures_total",
             "Number of failed compatibility checks",
             &["rule_id", "domain"]
-        ).unwrap_or_else(|_| IntCounterVec::new(prometheus::opts!()).expect("fallback metric creation"));
+        )
+        .unwrap_or_else(|_| {
+            IntCounterVec::new(
+                prometheus::opts!(
+                    "compat_fallback",
+                    "fallback metric for compatibility checks"
+                ),
+                &["rule_id", "domain"],
+            )
+            .expect("fallback metric creation")
+        });
 
         Self {
             activations,
@@ -257,8 +279,14 @@ impl CompatChecker {
     /// Run only enforced checks and return a report.
     pub fn check_enforced(&self) -> CompatReport {
         let full = self.check_all();
-        let enforced_ids: HashSet<_> = self.rules.iter().filter(|r| r.enforced).map(|r| &r.id).collect();
-        let filtered_results: Vec<_> = full.results
+        let enforced_ids: HashSet<_> = self
+            .rules
+            .iter()
+            .filter(|r| r.enforced)
+            .map(|r| &r.id)
+            .collect();
+        let filtered_results: Vec<_> = full
+            .results
             .into_iter()
             .filter(|r| enforced_ids.contains(&r.rule_id))
             .collect();
@@ -282,7 +310,9 @@ impl CompatChecker {
                 current_pvs,
                 if has_pv1 { "" } else { "do NOT " }
             ),
-            recommendation: if has_pv1 { None } else {
+            recommendation: if has_pv1 {
+                None
+            } else {
                 Some("Add PV=1 to SUPPORTED_PROTOCOL_VERSIONS.".into())
             },
         }
@@ -325,7 +355,9 @@ impl CompatChecker {
             passed: monotonic,
             level: CompatLevel::Migration,
             detail: format!("schema_version={sv} (monotonic: {monotonic})"),
-            recommendation: if monotonic { None } else {
+            recommendation: if monotonic {
+                None
+            } else {
                 Some("Set CURRENT_SCHEMA_VERSION to at least 1.".into())
             },
         }
@@ -347,7 +379,9 @@ impl CompatChecker {
     fn migration_exists(from: u32) -> bool {
         match from {
             0..=2 => true, // hardcoded legacy migrations in DataDir::run_migration
-            _ => crate::storage::migrations::MIGRATIONS.iter().any(|(f, _, _)| *f == from)
+            _ => crate::storage::migrations::MIGRATIONS
+                .iter()
+                .any(|(f, _, _)| *f == from),
         }
     }
 
@@ -369,10 +403,18 @@ impl CompatChecker {
             detail: if passed {
                 format!("schema_version={sv}, all migrations present")
             } else {
-                format!("schema_version={sv}, missing migrations from versions: {:?}", missing)
+                format!(
+                    "schema_version={sv}, missing migrations from versions: {:?}",
+                    missing
+                )
             },
-            recommendation: if passed { None } else {
-                Some(format!("Add migrations for versions {:?} in MIGRATIONS or legacy code.", missing))
+            recommendation: if passed {
+                None
+            } else {
+                Some(format!(
+                    "Add migrations for versions {:?} in MIGRATIONS or legacy code.",
+                    missing
+                ))
             },
         }
     }
@@ -386,7 +428,8 @@ impl CompatChecker {
             domain: CompatDomain::Rpc,
             passed: true, // Convention
             level: CompatLevel::Additive,
-            detail: "RPC responses should preserve existing fields; new fields should be optional".into(),
+            detail: "RPC responses should preserve existing fields; new fields should be optional"
+                .into(),
             recommendation: None,
         }
     }
@@ -413,7 +456,9 @@ impl CompatChecker {
                     passed: false,
                     level: CompatLevel::Additive,
                     detail: format!("OpenAPI spec not found at {}", path),
-                    recommendation: Some("Ensure openapi.yaml is present at the specified path.".into()),
+                    recommendation: Some(
+                        "Ensure openapi.yaml is present at the specified path.".into(),
+                    ),
                 };
             }
             match fs::read_to_string(path) {
@@ -470,12 +515,14 @@ impl CompatChecker {
             domain: CompatDomain::Consensus,
             passed: deterministic,
             level: CompatLevel::Full,
-            detail: format!(
-                "PV determinism verified for {} heights",
-                heights.len()
-            ),
-            recommendation: if deterministic { None } else {
-                Some("Check that version_for_height is pure and doesn't depend on mutable state.".into())
+            detail: format!("PV determinism verified for {} heights", heights.len()),
+            recommendation: if deterministic {
+                None
+            } else {
+                Some(
+                    "Check that version_for_height is pure and doesn't depend on mutable state."
+                        .into(),
+                )
             },
         }
     }
@@ -492,7 +539,10 @@ impl CompatChecker {
                 // First activation must be PV=1 and have None activation height.
                 if a.protocol_version != 1 {
                     valid = false;
-                    detail = format!("First activation must be PV=1, found PV={}", a.protocol_version);
+                    detail = format!(
+                        "First activation must be PV=1, found PV={}",
+                        a.protocol_version
+                    );
                     break;
                 }
                 if a.activation_height.is_some() {
@@ -503,7 +553,10 @@ impl CompatChecker {
             } else {
                 if a.activation_height.is_none() {
                     valid = false;
-                    detail = format!("Activation for PV={} must have activation_height specified", a.protocol_version);
+                    detail = format!(
+                        "Activation for PV={} must have activation_height specified",
+                        a.protocol_version
+                    );
                     break;
                 }
                 if let Some(ph) = prev_height {
@@ -511,7 +564,8 @@ impl CompatChecker {
                         valid = false;
                         detail = format!(
                             "Activation height {} <= previous height {}",
-                            a.activation_height.expect("activation_height validated"), ph
+                            a.activation_height.expect("activation_height validated"),
+                            ph
                         );
                         break;
                     }
@@ -520,10 +574,7 @@ impl CompatChecker {
             if let Some(ppv) = prev_pv {
                 if a.protocol_version <= ppv {
                     valid = false;
-                    detail = format!(
-                        "PV {} <= previous PV {}",
-                        a.protocol_version, ppv
-                    );
+                    detail = format!("PV {} <= previous PV {}", a.protocol_version, ppv);
                     break;
                 }
             }
@@ -541,15 +592,22 @@ impl CompatChecker {
             passed: valid,
             level: CompatLevel::Breaking,
             detail,
-            recommendation: if valid { None } else {
-                Some("Ensure activations are strictly increasing and first PV has None height.".into())
+            recommendation: if valid {
+                None
+            } else {
+                Some(
+                    "Ensure activations are strictly increasing and first PV has None height."
+                        .into(),
+                )
             },
         }
     }
 
     /// CONS-003: Grace window allows stragglers to catch up.
     fn check_consensus_grace_window(&self) -> CompatCheckResult {
-        let needs_grace: Vec<_> = self.activations.iter()
+        let needs_grace: Vec<_> = self
+            .activations
+            .iter()
             .filter(|a| a.protocol_version > 1 && a.activation_height.is_some())
             .collect();
 
@@ -569,7 +627,9 @@ impl CompatChecker {
                     needs_grace.len()
                 )
             },
-            recommendation: if all_have_grace || needs_grace.is_empty() { None } else {
+            recommendation: if all_have_grace || needs_grace.is_empty() {
+                None
+            } else {
                 Some("Set grace_blocks > 0 for activations with PV>1.".into())
             },
         }
@@ -790,17 +850,17 @@ mod tests {
 
     #[test]
     fn test_consensus_activation_schedule_fails() {
-        let activations = vec![
-            ProtocolActivation {
-                protocol_version: 2,
-                activation_height: None,
-                grace_blocks: 0,
-            },
-        ];
+        let activations = vec![ProtocolActivation {
+            protocol_version: 2,
+            activation_height: None,
+            grace_blocks: 0,
+        }];
         let checker = CompatChecker::new(activations);
         let report = checker.check_all();
         let cons_failures = report.by_domain(CompatDomain::Consensus);
-        assert!(!cons_failures.iter().any(|r| r.rule_id == "CONS-002" && r.passed));
+        assert!(!cons_failures
+            .iter()
+            .any(|r| r.rule_id == "CONS-002" && r.passed));
     }
 
     #[test]
@@ -820,7 +880,9 @@ mod tests {
         let checker = CompatChecker::new(activations);
         let report = checker.check_all();
         let cons_failures = report.by_domain(CompatDomain::Consensus);
-        assert!(!cons_failures.iter().any(|r| r.rule_id == "CONS-002" && r.passed));
+        assert!(!cons_failures
+            .iter()
+            .any(|r| r.rule_id == "CONS-002" && r.passed));
     }
 
     #[test]
@@ -840,14 +902,20 @@ mod tests {
         let checker = CompatChecker::new(activations);
         let report = checker.check_all();
         let cons_failures = report.by_domain(CompatDomain::Consensus);
-        assert!(!cons_failures.iter().any(|r| r.rule_id == "CONS-003" && r.passed));
+        assert!(!cons_failures
+            .iter()
+            .any(|r| r.rule_id == "CONS-003" && r.passed));
     }
 
     #[test]
     fn test_state_migration_exists() {
         let sv = crate::storage::CURRENT_SCHEMA_VERSION;
         for from in 0..sv {
-            assert!(CompatChecker::migration_exists(from), "Missing migration from {}", from);
+            assert!(
+                CompatChecker::migration_exists(from),
+                "Missing migration from {}",
+                from
+            );
         }
     }
 

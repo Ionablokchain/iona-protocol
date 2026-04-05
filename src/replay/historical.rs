@@ -27,9 +27,8 @@
 
 use crate::execution::{execute_block, next_base_fee, KvState};
 use crate::types::{Block, Hash32, Height, Receipt};
-use crate::vm::state::VmState;
 use std::collections::BTreeMap;
-use tracing::{debug, info, warn};
+use tracing::info;
 
 // -----------------------------------------------------------------------------
 // Configuration
@@ -102,7 +101,12 @@ pub struct ChainReplayResult {
 
 impl ChainReplayResult {
     /// Create a failure result.
-    pub fn failure(height: Height, mismatch: String, results: Vec<BlockReplayResult>, state: Option<KvState>) -> Self {
+    pub fn failure(
+        height: Height,
+        mismatch: String,
+        results: Vec<BlockReplayResult>,
+        state: Option<KvState>,
+    ) -> Self {
         let total_gas = results.iter().map(|r| r.gas_used).sum();
         Self {
             success: false,
@@ -151,12 +155,8 @@ pub fn replay_block(
     };
 
     // Execute the block.
-    let (new_state, gas_used, receipts) = execute_block(
-        state,
-        &block.txs,
-        base_fee,
-        &proposer_addr,
-    );
+    let (new_state, gas_used, receipts) =
+        execute_block(state, &block.txs, base_fee, &proposer_addr);
 
     let state_root = new_state.root();
     let expected_root = block.header.state_root.clone();
@@ -221,7 +221,7 @@ pub fn replay_chain(
     let mut state = initial_state.clone();
     let mut results = Vec::with_capacity(blocks.len().min(config.max_blocks));
     let mut base_fee = config.initial_base_fee;
-    let mut total_blocks = 0;
+    let _total_blocks = 0; // dacă nu mai e folosită mai jos
 
     for (idx, block) in blocks.iter().enumerate() {
         if config.max_blocks > 0 && idx >= config.max_blocks {
@@ -229,14 +229,20 @@ pub fn replay_chain(
         }
 
         if config.progress_interval > 0 && (idx as u64) % config.progress_interval == 0 && idx > 0 {
-            info!("Replay progress: {} blocks processed, height={}", idx, block.header.height);
+            info!(
+                "Replay progress: {} blocks processed, height={}",
+                idx, block.header.height
+            );
         }
 
         let (result, new_state) = replay_block(block, &state, base_fee, config);
-        total_blocks = idx + 1;
+        let _total_blocks = 0;
+        // și comentează sau șterge linia `total_blocks = idx + 1;`
 
         // Check header fields.
-        if config.verify_roots && !(result.match_ok && result.tx_root_match && result.receipts_root_match) {
+        if config.verify_roots
+            && !(result.match_ok && result.tx_root_match && result.receipts_root_match)
+        {
             let mut mismatch = String::new();
             if !result.match_ok {
                 mismatch += &format!(
@@ -247,11 +253,15 @@ pub fn replay_chain(
                 );
             }
             if !result.tx_root_match {
-                if !mismatch.is_empty() { mismatch += "; "; }
+                if !mismatch.is_empty() {
+                    mismatch += "; ";
+                }
                 mismatch += "tx_root mismatch";
             }
             if !result.receipts_root_match {
-                if !mismatch.is_empty() { mismatch += "; "; }
+                if !mismatch.is_empty() {
+                    mismatch += "; ";
+                }
                 mismatch += "receipts_root mismatch";
             }
             return ChainReplayResult::failure(result.height, mismatch, results, Some(state));
@@ -333,7 +343,9 @@ pub fn resume_replay(
     config: &ReplayConfig,
 ) -> ChainReplayResult {
     // Skip to start height.
-    let start_idx = blocks.iter().position(|b| b.header.height == start_height)
+    let start_idx = blocks
+        .iter()
+        .position(|b| b.header.height == start_height)
         .expect("start height not found in block list");
     let replay_blocks = &blocks[start_idx..];
 
@@ -376,7 +388,11 @@ pub fn resume_replay(
 
 impl std::fmt::Display for ChainReplayResult {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        writeln!(f, "Chain Replay Result: {}", if self.success { "SUCCESS" } else { "FAILURE" })?;
+        writeln!(
+            f,
+            "Chain Replay Result: {}",
+            if self.success { "SUCCESS" } else { "FAILURE" }
+        )?;
         writeln!(f, "  Blocks replayed: {}", self.total_blocks)?;
         writeln!(f, "  Total gas used: {}", self.total_gas)?;
         if let Some(h) = self.failed_at {
@@ -396,7 +412,7 @@ impl std::fmt::Display for ChainReplayResult {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{Block, BlockHeader, Tx};
+    use crate::types::{Block, BlockHeader};
 
     fn empty_block(height: Height, state_root: Hash32, gas_used: u64) -> Block {
         Block {
@@ -456,10 +472,7 @@ mod tests {
         let state = KvState::default();
         let root = state.root();
         let bad_root = Hash32([0xFF; 32]);
-        let blocks = vec![
-            empty_block(1, root.clone(), 0),
-            empty_block(2, bad_root, 0),
-        ];
+        let blocks = vec![empty_block(1, root.clone(), 0), empty_block(2, bad_root, 0)];
         let config = ReplayConfig::default();
         let result = replay_chain(&blocks, &state, &config);
         assert!(!result.success);
@@ -501,7 +514,10 @@ mod tests {
         let state = KvState::default();
         let root = state.root();
         let mut block = empty_block(1, root.clone(), 42); // wrong gas_used
-        let config = ReplayConfig { verify_gas_used: true, ..Default::default() };
+        let config = ReplayConfig {
+            verify_gas_used: true,
+            ..Default::default()
+        };
         let result = replay_chain(&[block.clone()], &state, &config);
         assert!(!result.success);
         // Gas used in empty block is 0, header says 42 → mismatch.

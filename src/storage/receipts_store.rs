@@ -18,11 +18,10 @@
 
 use crate::storage::layout::DataLayout;
 use crate::types::{Hash32, Receipt};
-use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io;
-use std::path::{Path, PathBuf};
-use tracing::{debug, error, info, warn};
+use std::path::PathBuf;
+use tracing::{debug, error};
 
 // -----------------------------------------------------------------------------
 // ReceiptsStore
@@ -66,8 +65,9 @@ impl ReceiptsStore {
         debug!(hash = %hex::encode(id.0), count = receipts.len(), "storing receipts");
 
         // Serialize to JSON.
-        let json = serde_json::to_string_pretty(receipts)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("receipt encode: {}", e)))?;
+        let json = serde_json::to_string_pretty(receipts).map_err(|e| {
+            io::Error::new(io::ErrorKind::InvalidData, format!("receipt encode: {}", e))
+        })?;
 
         // Write to temporary file.
         if let Err(e) = fs::write(&tmp_path, &json) {
@@ -126,7 +126,12 @@ impl ReceiptsStore {
         let mut count = 0;
         for entry in fs::read_dir(&self.dir)? {
             let entry = entry?;
-            if entry.path().extension().map(|ext| ext == "json").unwrap_or(false) {
+            if entry
+                .path()
+                .extension()
+                .map(|ext| ext == "json")
+                .unwrap_or(false)
+            {
                 count += 1;
             }
         }
@@ -209,8 +214,8 @@ impl<'a> Iterator for ReceiptsIter<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::tempdir;
     use crate::types::Hash32;
+    use tempfile::tempdir;
 
     // Helper to create a dummy receipt for testing.
     fn dummy_receipt(tx_hash: &Hash32, success: bool) -> Receipt {
@@ -225,7 +230,11 @@ mod tests {
             effective_gas_price: 100,
             burned: 100,
             tip: 0,
-            error: if success { None } else { Some("test error".into()) },
+            error: if success {
+                None
+            } else {
+                Some("test error".into())
+            },
             data: None,
         }
     }
@@ -236,10 +245,7 @@ mod tests {
         let store = ReceiptsStore::open(dir.path()).unwrap();
         let hash = Hash32([0xaa; 32]);
 
-        let receipts = vec![
-            dummy_receipt(&hash, true),
-            dummy_receipt(&hash, false),
-        ];
+        let receipts = vec![dummy_receipt(&hash, true), dummy_receipt(&hash, false)];
 
         store.put(&hash, &receipts).unwrap();
         let loaded = store.get(&hash).unwrap().unwrap();

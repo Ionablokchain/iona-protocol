@@ -1,10 +1,11 @@
 //! Ed25519 signing and verification for IONA.
 
 use crate::crypto::{CryptoError, PublicKeyBytes, SignatureBytes, Signer, Verifier};
-use ed25519_dalek::{Signature, Signer as EdSigner, SigningKey, Verifier as EdVerifier, VerifyingKey};
+use ed25519_dalek::{
+    Signature, Signer as EdSigner, SigningKey, Verifier as EdVerifier, VerifyingKey,
+};
 use rand::rngs::OsRng;
 use std::sync::Arc;
-use zeroize::Zeroizing;
 
 /// Ed25519 signer that holds a signing key.
 #[derive(Clone)]
@@ -83,10 +84,12 @@ impl Verifier for Ed25519Verifier {
             return Err(CryptoError::InvalidSignature);
         }
 
-        let public_key = VerifyingKey::from_bytes(&pk.0[..].try_into().expect("ed25519 public key is 32 bytes"))
-            .map_err(|_| CryptoError::Key("invalid public key".into()))?;
+        let public_key =
+            VerifyingKey::from_bytes(&pk.0[..].try_into().expect("ed25519 public key is 32 bytes"))
+                .map_err(|_| CryptoError::Key("invalid public key".into()))?;
 
-        let signature = Signature::from_bytes(&sig.0[..].try_into().expect("ed25519 signature is 64 bytes"));
+        let signature =
+            Signature::from_bytes(&sig.0[..].try_into().expect("ed25519 signature is 64 bytes"));
 
         public_key
             .verify(msg, &signature)

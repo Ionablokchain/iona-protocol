@@ -10,9 +10,7 @@
 //!  G6 — Key file permissions > 0600 → startup gate fires (Unix only)
 //!  G7 — Data-dir permissions > 0700 → startup gate fires (Unix only)
 
-use iona::rpc::middleware::{
-    json_nesting_depth,
-};
+use iona::rpc::middleware::json_nesting_depth;
 use iona::rpc_limits::{
     new_request_id, validate_body_size, RpcLimitResult, RpcLimiter, MAX_BODY_BYTES,
 };
@@ -103,7 +101,10 @@ fn g2_submit_flood_rate_limits_hot_ip() {
 fn g3_flat_json_accepted() {
     let flat = br#"{"key":"value","n":42}"#;
     let depth = json_nesting_depth(flat);
-    assert!(depth <= MAX_BODY_BYTES, "flat JSON must be within depth limit, got {depth}");
+    assert!(
+        depth <= MAX_BODY_BYTES,
+        "flat JSON must be within depth limit, got {depth}"
+    );
 }
 
 #[test]
@@ -147,7 +148,10 @@ fn g3_braces_inside_strings_not_counted() {
     // Braces inside a string value must not contribute to depth.
     let tricky = br#"{"key": "{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{"}"#;
     let depth = json_nesting_depth(tricky);
-    assert_eq!(depth, 1, "string content must not inflate depth, got {depth}");
+    assert_eq!(
+        depth, 1,
+        "string content must not inflate depth, got {depth}"
+    );
 }
 
 #[test]
@@ -155,7 +159,10 @@ fn g3_escaped_quote_inside_string_handled() {
     // Escaped quote inside string must not terminate the string early.
     let input = br#"{"key": "val\"ue", "k2": {}}"#;
     let depth = json_nesting_depth(input);
-    assert_eq!(depth, 2, "escaped quote must be handled correctly, got {depth}");
+    assert_eq!(
+        depth, 2,
+        "escaped quote must be handled correctly, got {depth}"
+    );
 }
 
 // ── G4: Header size limit ─────────────────────────────────────────────────
@@ -182,10 +189,7 @@ fn g4_header_size_calculation_is_correct() {
         ("content-type", "application/json"),
         ("x-request-id", "req-0001-abcd"),
     ];
-    let total: usize = headers
-        .iter()
-        .map(|(k, v)| k.len() + v.len() + 4)
-        .sum();
+    let total: usize = headers.iter().map(|(k, v)| k.len() + v.len() + 4).sum();
     assert!(
         total < MAX_BODY_BYTES,
         "normal request headers must be within limit, got {total}"
@@ -247,7 +251,8 @@ mod unix_perm_tests {
             if mode & 0o077 != 0 {
                 anyhow::bail!(
                     "data directory '{}' has permissions {:03o} — expected 0700",
-                    data_dir, mode
+                    data_dir,
+                    mode
                 );
             }
         }
@@ -262,7 +267,8 @@ mod unix_perm_tests {
             if mode & 0o177 != 0 {
                 anyhow::bail!(
                     "key file '{}' has permissions {:03o} — expected 0600",
-                    key_file, mode
+                    key_file,
+                    mode
                 );
             }
         }

@@ -122,7 +122,7 @@ impl VmTx {
                     // return false;
                 }
             }
-            VmTx::Call { calldata, .. } => {
+            VmTx::Call { calldata: _, .. } => {
                 // calldata can be empty (e.g., for a fallback function).
             }
         }
@@ -141,12 +141,30 @@ impl VmTx {
 impl std::fmt::Display for VmTx {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            VmTx::Deploy { sender, gas_limit, value, .. } => {
-                write!(f, "VmTx(deploy, sender={}, gas={}, value={})", sender, gas_limit, value)
+            VmTx::Deploy {
+                sender,
+                gas_limit,
+                value,
+                ..
+            } => {
+                write!(
+                    f,
+                    "VmTx(deploy, sender={}, gas={}, value={})",
+                    sender, gas_limit, value
+                )
             }
-            VmTx::Call { sender, contract, gas_limit, value, .. } => {
-                write!(f, "VmTx(call, sender={}, contract={:?}, gas={}, value={})",
-                    sender, contract, gas_limit, value)
+            VmTx::Call {
+                sender,
+                contract,
+                gas_limit,
+                value,
+                ..
+            } => {
+                write!(
+                    f,
+                    "VmTx(call, sender={}, contract={:?}, gas={}, value={})",
+                    sender, contract, gas_limit, value
+                )
             }
         }
     }
@@ -251,7 +269,8 @@ mod tests {
     #[test]
     fn test_value_defaults_to_zero() {
         // When value is missing in JSON, it should default to 0.
-        let json = r#"{"type":"deploy","data":{"sender":"dave","init_code":[1,2,3],"gas_limit":100}}"#;
+        let json =
+            r#"{"type":"deploy","data":{"sender":"dave","init_code":[1,2,3],"gas_limit":100}}"#;
         let tx: VmTx = serde_json::from_str(json).unwrap();
         assert_eq!(tx.value(), 0);
     }

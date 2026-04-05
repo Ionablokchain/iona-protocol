@@ -24,7 +24,10 @@ use tracing::{info, warn};
 // -----------------------------------------------------------------------------
 
 #[derive(Parser, Debug)]
-#[command(name = "iona-chaindb-tool", about = "Inspect and manipulate the IONA chain database")]
+#[command(
+    name = "iona-chaindb-tool",
+    about = "Inspect and manipulate the IONA chain database"
+)]
 struct Args {
     /// Chain database directory (JSONL files).
     #[arg(long, default_value = "./chaindb")]
@@ -62,7 +65,10 @@ fn main() -> anyhow::Result<()> {
     // Initialise logging (stderr, plain text for CLI tool).
     init_logging();
 
-    info!("Starting IONA chain database tool (version {})", env!("CARGO_PKG_VERSION"));
+    info!(
+        "Starting IONA chain database tool (version {})",
+        env!("CARGO_PKG_VERSION")
+    );
 
     match args.cmd {
         Cmd::Info => {
@@ -122,7 +128,10 @@ fn cmd_prune_compact(chain_db_dir: &str, keep_blocks: usize) -> anyhow::Result<(
     info!("Loading state from chain database");
     iona::rpc::chain_store::load_into_state(chain_db_dir, &mut st)?;
 
-    info!("Pruning and compacting (keeping last {} blocks)", keep_blocks);
+    info!(
+        "Pruning and compacting (keeping last {} blocks)",
+        keep_blocks
+    );
     iona::rpc::chain_store::prune_and_compact(chain_db_dir, &st, keep_blocks)?;
 
     println!("done");
@@ -155,8 +164,7 @@ fn init_logging() {
     use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
     // For CLI tool, we use plain text with INFO level by default.
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("info"));
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
 
     let subscriber = fmt::Subscriber::builder()
         .with_target(false)

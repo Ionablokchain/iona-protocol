@@ -29,21 +29,20 @@
 //! }
 //! ```
 
-pub mod historical;
-pub mod state_root_verify;
 pub mod divergence;
+pub mod historical;
 pub mod nondeterminism;
 pub mod replay_tool;
+pub mod state_root_verify;
 
 // Re‑export core types and functions from submodules for convenience.
-pub use historical::{
-    replay_block, replay_chain, replay_and_verify_roots, resume_replay,
-    ReplayConfig, BlockReplayResult, ChainReplayResult,
-};
 pub use divergence::{
-    NodeSnapshot, VmSnapshot, Divergence, DivergenceDetail,
-    DivergenceReport, DivergenceSummary, detect_divergence,
-    detect_divergence_range, compare_snapshots,
+    compare_snapshots, detect_divergence, detect_divergence_range, Divergence, DivergenceDetail,
+    DivergenceReport, DivergenceSummary, NodeSnapshot, VmSnapshot,
+};
+pub use historical::{
+    replay_and_verify_roots, replay_block, replay_chain, resume_replay, BlockReplayResult,
+    ChainReplayResult, ReplayConfig,
 };
 pub use nondeterminism::NdLogger; // if implemented
-// ReplayTool not yet implemented
+                                  // ReplayTool not yet implemented

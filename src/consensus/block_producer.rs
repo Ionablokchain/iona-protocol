@@ -11,10 +11,10 @@
 //! It returns the proposal and block, leaving the engine to decide when to store
 //! and broadcast (typically after receiving enough votes).
 
-use crate::execution::KvState as AppState;
 use crate::consensus::{proposal_sign_bytes, Proposal};
 use crate::crypto::Signer;
 use crate::execution::build_block;
+use crate::execution::KvState as AppState;
 use crate::types::{Block, Tx};
 
 use std::error::Error;
@@ -60,16 +60,10 @@ impl Default for SimpleProducerCfg {
 #[derive(Debug)]
 pub enum ProducerError {
     EmptyValidatorSet,
-    LocalValidatorNotInSet {
-        local_address: String,
-    },
+    LocalValidatorNotInSet { local_address: String },
     InvalidMaxTxs,
-    BlockBuildFailed {
-        message: String,
-    },
-    SigningFailed {
-        message: String,
-    },
+    BlockBuildFailed { message: String },
+    SigningFailed { message: String },
 }
 
 impl fmt::Display for ProducerError {
@@ -85,7 +79,10 @@ impl fmt::Display for ProducerError {
                 )
             }
             Self::InvalidMaxTxs => {
-                write!(f, "invalid producer config: max_txs must be greater than zero")
+                write!(
+                    f,
+                    "invalid producer config: max_txs must be greater than zero"
+                )
             }
             Self::BlockBuildFailed { message } => {
                 write!(f, "failed to build block: {message}")
@@ -233,11 +230,7 @@ impl SimpleBlockProducer {
             return Ok(None);
         }
 
-        let txs: Vec<Tx> = mempool_txs
-            .iter()
-            .take(self.cfg.max_txs)
-            .cloned()
-            .collect();
+        let txs: Vec<Tx> = mempool_txs.iter().take(self.cfg.max_txs).cloned().collect();
 
         let (block, _next_state, _receipts) = build_block(
             height,
@@ -254,15 +247,10 @@ impl SimpleBlockProducer {
 
         let block_id = block.id();
 
-        let sign_bytes = proposal_sign_bytes(
-            height,
-            round,
-            &block_id,
-            valid_round.map(|r| r as u32),
-        );
+        let sign_bytes =
+            proposal_sign_bytes(height, round, &block_id, valid_round.map(|r| r as u32));
 
-        let signature = signer
-            .sign(&sign_bytes);
+        let signature = signer.sign(&sign_bytes);
 
         let proposal = Proposal {
             height,
@@ -314,7 +302,6 @@ mod tests {
     // If your actual Signer trait differs, adapt the mock below.
 
     impl Signer for MockSigner {
-
         fn public_key(&self) -> crate::crypto::PublicKeyBytes {
             crate::crypto::PublicKeyBytes(self.pubkey.0.clone())
         }
@@ -386,10 +373,7 @@ mod tests {
             .is_designated_proposer(1, 0, "unknown", &vals)
             .unwrap_err();
 
-        assert!(matches!(
-            err,
-            ProducerError::LocalValidatorNotInSet { .. }
-        ));
+        assert!(matches!(err, ProducerError::LocalValidatorNotInSet { .. }));
     }
 
     #[test]

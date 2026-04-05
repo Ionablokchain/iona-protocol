@@ -25,10 +25,9 @@
 //! ```
 
 use crate::execution::{execute_block, KvState};
-use crate::replay::nondeterminism::{NdSeverity, NdLogger, NdSource};
-use crate::types::{Block, Hash32, Height, Receipt};
+use crate::replay::nondeterminism::{NdLogger, NdSeverity, NdSource};
+use crate::types::{Block, Hash32, Height};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use tracing::{debug, info, warn};
 
 // -----------------------------------------------------------------------------
@@ -142,7 +141,10 @@ pub fn verify_block_reproducibility(
             l.log(
                 NdSource::HashmapIteration,
                 NdSeverity::Warning,
-                &format!("block execution iteration {i} at height {}", block.header.height),
+                &format!(
+                    "block execution iteration {i} at height {}",
+                    block.header.height
+                ),
                 "",
                 None,
             );
@@ -213,7 +215,10 @@ pub fn verify_chain_reproducibility(
     let mut state = initial_state.clone();
 
     for (idx, block) in blocks.iter().enumerate() {
-        debug!("Verifying reproducibility for block height {}", block.header.height);
+        debug!(
+            "Verifying reproducibility for block height {}",
+            block.header.height
+        );
         let result = verify_block_reproducibility(block, &state, config, logger.as_mut());
 
         if !result.all_match && first_failure.is_none() {
@@ -234,12 +239,8 @@ pub fn verify_chain_reproducibility(
         } else {
             crate::crypto::tx::derive_address(&block.header.proposer_pk)
         };
-        let (new_state, _, _) = execute_block(
-            &state,
-            &block.txs,
-            config.base_fee_per_gas,
-            &proposer_addr,
-        );
+        let (new_state, _, _) =
+            execute_block(&state, &block.txs, config.base_fee_per_gas, &proposer_addr);
         state = new_state;
 
         results.push(result);
@@ -272,12 +273,8 @@ pub fn verify_against_golden(
         crate::crypto::tx::derive_address(&block.header.proposer_pk)
     };
 
-    let (new_state, _, _) = execute_block(
-        initial_state,
-        &block.txs,
-        base_fee_per_gas,
-        &proposer_addr,
-    );
+    let (new_state, _, _) =
+        execute_block(initial_state, &block.txs, base_fee_per_gas, &proposer_addr);
 
     let computed = new_state.root();
     if computed != golden_root {
@@ -321,7 +318,7 @@ pub fn compare_states(a: &KvState, b: &KvState) -> Vec<String> {
             None => {
                 diffs.push(format!("balance {} only in A: {}", addr, bal_a));
             }
-                    Some(_) => { /* already set */ }
+            Some(_) => { /* already set */ }
         }
     }
     for (addr, bal_b) in &b.balances {
@@ -339,7 +336,7 @@ pub fn compare_states(a: &KvState, b: &KvState) -> Vec<String> {
             None => {
                 diffs.push(format!("nonce {} only in A: {}", addr, nonce_a));
             }
-                    Some(_) => { /* already set */ }
+            Some(_) => { /* already set */ }
         }
     }
     for (addr, nonce_b) in &b.nonces {
@@ -357,7 +354,7 @@ pub fn compare_states(a: &KvState, b: &KvState) -> Vec<String> {
             None => {
                 diffs.push(format!("kv {} only in A: {:?}", key, val_a));
             }
-                    Some(_) => { /* already set */ }
+            Some(_) => { /* already set */ }
         }
     }
     for (key, val_b) in &b.kv {
@@ -411,7 +408,11 @@ mod tests {
         let config = ReproducibilityConfig::default();
 
         let result = verify_block_reproducibility(&block, &state, &config, None);
-        assert!(result.all_match, "not reproducible at iteration {:?}", result.diverged_at);
+        assert!(
+            result.all_match,
+            "not reproducible at iteration {:?}",
+            result.diverged_at
+        );
         assert_eq!(result.iterations, 3);
         assert_eq!(result.roots.len(), 3);
     }
@@ -470,8 +471,12 @@ mod tests {
         b.balances.insert("bob".into(), 50);
 
         let diffs = compare_states(&a, &b);
-        assert!(diffs.iter().any(|d| d.contains("alice") && d.contains("100 vs 200")));
-        assert!(diffs.iter().any(|d| d.contains("bob") && d.contains("only in B")));
+        assert!(diffs
+            .iter()
+            .any(|d| d.contains("alice") && d.contains("100 vs 200")));
+        assert!(diffs
+            .iter()
+            .any(|d| d.contains("bob") && d.contains("only in B")));
     }
 
     #[test]

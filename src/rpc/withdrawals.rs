@@ -15,7 +15,9 @@ pub type H160 = [u8; 20];
 /// Withdrawals are included in the execution block header via the `withdrawals_root` field,
 /// which is the root of an ordered Merkle‑Patricia Trie over RLP‑encoded withdrawals.
 fn deserialize_hex_address<'de, D>(deserializer: D) -> Result<[u8; 20], D::Error>
-where D: serde::Deserializer<'de> {
+where
+    D: serde::Deserializer<'de>,
+{
     let s: String = serde::Deserialize::deserialize(deserializer)?;
     let hex_str = s.trim_start_matches("0x");
     let bytes = hex::decode(hex_str).map_err(serde::de::Error::custom)?;
@@ -28,7 +30,9 @@ where D: serde::Deserializer<'de> {
 }
 
 fn serialize_hex_address<S>(addr: &[u8; 20], serializer: S) -> Result<S::Ok, S::Error>
-where S: serde::Serializer {
+where
+    S: serde::Serializer,
+{
     serializer.serialize_str(&format!("0x{}", hex::encode(addr)))
 }
 
@@ -39,7 +43,10 @@ pub struct Withdrawal {
     /// Index of the validator making the withdrawal.
     pub validator_index: u64,
     /// Execution layer address receiving the funds.
-    #[serde(serialize_with = "serialize_hex_address", deserialize_with = "deserialize_hex_address")]
+    #[serde(
+        serialize_with = "serialize_hex_address",
+        deserialize_with = "deserialize_hex_address"
+    )]
     pub address: H160,
     /// Amount in Gwei (1 Gwei = 10^9 wei).
     pub amount_gwei: u64,
@@ -77,10 +84,7 @@ impl Withdrawal {
 /// # Returns
 /// A hex string with `0x` prefix.
 pub fn withdrawals_root_hex(withdrawals: &[Withdrawal]) -> String {
-    let items: Vec<Vec<u8>> = withdrawals
-        .iter()
-        .map(|w| w.rlp_encode())
-        .collect();
+    let items: Vec<Vec<u8>> = withdrawals.iter().map(|w| w.rlp_encode()).collect();
     // `eth_ordered_trie_root_hex` is assumed to be defined in `crate::rpc::mpt`.
     // It computes the root of an ordered trie from RLP‑encoded items.
     crate::rpc::mpt::eth_ordered_trie_root_hex(&items)
@@ -108,9 +112,7 @@ mod tests {
 
     #[test]
     fn test_withdrawals_root_hex() {
-        let withdrawals = vec![
-            Withdrawal::new(0, 0, [0xaa; 20], 10_000_000_000),
-        ];
+        let withdrawals = vec![Withdrawal::new(0, 0, [0xaa; 20], 10_000_000_000)];
         let root = withdrawals_root_hex(&withdrawals);
         // The root is a hex string of length 66 (including 0x)
         assert_eq!(root.len(), 66);
@@ -120,7 +122,7 @@ mod tests {
     #[test]
     fn test_serialization() {
         let w = Withdrawal::new(42, 7, [0xbb; 20], 5_000_000_000);
-        let json = serde_json::to_string(&w).unwrap();
+        let json = serde_json::to_string(&w).expect("RPC error");
         // Minimal check: it contains the fields.
         assert!(json.contains("\"index\":42"));
         assert!(json.contains("\"amount_gwei\":5000000000"));
@@ -134,7 +136,7 @@ mod tests {
             "address": "0x1111111111111111111111111111111111111111",
             "amount_gwei": 1000
         }"#;
-        let w: Withdrawal = serde_json::from_str(json).unwrap();
+        let w: Withdrawal = serde_json::from_str(json).expect("RPC error");
         assert_eq!(w.index, 1);
         assert_eq!(w.validator_index, 2);
         assert_eq!(w.address, [0x11; 20]);

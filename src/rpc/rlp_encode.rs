@@ -88,7 +88,10 @@ where
 /// # Returns
 /// A hex string with `0x` prefix.
 pub fn keccak_rlp_root_encodable<T: rlp::Encodable>(items: &[T]) -> String {
-    let rlp_items: Vec<Vec<u8>> = items.iter().map(|item| rlp::encode(item).to_vec()).collect();
+    let rlp_items: Vec<Vec<u8>> = items
+        .iter()
+        .map(|item| rlp::encode(item).to_vec())
+        .collect();
     keccak_rlp_root(&rlp_items)
 }
 
@@ -101,7 +104,10 @@ mod tests {
         let empty: Vec<Vec<u8>> = vec![];
         let root = keccak_rlp_root(&empty);
         // Known value: keccak(rlp([])) = 0x56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421
-        assert_eq!(root, "0x56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421");
+        assert_eq!(
+            root,
+            "0x56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421"
+        );
     }
 
     #[test]

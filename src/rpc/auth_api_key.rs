@@ -13,7 +13,10 @@ pub struct ApiKeyConfig {
 
 impl ApiKeyConfig {
     pub fn new(header: impl Into<String>, value: impl Into<String>) -> Self {
-        Self { header: header.into(), value: value.into() }
+        Self {
+            header: header.into(),
+            value: value.into(),
+        }
     }
 }
 

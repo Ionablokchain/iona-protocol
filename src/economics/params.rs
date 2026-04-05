@@ -1,9 +1,9 @@
 use serde::{Deserialize, Serialize};
 
 // Constants for validation limits.
-const MAX_BPS: u64 = 10_000;          // 100% expressed in basis points.
+const MAX_BPS: u64 = 10_000; // 100% expressed in basis points.
 const MAX_SLASH_BPS: u64 = MAX_BPS;
-const MIN_STAKE_MIN: u128 = 1;        // At least 1 unit.
+const MIN_STAKE_MIN: u128 = 1; // At least 1 unit.
 
 /// Economic parameters of the Iona protocol.
 ///
@@ -55,12 +55,24 @@ impl Default for EconomicsParams {
 }
 
 // Default value functions (used also by serde default attributes).
-fn default_base_inflation_bps() -> u64 { 500 }          // 5%
-fn default_min_stake() -> u128 { 10_000_000_000 }       // 10 billion units
-fn default_slash_double_sign_bps() -> u64 { 5000 }      // 50%
-fn default_slash_downtime_bps() -> u64 { 100 }          // 1%
-fn default_unbonding_epochs() -> u64 { 14 }
-fn default_treasury_bps() -> u64 { 500 }                // 5%
+fn default_base_inflation_bps() -> u64 {
+    500
+} // 5%
+fn default_min_stake() -> u128 {
+    10_000_000_000
+} // 10 billion units
+fn default_slash_double_sign_bps() -> u64 {
+    5000
+} // 50%
+fn default_slash_downtime_bps() -> u64 {
+    100
+} // 1%
+fn default_unbonding_epochs() -> u64 {
+    14
+}
+fn default_treasury_bps() -> u64 {
+    500
+} // 5%
 
 impl EconomicsParams {
     /// Validates the parameters, returning `Ok(())` if they are within acceptable bounds.

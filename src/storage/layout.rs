@@ -26,7 +26,7 @@
 use fd_lock::RwLock;
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Write};
+use std::io;
 use std::path::{Path, PathBuf};
 
 /// Standard directory layout with production‑ready features:
@@ -51,7 +51,6 @@ impl DataLayout {
             _lock: None,
         }
     }
-
 
     /// Attempts to acquire an exclusive lock on the data directory.
     /// Returns an error if the lock is already held by another process.
@@ -80,49 +79,97 @@ impl DataLayout {
 
     // ── Sub-directories ──────────────────────────────────────────────────
 
-    pub fn identity_dir(&self) -> PathBuf { self.root.join("identity") }
-    pub fn validator_dir(&self) -> PathBuf { self.root.join("validator") }
-    pub fn chain_dir(&self) -> PathBuf { self.root.join("chain") }
-    pub fn peerstore_dir(&self) -> PathBuf { self.root.join("peerstore") }
+    pub fn identity_dir(&self) -> PathBuf {
+        self.root.join("identity")
+    }
+    pub fn validator_dir(&self) -> PathBuf {
+        self.root.join("validator")
+    }
+    pub fn chain_dir(&self) -> PathBuf {
+        self.root.join("chain")
+    }
+    pub fn peerstore_dir(&self) -> PathBuf {
+        self.root.join("peerstore")
+    }
 
     // ── Chain sub-dirs ───────────────────────────────────────────────────
 
-    pub fn blocks_dir(&self) -> PathBuf { self.chain_dir().join("blocks") }
-    pub fn wal_dir(&self) -> PathBuf { self.chain_dir().join("wal") }
+    pub fn blocks_dir(&self) -> PathBuf {
+        self.chain_dir().join("blocks")
+    }
+    pub fn wal_dir(&self) -> PathBuf {
+        self.chain_dir().join("wal")
+    }
     /// Returns the root directory path.
-    pub fn root(&self) -> &std::path::Path { &self.root }
+    pub fn root(&self) -> &std::path::Path {
+        &self.root
+    }
     /// Path to the flat (legacy) WAL file, used by v2→v3 migration.
-    pub fn wal_flat_path(&self) -> PathBuf { self.root.join("wal.jsonl") }
+    pub fn wal_flat_path(&self) -> PathBuf {
+        self.root.join("wal.jsonl")
+    }
     /// Alias for wal_dir() for compatibility.
-    pub fn wal_path(&self) -> PathBuf { self.wal_dir() }
+    pub fn wal_path(&self) -> PathBuf {
+        self.wal_dir()
+    }
     /// Path to the KV state file.
-    pub fn state_kv_path(&self) -> PathBuf { self.state_dir().join("state.json") }
-    pub fn state_dir(&self) -> PathBuf { self.chain_dir().join("state") }
-    pub fn receipts_dir(&self) -> PathBuf { self.chain_dir().join("receipts") }
-    pub fn snapshots_dir(&self) -> PathBuf { self.chain_dir().join("snapshots") }
+    pub fn state_kv_path(&self) -> PathBuf {
+        self.state_dir().join("state.json")
+    }
+    pub fn state_dir(&self) -> PathBuf {
+        self.chain_dir().join("state")
+    }
+    pub fn receipts_dir(&self) -> PathBuf {
+        self.chain_dir().join("receipts")
+    }
+    pub fn snapshots_dir(&self) -> PathBuf {
+        self.chain_dir().join("snapshots")
+    }
 
     // ── Identity files ───────────────────────────────────────────────────
 
-    pub fn p2p_key_path(&self) -> PathBuf { self.identity_dir().join("p2p_key.json") }
-    pub fn node_meta_path(&self) -> PathBuf { self.identity_dir().join("node_meta.json") }
+    pub fn p2p_key_path(&self) -> PathBuf {
+        self.identity_dir().join("p2p_key.json")
+    }
+    pub fn node_meta_path(&self) -> PathBuf {
+        self.identity_dir().join("node_meta.json")
+    }
 
     // ── Validator files ──────────────────────────────────────────────────
 
-    pub fn validator_key_path(&self) -> PathBuf { self.validator_dir().join("validator_key.json") }
-    pub fn validator_key_enc_path(&self) -> PathBuf { self.validator_dir().join("validator_key.enc") }
+    pub fn validator_key_path(&self) -> PathBuf {
+        self.validator_dir().join("validator_key.json")
+    }
+    pub fn validator_key_enc_path(&self) -> PathBuf {
+        self.validator_dir().join("validator_key.enc")
+    }
 
     // ── Chain state files ────────────────────────────────────────────────
 
-    pub fn state_full_path(&self) -> PathBuf { self.state_dir().join("state_full.json") }
-    pub fn stakes_path(&self) -> PathBuf { self.state_dir().join("stakes.json") }
-    pub fn evidence_path(&self) -> PathBuf { self.state_dir().join("evidence.jsonl") }
-    pub fn schema_path(&self) -> PathBuf { self.state_dir().join("schema.json") }
-    pub fn tx_index_path(&self) -> PathBuf { self.state_dir().join("tx_index.json") }
+    pub fn state_full_path(&self) -> PathBuf {
+        self.state_dir().join("state_full.json")
+    }
+    pub fn stakes_path(&self) -> PathBuf {
+        self.state_dir().join("stakes.json")
+    }
+    pub fn evidence_path(&self) -> PathBuf {
+        self.state_dir().join("evidence.jsonl")
+    }
+    pub fn schema_path(&self) -> PathBuf {
+        self.state_dir().join("schema.json")
+    }
+    pub fn tx_index_path(&self) -> PathBuf {
+        self.state_dir().join("tx_index.json")
+    }
 
     // ── Peerstore files ──────────────────────────────────────────────────
 
-    pub fn peers_path(&self) -> PathBuf { self.peerstore_dir().join("peers.json") }
-    pub fn quarantine_path(&self) -> PathBuf { self.peerstore_dir().join("quarantine.json") }
+    pub fn peers_path(&self) -> PathBuf {
+        self.peerstore_dir().join("peers.json")
+    }
+    pub fn quarantine_path(&self) -> PathBuf {
+        self.peerstore_dir().join("quarantine.json")
+    }
 
     // ── Ensure all directories exist ─────────────────────────────────────
 
@@ -226,7 +273,11 @@ impl DataLayout {
     /// Check if chain data exists (actual files, not just empty dirs).
     pub fn has_chain_data(&self) -> bool {
         self.state_full_path().exists()
-            || self.blocks_dir().read_dir().map(|mut rd| rd.next().is_some()).unwrap_or(false)
+            || self
+                .blocks_dir()
+                .read_dir()
+                .map(|mut rd| rd.next().is_some())
+                .unwrap_or(false)
     }
 
     /// Check if identity exists.
@@ -333,12 +384,14 @@ impl DataLayout {
     /// This operation is O(number of files) – it may be slow for large directories.
     /// Use sparingly.
     pub fn status(&self) -> NodeStatus {
-        let blocks_count = self.blocks_dir()
+        let blocks_count = self
+            .blocks_dir()
             .read_dir()
             .map(|rd| rd.filter_map(|e| e.ok()).count())
             .unwrap_or(0);
 
-        let snapshots_count = self.snapshots_dir()
+        let snapshots_count = self
+            .snapshots_dir()
             .read_dir()
             .map(|rd| rd.filter_map(|e| e.ok()).count())
             .unwrap_or(0);
@@ -405,21 +458,22 @@ impl DataLayout {
     }
 }
 
-
-
 // ── Additional convenience methods ──────────────────────────────────────
 
 impl DataLayout {
     /// Temporary directory for atomic operations.
-    pub fn tmp_dir(&self) -> PathBuf { self.root.join("tmp") }
+    pub fn tmp_dir(&self) -> PathBuf {
+        self.root.join("tmp")
+    }
 
     /// Load full state from disk.
     pub fn load_state_full(&self) -> io::Result<crate::execution::KvState> {
         let path = self.state_full_path();
         if path.exists() {
             let s = fs::read_to_string(&path)?;
-            serde_json::from_str(&s)
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("state_full.json: {e}")))
+            serde_json::from_str(&s).map_err(|e| {
+                io::Error::new(io::ErrorKind::InvalidData, format!("state_full.json: {e}"))
+            })
         } else {
             Ok(crate::execution::KvState::default())
         }
@@ -438,8 +492,9 @@ impl DataLayout {
         let path = self.stakes_path();
         if path.exists() {
             let s = fs::read_to_string(&path)?;
-            serde_json::from_str(&s)
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("stakes.json: {e}")))
+            serde_json::from_str(&s).map_err(|e| {
+                io::Error::new(io::ErrorKind::InvalidData, format!("stakes.json: {e}"))
+            })
         } else {
             Ok(crate::economics::staking::StakingState::default())
         }
@@ -458,8 +513,9 @@ impl DataLayout {
         let path = self.schema_path();
         if path.exists() {
             let s = fs::read_to_string(&path)?;
-            Ok(Some(serde_json::from_str(&s)
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?))
+            Ok(Some(serde_json::from_str(&s).map_err(|e| {
+                io::Error::new(io::ErrorKind::InvalidData, e.to_string())
+            })?))
         } else {
             Ok(None)
         }
@@ -478,8 +534,9 @@ impl DataLayout {
         let path = self.node_meta_path();
         if path.exists() {
             let s = fs::read_to_string(&path)?;
-            Ok(Some(serde_json::from_str(&s)
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?))
+            Ok(Some(serde_json::from_str(&s).map_err(|e| {
+                io::Error::new(io::ErrorKind::InvalidData, e.to_string())
+            })?))
         } else {
             Ok(None)
         }
@@ -496,12 +553,17 @@ impl DataLayout {
     /// Get latest block height from blocks directory.
     pub fn latest_height(&self) -> Option<u64> {
         let dir = self.blocks_dir();
-        if !dir.exists() { return None; }
+        if !dir.exists() {
+            return None;
+        }
         let mut max_height = None;
         if let Ok(rd) = fs::read_dir(&dir) {
             for entry in rd.filter_map(|e| e.ok()) {
                 let name = entry.file_name().to_string_lossy().to_string();
-                if let Some(h) = name.strip_suffix(".json").and_then(|s| s.parse::<u64>().ok()) {
+                if let Some(h) = name
+                    .strip_suffix(".json")
+                    .and_then(|s| s.parse::<u64>().ok())
+                {
                     max_height = Some(max_height.map_or(h, |m: u64| m.max(h)));
                 }
             }
@@ -516,7 +578,10 @@ impl DataLayout {
             let s = fs::read_to_string(&path)?;
             let v: serde_json::Value = serde_json::from_str(&s)
                 .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
-            Ok(v.get("peer_id").and_then(|p| p.as_str()).unwrap_or("unknown").to_string())
+            Ok(v.get("peer_id")
+                .and_then(|p| p.as_str())
+                .unwrap_or("unknown")
+                .to_string())
         } else {
             Ok("unknown".to_string())
         }
@@ -531,16 +596,46 @@ mod tests {
     #[test]
     fn test_layout_paths() {
         let layout = DataLayout::new("/var/lib/iona/val2");
-        assert_eq!(layout.identity_dir(), PathBuf::from("/var/lib/iona/val2/identity"));
-        assert_eq!(layout.validator_dir(), PathBuf::from("/var/lib/iona/val2/validator"));
-        assert_eq!(layout.chain_dir(), PathBuf::from("/var/lib/iona/val2/chain"));
-        assert_eq!(layout.peerstore_dir(), PathBuf::from("/var/lib/iona/val2/peerstore"));
-        assert_eq!(layout.blocks_dir(), PathBuf::from("/var/lib/iona/val2/chain/blocks"));
-        assert_eq!(layout.wal_dir(), PathBuf::from("/var/lib/iona/val2/chain/wal"));
-        assert_eq!(layout.state_full_path(), PathBuf::from("/var/lib/iona/val2/chain/state/state_full.json"));
-        assert_eq!(layout.validator_key_path(), PathBuf::from("/var/lib/iona/val2/validator/validator_key.json"));
-        assert_eq!(layout.p2p_key_path(), PathBuf::from("/var/lib/iona/val2/identity/p2p_key.json"));
-        assert_eq!(layout.peers_path(), PathBuf::from("/var/lib/iona/val2/peerstore/peers.json"));
+        assert_eq!(
+            layout.identity_dir(),
+            PathBuf::from("/var/lib/iona/val2/identity")
+        );
+        assert_eq!(
+            layout.validator_dir(),
+            PathBuf::from("/var/lib/iona/val2/validator")
+        );
+        assert_eq!(
+            layout.chain_dir(),
+            PathBuf::from("/var/lib/iona/val2/chain")
+        );
+        assert_eq!(
+            layout.peerstore_dir(),
+            PathBuf::from("/var/lib/iona/val2/peerstore")
+        );
+        assert_eq!(
+            layout.blocks_dir(),
+            PathBuf::from("/var/lib/iona/val2/chain/blocks")
+        );
+        assert_eq!(
+            layout.wal_dir(),
+            PathBuf::from("/var/lib/iona/val2/chain/wal")
+        );
+        assert_eq!(
+            layout.state_full_path(),
+            PathBuf::from("/var/lib/iona/val2/chain/state/state_full.json")
+        );
+        assert_eq!(
+            layout.validator_key_path(),
+            PathBuf::from("/var/lib/iona/val2/validator/validator_key.json")
+        );
+        assert_eq!(
+            layout.p2p_key_path(),
+            PathBuf::from("/var/lib/iona/val2/identity/p2p_key.json")
+        );
+        assert_eq!(
+            layout.peers_path(),
+            PathBuf::from("/var/lib/iona/val2/peerstore/peers.json")
+        );
     }
 
     #[test]
@@ -558,7 +653,7 @@ mod tests {
     #[test]
     fn test_schema_check() {
         let tmp = tempdir().unwrap();
-        let mut layout = DataLayout::new(tmp.path());
+        let layout = DataLayout::new(tmp.path());
         layout.ensure_all().unwrap();
 
         // No schema file -> should create with expected version.

@@ -23,7 +23,6 @@ use crate::storage::layout::DataLayout;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io;
-use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Custom error type for NodeMeta operations.
@@ -92,7 +91,13 @@ impl NodeMeta {
     }
 
     /// Mark a migration as in-progress (for crash-safe resume).
-    pub fn begin_migration(&mut self, from_sv: u32, to_sv: u32, step: &str, layout: &DataLayout) -> Result<(), NodeMetaError> {
+    pub fn begin_migration(
+        &mut self,
+        from_sv: u32,
+        to_sv: u32,
+        step: &str,
+        layout: &DataLayout,
+    ) -> Result<(), NodeMetaError> {
         self.migration_state = Some(MigrationState {
             from_sv,
             to_sv,
@@ -121,15 +126,20 @@ impl NodeMeta {
             return Ok(None);
         }
         let s = fs::read_to_string(&path)?;
-        let meta: Self = serde_json::from_str(&s)
-            .map_err(|e| NodeMetaError::Corrupted(format!("{}", e)))?;
+        let meta: Self =
+            serde_json::from_str(&s).map_err(|e| NodeMetaError::Corrupted(format!("{}", e)))?;
 
         // Basic validation: ensure schema_version and protocol_version are within reasonable bounds.
-        if meta.schema_version > 10_000 {  // arbitrary upper bound
-            return Err(NodeMetaError::Corrupted("schema_version out of range".into()));
+        if meta.schema_version > 10_000 {
+            // arbitrary upper bound
+            return Err(NodeMetaError::Corrupted(
+                "schema_version out of range".into(),
+            ));
         }
         if meta.protocol_version > 1_000 {
-            return Err(NodeMetaError::Corrupted("protocol_version out of range".into()));
+            return Err(NodeMetaError::Corrupted(
+                "protocol_version out of range".into(),
+            ));
         }
 
         Ok(Some(meta))
@@ -198,7 +208,10 @@ mod tests {
     fn test_new_current() {
         let meta = NodeMeta::new_current();
         assert_eq!(meta.schema_version, storage::CURRENT_SCHEMA_VERSION);
-        assert_eq!(meta.protocol_version, protocol::version::CURRENT_PROTOCOL_VERSION);
+        assert_eq!(
+            meta.protocol_version,
+            protocol::version::CURRENT_PROTOCOL_VERSION
+        );
         assert!(!meta.node_version.is_empty());
     }
 
@@ -274,7 +287,8 @@ mod tests {
         let mut meta = NodeMeta::new_current();
         assert!(!meta.has_pending_migration());
 
-        meta.begin_migration(3, 4, "upgrade node_meta.json", &layout).unwrap();
+        meta.begin_migration(3, 4, "upgrade node_meta.json", &layout)
+            .unwrap();
         assert!(meta.has_pending_migration());
 
         // Reload from disk and verify migration_state is persisted

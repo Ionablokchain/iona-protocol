@@ -68,7 +68,10 @@ mod tests {
     fn test_keccak_hex() {
         let hash = keccak_hex(b"");
         // Keccak-256 of empty string
-        assert_eq!(hash, "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470");
+        assert_eq!(
+            hash,
+            "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470"
+        );
     }
 
     #[test]
@@ -98,7 +101,7 @@ mod tests {
     fn test_rlp_root_hex() {
         // Empty list should produce the RLP root of an empty list.
         let empty: Vec<Vec<u8>> = vec![];
-        let root = rlp_root_hex(&empty).unwrap();
+        let root = rlp_root_hex(&empty).expect("RPC error");
         // Known value: keccak(rlp([])) = 0x56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421
         assert_eq!(
             root,
@@ -108,6 +111,8 @@ mod tests {
 }
 
 pub fn pseudo_root(items: &[String]) -> String {
-    if items.is_empty() { return "0x0000000000000000000000000000000000000000000000000000000000000000".to_string(); }
+    if items.is_empty() {
+        return "0x0000000000000000000000000000000000000000000000000000000000000000".to_string();
+    }
     keccak_hex(items.join("").as_bytes())
 }
