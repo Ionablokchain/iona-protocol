@@ -776,6 +776,6 @@ mod tests {
         let result = simulate_rolling_upgrade(&plan, &activations, 0, 50, &config);
         // With network delays, some blocks may be skipped due to nodes being offline.
         // Just verify the simulation completes without panic.
-        assert!(result.blocks_produced >= 0);
+        // Removed always-true assertion `assert!(result.blocks_produced >= 0);`
     }
 }
