@@ -68,7 +68,7 @@ pub fn check_no_gaps(from_sv: u32, to_sv: u32) -> Result<(), String> {
             // Covered by legacy code path.
             continue;
         }
-        let has_migration = MIGRATIONS.iter().any(|entry| entry.from_version == sv);
+        let has_migration = MIGRATIONS.iter().any(|entry| entry.0 == sv);
         if !has_migration {
             return Err(format!(
                 "SM-2 VIOLATION: no migration found for SV {sv} -> {}",

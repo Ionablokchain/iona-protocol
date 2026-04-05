@@ -183,6 +183,7 @@ pub struct AuditLogger {
 impl AuditLogger {
     /// Create a new audit logger based on the configuration.
     pub fn new(config: AuditConfig) -> std::io::Result<Self> {
+        let max_mem = config.max_memory_events;
         let file_writer = if let Some(ref path) = config.file_path {
             let file = Self::open_log_file(path, &config)?;
             let writer = BufWriter::new(file);
@@ -202,7 +203,7 @@ impl AuditLogger {
             config,
             file_writer,
             current_size,
-            events: Mutex::new(Vec::with_capacity(config.max_memory_events)),
+            events: Mutex::new(Vec::with_capacity(max_mem)),
             _drop_guard: None,
         })
     }
@@ -289,8 +290,31 @@ impl AuditLogger {
                     let len = json.len();
                     self.current_size.fetch_add(len, Ordering::Relaxed);
                     let _ = writer.flush();
-                    // Check rotation after write
-                    self.rotate_if_needed();
+                    // Check rotation inline (we already hold the lock)
+                    let max_size = self.config.max_file_size_bytes;
+                    if max_size > 0 {
+                        let current = self.current_size.load(std::sync::atomic::Ordering::Relaxed) as u64;
+                        if current >= max_size {
+                            if let Some(path) = &self.config.file_path {
+                                for i in (1..self.config.rotate_count).rev() {
+                                    let src = path.with_extension(format!("{}.{}", path.extension().unwrap_or_default().to_str().unwrap_or("log"), i));
+                                    let dst = path.with_extension(format!("{}.{}", path.extension().unwrap_or_default().to_str().unwrap_or("log"), i + 1));
+                                    let _ = std::fs::rename(src, dst);
+                                }
+                                let old = path.with_extension("log.1");
+                                let _ = std::fs::rename(path, old);
+                                match Self::open_log_file(path, &self.config) {
+                                    Ok(file) => {
+                                        *writer = std::io::BufWriter::new(file);
+                                        self.current_size.store(0, std::sync::atomic::Ordering::Relaxed);
+                                    }
+                                    Err(e) => {
+                                        error!("Failed to rotate audit log: {}", e);
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }

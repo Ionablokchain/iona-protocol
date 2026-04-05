@@ -138,7 +138,7 @@ impl CompatReport {
     pub fn enforced_failures(&self, rules: &[CompatRule]) -> Vec<&CompatCheckResult> {
         let enforced_ids: HashSet<_> = rules.iter().filter(|r| r.enforced).map(|r| &r.id).collect();
         self.results.iter()
-            .filter(|r| !r.passed && enforced_ids.contains(&r.rule_id.as_str()))
+            .filter(|r| !r.passed && enforced_ids.contains(&r.rule_id))
             .collect()
     }
 
@@ -200,7 +200,7 @@ impl CompatChecker {
             "iona_compat_check_failures_total",
             "Number of failed compatibility checks",
             &["rule_id", "domain"]
-        ).unwrap_or_else(|_| IntCounterVec::new(prometheus::opts!()).unwrap());
+        ).unwrap_or_else(|_| IntCounterVec::new(prometheus::opts!()).expect("fallback metric creation"));
 
         Self {
             activations,
@@ -260,7 +260,7 @@ impl CompatChecker {
         let enforced_ids: HashSet<_> = self.rules.iter().filter(|r| r.enforced).map(|r| &r.id).collect();
         let filtered_results: Vec<_> = full.results
             .into_iter()
-            .filter(|r| enforced_ids.contains(&r.rule_id.as_str()))
+            .filter(|r| enforced_ids.contains(&r.rule_id))
             .collect();
         CompatReport::from_results(filtered_results)
     }
@@ -507,11 +507,11 @@ impl CompatChecker {
                     break;
                 }
                 if let Some(ph) = prev_height {
-                    if a.activation_height <= ph {
+                    if a.activation_height <= Some(ph) {
                         valid = false;
                         detail = format!(
                             "Activation height {} <= previous height {}",
-                            a.activation_height.unwrap(), ph
+                            a.activation_height.expect("activation_height validated"), ph
                         );
                         break;
                     }
@@ -721,6 +721,12 @@ pub fn generate_upgrade_guide(from: &str, to: &str) -> String {
         (Some(f), Some(t)) => {
             if f.compat_level == CompatLevel::Full && t.compat_level == CompatLevel::Full {
                 format!("Upgrade from {} to {} is fully compatible. You can upgrade any node in any order.", from, to)
+            } else if t.compat_level == CompatLevel::Breaking {
+                format!(
+                    "Breaking change from {} to {}. The target version introduces a new protocol version. \
+                     Upgrade requires coordinated activation. Ensure all validators upgrade before activation height.",
+                    from, to
+                )
             } else if check_version_compat(f, t) {
                 format!(
                     "Upgrade from {} to {} is wire-compatible (PVs overlap). \

@@ -106,7 +106,7 @@ impl Wal {
 
     /// Append an event. Rotates if needed.
     pub fn append(&self, ev: &WalEvent) -> std::io::Result<()> {
-        let mut inner = self.0.lock().unwrap();
+        let mut inner = self.0.lock().expect("wal mutex poisoned");
         if inner.written >= MAX_SEGMENT_BYTES {
             inner.rotate()?;
         }
@@ -123,7 +123,7 @@ impl Wal {
     /// Mark a snapshot point. After this, WAL entries before this snapshot can be pruned.
     /// `segment` and `offset` indicate the exact position in the WAL where the snapshot was taken.
     pub fn mark_snapshot(&self, segment: u32, offset: u64) -> std::io::Result<()> {
-        let mut inner = self.0.lock().unwrap();
+        let mut inner = self.0.lock().expect("wal mutex poisoned");
         inner.meta.snapshot_segment = segment;
         inner.meta.snapshot_offset = offset;
         inner.meta.save(&inner.dir)?;
@@ -133,8 +133,8 @@ impl Wal {
 
     /// Replay all events from the beginning of the WAL.
     pub fn replay(&self) -> std::io::Result<Vec<WalEvent>> {
-        let inner = self.0.lock().unwrap();
-        Self::replay_from(&inner.dir, 0, 0)
+        let inner = self.0.lock().expect("wal mutex poisoned");
+        Self::replay_from(0, 0, &inner.dir)
     }
 
     /// Replay events starting from a specific segment and offset.

@@ -107,8 +107,8 @@ impl ChainReplayResult {
         Self {
             success: false,
             failed_at: Some(height),
-            blocks: results,
             total_blocks: results.len(),
+            blocks: results,
             total_gas,
             mismatch: Some(mismatch),
             final_state: state,
@@ -121,8 +121,8 @@ impl ChainReplayResult {
         Self {
             success: true,
             failed_at: None,
-            blocks: results,
             total_blocks: results.len(),
+            blocks: results,
             total_gas,
             mismatch: None,
             final_state: Some(final_state),
@@ -401,6 +401,7 @@ mod tests {
     fn empty_block(height: Height, state_root: Hash32, gas_used: u64) -> Block {
         Block {
             header: BlockHeader {
+                pv: 0,
                 height,
                 round: 0,
                 prev: Hash32::zero(),

@@ -357,6 +357,30 @@ pub fn validate_config(
             field: "network.listen".into(),
             message: "P2P listen address cannot be empty".into(),
         });
+    } else if p2p_listen_addr.starts_with('/') {
+        // Multiaddr format: /ip4/X.X.X.X/tcp/PORT
+        let parts: Vec<&str> = p2p_listen_addr.split('/').collect();
+        let mut found_tcp_port = false;
+        for (i, part) in parts.iter().enumerate() {
+            if *part == "tcp" {
+                if let Some(port_str) = parts.get(i + 1) {
+                    if port_str.parse::<u16>().is_ok() {
+                        found_tcp_port = true;
+                    } else {
+                        errors.push(ValidationError {
+                            field: "network.listen".into(),
+                            message: format!("invalid port number in P2P listen address: {port_str}"),
+                        });
+                    }
+                }
+            }
+        }
+        if !found_tcp_port && !errors.iter().any(|e| e.field == "network.listen") {
+            errors.push(ValidationError {
+                field: "network.listen".into(),
+                message: format!("P2P listen address missing /tcp/PORT: {p2p_listen_addr}"),
+            });
+        }
     } else if let Some(port_str) = p2p_listen_addr.split(':').last() {
         if port_str.parse::<u16>().is_err() {
             errors.push(ValidationError {

@@ -39,6 +39,8 @@ pub struct KvState {
     pub balances: BTreeMap<String, u64>,
     pub nonces:   BTreeMap<String, u64>,
     pub burned:   u64,
+    #[serde(default)]
+    pub staked:   BTreeMap<String, u64>,
     /// VM contract state (storage slots + bytecode + nonces)
     pub vm:       VmStorage,
 }
@@ -413,6 +415,8 @@ pub fn execute_block_with_staking(
                         height,
                         block_timestamp,
                         base_fee_per_gas,
+                        u64::MAX, // gas_limit
+                        [0u8; 32], // coinbase
                         chain_id,
                     );
                     rcpt.success = result.success;
@@ -525,6 +529,7 @@ pub fn build_block(
     );
 
     let header = BlockHeader {
+        pv: 0,
         height,
         round,
         prev,

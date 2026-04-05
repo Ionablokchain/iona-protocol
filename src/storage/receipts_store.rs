@@ -16,7 +16,7 @@
 //! let loaded = store.get(&tx_hash)?;
 //! ```
 
-use crate::data_layout::DataLayout;
+use crate::storage::layout::DataLayout;
 use crate::types::{Hash32, Receipt};
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -97,7 +97,7 @@ impl ReceiptsStore {
             e
         })?;
 
-        let receipts = serde_json::from_str(&s).map_err(|e| {
+        let receipts: Vec<crate::types::Receipt> = serde_json::from_str(&s).map_err(|e| {
             error!(path = %path.display(), error = %e, "failed to parse receipts JSON");
             io::Error::new(io::ErrorKind::InvalidData, format!("receipt decode: {}", e))
         })?;

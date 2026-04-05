@@ -51,7 +51,7 @@ pub mod types {
 // Re‑export the most important public items for a convenient top‑level API.
 pub use db::MemDb;
 pub use executor::execute_evm_tx; // the simpler version (if any)
-pub use executor_env::{build_evm_env, default_env, env_from_header};
+pub use executor_env::{default_env, env_from_header};
 pub use kv_state_db::{
     evm_to_iona_addr, execute_evm_on_state, iona_addr_hex, iona_to_evm_addr,
     KvStateDb, UnifiedEvmResult,

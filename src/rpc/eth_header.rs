@@ -14,7 +14,7 @@ use std::fmt;
 // Re‑export or define common types for consistency.
 pub type H256 = [u8; 32];
 pub type H160 = [u8; 20];
-pub type Bloom256 = [u8; 256];
+pub type Bloom256 = Vec<u8>;
 pub type Nonce = [u8; 8];
 
 // -----------------------------------------------------------------------------
@@ -33,7 +33,7 @@ pub const EMPTY_OMMERS_HASH: H256 = [
 ];
 
 /// Zeroed bloom filter (256 bytes).
-pub const EMPTY_BLOOM: Bloom256 = [0u8; 256];
+pub fn empty_bloom() -> Bloom256 { vec![0u8; 256] }
 
 // -----------------------------------------------------------------------------
 // Ethereum Block Header
@@ -43,7 +43,8 @@ pub const EMPTY_BLOOM: Bloom256 = [0u8; 256];
 ///
 /// This includes fields up to EIP‑1559. For full compatibility, additional fields
 /// (withdrawalsRoot, blobGasUsed, excessBlobGas) would need to be added.
-#[derive(Debug, Clone, PartialEq, Eq)]
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct EthHeader {
     /// Hash of the parent block.
     pub parent_hash: H256,
@@ -90,7 +91,7 @@ impl Default for EthHeader {
             state_root: EMPTY_HASH,
             transactions_root: EMPTY_HASH,
             receipts_root: EMPTY_HASH,
-            logs_bloom: EMPTY_BLOOM,
+            logs_bloom: empty_bloom(),
             difficulty: 0,
             number: 0,
             gas_limit: 30_000_000,
@@ -189,7 +190,7 @@ pub fn bloom_from_hex(s: &str) -> Option<Bloom256> {
     let bytes = hex::decode(hex_str).ok()?;
     let mut out = [0u8; 256];
     out.copy_from_slice(&bytes);
-    Some(out)
+    Some(out.to_vec())
 }
 
 /// Parse a hex string into a 20‑byte address. Returns `None` if invalid.
@@ -243,9 +244,9 @@ mod tests {
         let hash = h256_from_hex(hash_hex).unwrap();
         assert_eq!(hash, [0x11; 32]);
 
-        let bloom_hex = "0x" + &"00".repeat(512);
-        let bloom = bloom_from_hex(bloom_hex).unwrap();
-        assert_eq!(bloom, EMPTY_BLOOM);
+        let bloom_hex = format!("0x{}", "00".repeat(256));
+        let bloom = bloom_from_hex(&bloom_hex).unwrap();
+        assert_eq!(bloom, empty_bloom());
 
         let addr_hex = "0x1111111111111111111111111111111111111111";
         let addr = address_from_hex(addr_hex).unwrap();
@@ -258,5 +259,17 @@ mod tests {
         assert!(h256_from_hex("0xzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz").is_none()); // invalid chars
         assert!(bloom_from_hex("0x00").is_none()); // wrong length
         assert!(address_from_hex("0x1234567890").is_none()); // too short
+    }
+}
+
+pub fn empty_ommers_hash() -> String {
+    "0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347".to_string()
+}
+
+impl EthHeader {
+    pub fn hash(&self) -> String {
+        use sha3::{Digest, Keccak256};
+        let serialized = serde_json::to_vec(self).unwrap_or_default();
+        format!("0x{}", hex::encode(Keccak256::digest(&serialized)))
     }
 }

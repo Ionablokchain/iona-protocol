@@ -132,7 +132,7 @@ impl EvidenceStore {
     /// a subsequent call to `insert` may still fail (e.g., if the per‑height cap is reached
     /// by another thread in the meantime). Always use `insert` for the final decision.
     pub fn allow(&self, peer: &str, height: u64) -> bool {
-        let inner = self.inner.read().unwrap();
+        let inner = self.inner.read().expect("rwlock read poisoned");
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -165,7 +165,7 @@ impl EvidenceStore {
     /// This method is thread‑safe; concurrent calls are serialised by a write lock.
     pub fn insert(&self, ev: &Evidence, peer: &str, height: u64) -> io::Result<bool> {
         // Acquire write lock – we will modify state.
-        let mut inner = self.inner.write().unwrap();
+        let mut inner = self.inner.write().expect("rwlock write poisoned");
 
         // 1. Check for duplicate.
         let id = Self::id(ev);
@@ -178,24 +178,29 @@ impl EvidenceStore {
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
-        let q = inner.rl.entry(peer.to_string()).or_default();
-        while let Some(&front) = q.front() {
-            if now.saturating_sub(front) > 60 {
-                q.pop_front();
-            } else {
-                break;
+        let peer_key = peer.to_string();
+        {
+            let q = inner.rl.entry(peer_key.clone()).or_default();
+            while let Some(&front) = q.front() {
+                if now.saturating_sub(front) > 60 {
+                    q.pop_front();
+                } else {
+                    break;
+                }
             }
         }
 
         // 3. Check rate limit.
-        if q.len() >= 30 {
+        if inner.rl.entry(peer_key.clone()).or_default().len() >= 30 {
             return Ok(false);
         }
 
         // 4. Check per‑height cap.
-        let count = inner.per_height.entry(height).or_insert(0);
-        if *count >= 200 {
-            return Ok(false);
+        {
+            let count = inner.per_height.entry(height).or_insert(0);
+            if *count >= 200 {
+                return Ok(false);
+            }
         }
 
         // 5. Serialise the evidence (assumed infallible).
@@ -209,8 +214,8 @@ impl EvidenceStore {
 
         // 7. Update in‑memory state.
         inner.seen.insert(id.clone());
-        *count += 1;
-        q.push_back(now);
+        *inner.per_height.entry(height).or_insert(0) += 1;
+        inner.rl.entry(peer.to_string()).or_default().push_back(now);
 
         // 8. If an index file is used, append the ID.
         if let Some(ref idx_path) = inner.index_path {
@@ -222,14 +227,14 @@ impl EvidenceStore {
 
     /// Flushes the buffered writer to disk.
     pub fn flush(&self) -> io::Result<()> {
-        let mut inner = self.inner.write().unwrap();
+        let mut inner = self.inner.write().expect("rwlock write poisoned");
         inner.writer.flush()
     }
 
     /// Prunes old entries from the per‑height map to prevent unbounded growth.
     /// Keeps only the `keep_last` highest heights.
     pub fn prune_heights(&self, keep_last: usize) {
-        let mut inner = self.inner.write().unwrap();
+        let mut inner = self.inner.write().expect("rwlock write poisoned");
         if inner.per_height.len() <= keep_last {
             return;
         }
@@ -247,8 +252,8 @@ impl EvidenceStore {
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
-        let mut inner = self.inner.write().unwrap();
-        inner.rl.retain(|_, q| {
+        let mut inner = self.inner.write().expect("rwlock write poisoned");
+        inner.rl.retain(|_key, q| {
             while let Some(&front) = q.front() {
                 if now.saturating_sub(front) > 60 {
                     q.pop_front();
@@ -256,7 +261,7 @@ impl EvidenceStore {
                     break;
                 }
             }
-            !q.is_empty() // remove peers with empty queues
+            !q.is_empty()
         });
     }
 }
@@ -281,6 +286,50 @@ mod tests {
         hash: String,
     }
 
+    impl From<TestEvidence> for crate::evidence::Evidence {
+        fn from(te: TestEvidence) -> Self {
+            // Use hash to create unique block_id so different TestEvidence instances
+            // produce different Evidence values (and different IDs).
+            let mut hash_bytes = [0u8; 32];
+            let h = te.hash.as_bytes();
+            for (i, b) in h.iter().enumerate() {
+                if i < 32 { hash_bytes[i] = *b; }
+            }
+            let block_hash = crate::types::Hash32(hash_bytes);
+            crate::evidence::Evidence::DoubleVote {
+                voter: crate::crypto::PublicKeyBytes(vec![]),
+                height: te.height,
+                round: 0,
+                vote_type: crate::consensus::messages::VoteType::Prevote,
+                a: Some(block_hash),
+                b: Some(crate::types::Hash32::zero()),
+                vote_a: crate::consensus::messages::Vote {
+                    vote_type: crate::consensus::messages::VoteType::Prevote,
+                    height: te.height,
+                    round: 0,
+                    voter: crate::crypto::PublicKeyBytes(vec![]),
+                    block_id: Some(crate::types::Hash32(hash_bytes)),
+                    signature: crate::crypto::SignatureBytes(vec![]),
+                },
+                vote_b: crate::consensus::messages::Vote {
+                    vote_type: crate::consensus::messages::VoteType::Prevote,
+                    height: te.height,
+                    round: 0,
+                    voter: crate::crypto::PublicKeyBytes(vec![]),
+                    block_id: None,
+                    signature: crate::crypto::SignatureBytes(vec![]),
+                },
+            }
+        }
+    }
+
+    impl Clone for TestEvidence {
+        fn clone(&self) -> Self {
+            TestEvidence { height: self.height, hash: self.hash.clone() }
+        }
+    }
+
+
     type Evidence = TestEvidence;
 
     #[test]
@@ -293,8 +342,8 @@ mod tests {
         let peer = "peer1";
         let height = 10;
 
-        assert!(store.insert(&ev, peer, height)?);
-        assert!(!store.insert(&ev, peer, height)?); // duplicate
+        assert!(store.insert(&ev.clone().into(), peer, height)?);
+        assert!(!store.insert(&ev.clone().into(), peer, height)?); // duplicate
 
         Ok(())
     }
@@ -310,11 +359,11 @@ mod tests {
 
         for i in 0..30 {
             let ev = Evidence { height, hash: format!("hash{}", i) };
-            assert!(store.insert(&ev, peer, height)?);
+            assert!(store.insert(&ev.clone().into(), peer, height)?);
         }
 
         let ev = Evidence { height, hash: "hash30".to_string() };
-        assert!(!store.insert(&ev, peer, height)?); // rate limited
+        assert!(!store.insert(&ev.clone().into(), peer, height)?); // rate limited
 
         Ok(())
     }
@@ -325,16 +374,18 @@ mod tests {
         let data_path = dir.path().join("evidence.log");
         let store = EvidenceStore::open(&data_path, None::<&Path>)?;
 
-        let peer = "peer3";
         let height = 30;
 
+        // Use multiple peers to avoid the per-peer rate limit (30 per 60s).
         for i in 0..200 {
+            let peer = format!("peer_cap_{}", i / 25); // rotate peers every 25
             let ev = Evidence { height, hash: format!("hash{}", i) };
-            assert!(store.insert(&ev, peer, height)?);
+            assert!(store.insert(&ev.clone().into(), &peer, height)?,
+                "insert #{} should succeed", i);
         }
 
         let ev = Evidence { height, hash: "hash200".to_string() };
-        assert!(!store.insert(&ev, peer, height)?); // cap reached
+        assert!(!store.insert(&ev.clone().into(), "peer_new", height)?); // cap reached
 
         Ok(())
     }
@@ -351,16 +402,16 @@ mod tests {
         let ev1 = Evidence { height: 1, hash: "a".to_string() };
         let ev2 = Evidence { height: 1, hash: "b".to_string() };
 
-        assert!(store.insert(&ev1, "peer", 1)?);
-        assert!(store.insert(&ev2, "peer", 1)?);
+        assert!(store.insert(&ev1.clone().into(), "peer", 1)?);
+        assert!(store.insert(&ev2.clone().into(), "peer", 1)?);
 
         // Drop and reopen – should load from index.
         drop(store);
         let store2 = EvidenceStore::open(&data_path, Some(&index_path))?;
 
         // Duplicates should still be detected.
-        assert!(!store2.insert(&ev1, "peer", 1)?);
-        assert!(!store2.insert(&ev2, "peer", 1)?);
+        assert!(!store2.insert(&ev1.clone().into(), "peer", 1)?);
+        assert!(!store2.insert(&ev2.clone().into(), "peer", 1)?);
 
         Ok(())
     }

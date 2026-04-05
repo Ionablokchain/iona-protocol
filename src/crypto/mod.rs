@@ -27,6 +27,10 @@ pub enum CryptoError {
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct PublicKeyBytes(pub Vec<u8>);
 
+impl PublicKeyBytes {
+    pub fn as_bytes(&self) -> &[u8] { &self.0 }
+}
+
 impl std::fmt::Display for PublicKeyBytes {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", hex::encode(&self.0))
@@ -55,7 +59,8 @@ impl<'de> Deserialize<'de> for PublicKeyBytes {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Eq)]
 pub struct SignatureBytes(pub Vec<u8>);
 
 /// Trait for signing messages.

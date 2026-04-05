@@ -46,4 +46,4 @@ pub use divergence::{
     detect_divergence_range, compare_snapshots,
 };
 pub use nondeterminism::NdLogger; // if implemented
-pub use replay_tool::ReplayTool;   // if implemented
+// ReplayTool not yet implemented

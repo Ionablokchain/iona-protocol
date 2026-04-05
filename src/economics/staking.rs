@@ -12,6 +12,9 @@ use std::collections::BTreeMap;
 /// A validator participating in consensus.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Validator {
+    pub tombstoned: bool,
+    pub jailed_until: Option<u64>,
+    pub pubkey: Vec<u8>,
     /// Operator address (account that manages the validator).
     pub operator: String,
     /// Self‑stake (tokens bonded by the operator).
@@ -32,6 +35,9 @@ impl Validator {
             return None;
         }
         Some(Self {
+            jailed_until: None,
+            pubkey: vec![],
+            tombstoned: false,
             operator,
             self_stake,
             total_stake: self_stake,
@@ -46,7 +52,7 @@ impl Validator {
 // -----------------------------------------------------------------------------
 
 /// A delegation from a delegator to a validator.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(PartialEq, Eq, Debug, Clone, Serialize, Deserialize)]
 pub struct Delegation {
     /// Amount of tokens currently delegated.
     pub amount: u128,
@@ -55,7 +61,7 @@ pub struct Delegation {
 }
 
 /// An unbonding operation (pending withdrawal).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UnbondingEntry {
     pub amount: u128,
     pub unlock_epoch: u64,
@@ -80,9 +86,13 @@ pub struct StakingState {
 /// Errors that can occur during staking operations.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum StakingError {
+    #[error("delegation not found")]
+    DelegationNotFound,
+    #[error("Insufficient delegation")]
+    InsufficientDelegation,
     #[error("validator {0} does not exist")]
     ValidatorNotFound(String),
-    #[error("delegator does not have enough funds")]
+    #[error("insufficient balance")]
     InsufficientBalance,
     #[error("delegation amount must be positive")]
     ZeroAmount,
@@ -92,6 +102,20 @@ pub enum StakingError {
     ValidatorJailed,
     #[error("commission out of range (0‑10000)")]
     CommissionOutOfRange,
+    #[error("invalid staking action: {0}")]
+    InvalidStakingAction(String),
+    #[error("missing argument: {0}")]
+    MissingArgument(&'static str),
+    #[error("invalid argument: {0}")]
+    InvalidArgument(&'static str),
+    #[error("nothing to withdraw")]
+    NothingToWithdraw,
+    #[error("validator already exists")]
+    ValidatorAlreadyExists,
+    #[error("insufficient balance for min stake: need {0}")]
+    InsufficientBalanceForMinStake(u128),
+    #[error("has external delegations: {0}")]
+    HasExternalDelegations(u128),
 }
 
 // -----------------------------------------------------------------------------
@@ -334,5 +358,61 @@ mod tests {
         let delegation = state.delegations.get(&("alice".to_string(), "val1".to_string())).unwrap();
         assert_eq!(delegation.amount, 450); // 500 - 50 (10% of 500)
         assert!(v.jailed);
+    }
+}
+
+/// Legacy alias.
+pub type StakeLedger = StakingState;
+
+pub fn apply_staking_tx(state: &mut StakingState, tx: crate::economics::staking_tx::StakingTx) -> Result<(), StakingError> {
+    use crate::economics::staking_tx::StakingTxKind;
+    match tx.kind {
+        StakingTxKind::Delegate => {
+            let validator = tx.validator.ok_or(StakingError::MissingArgument("validator"))?;
+            let amount = tx.amount.ok_or(StakingError::MissingArgument("amount"))?;
+            let val = state.validators.get_mut(&validator).ok_or(StakingError::ValidatorNotFound(validator.clone()))?;
+            val.total_stake += amount;
+            let key = (tx.from.clone(), validator);
+            state.delegations.entry(key).or_insert(Delegation { amount: 0, unbondings: vec![] }).amount += amount;
+            Ok(())
+        }
+        StakingTxKind::Undelegate => {
+            let validator = tx.validator.ok_or(StakingError::MissingArgument("validator"))?;
+            let amount = tx.amount.ok_or(StakingError::MissingArgument("amount"))?;
+            let key = (tx.from.clone(), validator.clone());
+            let del = state.delegations.get_mut(&key).ok_or(StakingError::DelegationNotFound)?;
+            if del.amount < amount { return Err(StakingError::InsufficientDelegation); }
+            del.amount -= amount;
+            if let Some(val) = state.validators.get_mut(&validator) { val.total_stake = val.total_stake.saturating_sub(amount); }
+            Ok(())
+        }
+        StakingTxKind::Register => {
+            if state.validators.contains_key(&tx.from) { return Err(StakingError::ValidatorAlreadyExists); }
+            state.validators.insert(tx.from.clone(), Validator {
+                tombstoned: false,
+                jailed: false,
+                jailed_until: None,
+                pubkey: tx.from.as_bytes().to_vec(),
+                operator: tx.from.clone(),
+                self_stake: 0,
+                total_stake: 0,
+                commission_bps: tx.commission_bps.unwrap_or(1000),
+            });
+            Ok(())
+        }
+        StakingTxKind::Deregister => { state.validators.remove(&tx.from); Ok(()) }
+        StakingTxKind::Withdraw => { Ok(()) }
+    }
+}
+
+impl StakingState {
+    pub fn default_demo() -> Self {
+        Self::default()
+    }
+}
+
+impl std::ops::AddAssign for Delegation {
+    fn add_assign(&mut self, rhs: Self) {
+        self.amount += rhs.amount;
     }
 }

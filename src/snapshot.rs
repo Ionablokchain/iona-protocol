@@ -74,7 +74,7 @@ pub struct SnapshotState {
 /// Export the current node state to a compressed snapshot file.
 pub fn export_snapshot(data_dir: &str, output_path: &str) -> anyhow::Result<SnapshotHeader> {
     let layout = DataLayout::new(data_dir);
-    layout.ensure()?;
+    layout.ensure_all()?;
 
     // Load state components
     let kv_state = layout.load_state_full()?;
@@ -82,14 +82,14 @@ pub fn export_snapshot(data_dir: &str, output_path: &str) -> anyhow::Result<Snap
     let vm = kv_state.vm.clone(); // vm is already part of KvState
     let schema = layout.load_schema()?;
     let node_meta = layout.load_node_meta()?;
-    let last_height = layout.latest_height()?;
+    let last_height = layout.latest_height().ok_or_else(|| anyhow::anyhow!("no height"))?;
 
     // Build snapshot state
     let snapshot_state = SnapshotState {
-        kv_state,
+        kv_state: kv_state.clone(),
         stakes,
         vm,
-        schema,
+        schema: schema.unwrap_or_default(),
         node_meta,
         last_height,
     };
@@ -122,7 +122,7 @@ pub fn export_snapshot(data_dir: &str, output_path: &str) -> anyhow::Result<Snap
         node_version: env!("CARGO_PKG_VERSION").to_string(),
         schema_version: snapshot_state.schema["version"]
             .as_u64()
-            .unwrap_or(crate::storage::meta::CURRENT_SCHEMA_VERSION as u64) as u32,
+            .unwrap_or(crate::storage::CURRENT_SCHEMA_VERSION as u64) as u32,
         protocol_version: crate::protocol::version::CURRENT_PROTOCOL_VERSION,
         payload_blake3,
         uncompressed_size,
@@ -186,7 +186,7 @@ pub fn import_snapshot(snapshot_path: &str, data_dir: &str) -> anyhow::Result<Sn
 
     // Ensure data directory exists
     let layout = DataLayout::new(data_dir);
-    layout.ensure()?;
+    layout.ensure_all()?;
 
     // Create temporary directory for atomic restore
     let tmp_dir = layout.tmp_dir().join("snapshot_import");
@@ -194,7 +194,8 @@ pub fn import_snapshot(snapshot_path: &str, data_dir: &str) -> anyhow::Result<Sn
     std::fs::create_dir_all(&tmp_dir)?;
 
     // Write state files to temporary directory
-    let tmp_layout = DataLayout::new(tmp_dir.to_str().unwrap());
+    let tmp_layout = DataLayout::new(tmp_dir.to_string_lossy().into_owned());
+    tmp_layout.ensure_all()?;
     tmp_layout.save_state_full(&snapshot_state.kv_state)?;
     tmp_layout.save_stakes(&snapshot_state.stakes)?;
     tmp_layout.save_schema(&snapshot_state.schema)?;
@@ -242,7 +243,8 @@ pub fn import_snapshot(snapshot_path: &str, data_dir: &str) -> anyhow::Result<Sn
 /// Verify a snapshot file without importing it.
 pub fn verify_snapshot(snapshot_path: &str) -> anyhow::Result<SnapshotHeader> {
     let raw = std::fs::read_to_string(snapshot_path)?;
-    let snapshot_file: SnapshotFile = serde_json::from_str(&raw)?;
+    let snapshot_file: SnapshotFile = serde_json::from_str(&raw)
+        .map_err(|e| anyhow::anyhow!("snapshot integrity check failed: {}", e))?;
     let header = snapshot_file.header;
 
     // Decode base64 payload
@@ -316,7 +318,7 @@ mod tests {
     fn setup_test_state() -> (tempfile::TempDir, DataLayout, KvState) {
         let dir = tempdir().unwrap();
         let layout = DataLayout::new(dir.path().to_str().unwrap());
-        layout.ensure().unwrap();
+        layout.ensure_all().unwrap();
 
         let mut state = KvState::default();
         state.balances.insert("alice".into(), 1000);
@@ -325,6 +327,8 @@ mod tests {
 
         layout.save_state_full(&state).unwrap();
         layout.save_stakes(&Default::default()).unwrap();
+        // Write a dummy block so latest_height() returns Some(1)
+        std::fs::write(layout.blocks_dir().join("1.json"), "{}").unwrap();
         layout.save_schema(&serde_json::json!({"version": 4})).unwrap();
         layout.save_node_meta(&serde_json::json!({})).unwrap();
 

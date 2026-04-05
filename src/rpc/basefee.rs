@@ -1,3 +1,4 @@
+use crate::types::BlockHeader;
 /// EIP-1559 baseFee update rule (London).
 ///
 /// Implements the formula:
@@ -61,7 +62,7 @@ pub fn next_base_fee_from_header(prev: &BlockHeader, next_gas_limit: u64) -> u64
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+use super::*;
 
     #[test]
     fn test_next_base_fee_equal() {
@@ -96,6 +97,7 @@ mod tests {
     #[test]
     fn test_next_base_fee_min_increase() {
         let base_fee = 1;
+        let gas_limit = 30_000_000u64;
         let gas_used = gas_limit; // full block
         let gas_limit = 30_000_000;
         // change = 1 * 30e6 / 15e6 / 8 = 0 (integer division)

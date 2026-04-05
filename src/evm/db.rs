@@ -34,10 +34,10 @@ impl MemDb {
     /// Loads an account into the database from Iona's `KvState`.
     /// This is a convenience method for initializing the EVM environment.
     pub fn load_account_from_iona(&mut self, addr: Address, balance: u64, nonce: u64, code: Option<Bytecode>) {
-        let code_hash = code.as_ref().map(|c| c.hash_slow()).unwrap_or_default();
+        let code_hash = code.as_ref().map(|c| c.hash_slow()).unwrap_or(revm::primitives::KECCAK_EMPTY);
         let account_info = AccountInfo {
             balance: U256::from(balance),
-            nonce: U256::from(nonce),
+            nonce: nonce,
             code_hash,
             code: code.clone(),
         };
@@ -130,7 +130,7 @@ mod tests {
 
         let info = db.basic(addr).unwrap().unwrap();
         assert_eq!(info.balance, U256::from(balance));
-        assert_eq!(info.nonce, U256::from(nonce));
+        assert_eq!(info.nonce, nonce);
     }
 
     #[test]
@@ -156,7 +156,7 @@ mod tests {
         let mut account = Account::default();
         account.info = AccountInfo {
             balance: U256::from(500),
-            nonce: U256::from(1),
+            nonce: 1,
             code_hash: B256::ZERO,
             code: None,
         };

@@ -1,6 +1,6 @@
 //! Nondeterministic input logging.
 //!
-//! Tracks and logs every source of nondeterminism that could cause state
+//! Tracks and logs every source of nondeterminism that could cause
 //! divergence between nodes.  In a deterministic blockchain, the *only*
 //! valid source of nondeterminism is the block itself (proposer choice,
 //! tx ordering).  Everything else must be either:
@@ -25,6 +25,8 @@ use std::sync::Mutex;
 /// Categories of nondeterministic inputs.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum NdSource {
+    HashmapIteration,
+    Custom(String),
     /// System clock / wall time used during execution.
     Timestamp,
     /// Random number generation.
@@ -54,6 +56,8 @@ impl std::fmt::Display for NdSource {
             Self::ExternalIo => write!(f, "EXTERNAL_IO"),
             Self::PlatformSpecific => write!(f, "PLATFORM_SPECIFIC"),
             Self::Other(s) => write!(f, "OTHER({s})"),
+            Self::HashmapIteration => write!(f, "HASHMAP_ITERATION"),
+            Self::Custom(s) => write!(f, "CUSTOM({s})"),
         }
     }
 }
@@ -115,6 +119,7 @@ impl std::fmt::Display for NdEvent {
 /// Collects all nondeterminism events during block execution for later
 /// audit and analysis.
 pub struct NdLogger {
+    pub entries: Vec<String>,
     events: Mutex<Vec<NdEvent>>,
     /// Current block height being executed.
     current_height: Mutex<u64>,
@@ -126,6 +131,7 @@ impl NdLogger {
     /// Create a new logger.
     pub fn new(enabled: bool) -> Self {
         Self {
+            entries: Vec::new(),
             events: Mutex::new(Vec::new()),
             current_height: Mutex::new(0),
             enabled,
@@ -273,6 +279,10 @@ impl NdLogger {
             events,
             clean: critical_count == 0,
         }
+    }
+
+    pub fn finalize(&self) -> Vec<String> {
+        self.entries.clone()
     }
 }
 

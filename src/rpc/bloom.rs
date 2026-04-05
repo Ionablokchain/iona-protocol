@@ -11,8 +11,14 @@ pub const BLOOM_BYTES: usize = 256;
 pub const BLOOM_BITS: usize = BLOOM_BYTES * 8;
 
 /// Ethereum logs bloom filter (2048 bits).
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Bloom(pub [u8; BLOOM_BYTES]);
+
+impl Default for Bloom {
+    fn default() -> Self {
+        Bloom([0u8; BLOOM_BYTES])
+    }
+}
 
 impl Bloom {
     /// Creates a new zeroed bloom filter.
@@ -157,7 +163,7 @@ mod tests {
 
     #[test]
     fn test_bloom_from_iter() {
-        let items = vec![b"a", b"b"];
+        let items: Vec<&[u8]> = vec![b"a", b"b"];
         let bloom = Bloom::from_iter(items);
         assert!(bloom.contains(b"a"));
         assert!(bloom.contains(b"b"));
@@ -174,7 +180,7 @@ mod tests {
 
     #[test]
     fn test_bloom_from_str() {
-        let hex = "0x0000000000000000000000000000000000000000000000000000000000000000";
+        let hex = &format!("0x{}", "00".repeat(256));
         let bloom: Bloom = hex.parse().unwrap();
         assert!(bloom.is_zero());
     }

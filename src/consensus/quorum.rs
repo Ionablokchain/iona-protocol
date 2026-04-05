@@ -97,8 +97,8 @@ mod tests {
         tally.add_vote(&vset, &PublicKeyBytes(vec![3u8; 32]), &block_b);
 
         assert_eq!(tally.best(), Some((block_a.clone(), 2)));
-        assert!(tally.has_quorum(&block_a, 3)); // 2 >= 3? false
-        assert!(!tally.has_quorum(&block_a, 3));
+        assert!(!tally.has_quorum(&block_a, 3)); // 2 < 3, no quorum
+        assert!(tally.has_quorum(&block_a, 2)); // 2 >= 2, quorum
         assert_eq!(tally.total_power(), 3);
     }
 
@@ -112,7 +112,7 @@ mod tests {
         tally.add_vote(&vset, &PublicKeyBytes(vec![2u8; 32]), &nil);
         tally.add_vote(&vset, &PublicKeyBytes(vec![3u8; 32]), &nil);
 
-        assert_eq!(tally.best(), Some((nil, 3)));
+        assert_eq!(tally.best(), Some((nil.clone(), 3)));
         assert!(tally.has_quorum(&nil, 2));
     }
 

@@ -179,6 +179,7 @@ mod tests {
         let txs = vec![];
         Block {
             header: BlockHeader {
+                pv: 0,
                 height,
                 round: 0,
                 prev: Hash32::zero(),

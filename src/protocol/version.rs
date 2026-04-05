@@ -37,7 +37,7 @@ pub const SUPPORTED_PROTOCOL_VERSIONS: &[u32] = &[1, 2, 3];
 /// When the chain reaches `activation_height`, the node switches to producing
 /// blocks with `protocol_version`.  Before that height, it continues to
 /// produce blocks with the previous version.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProtocolActivation {
     /// The protocol version to activate.
     pub protocol_version: u32,

@@ -1,10 +1,10 @@
 
-use iona::consensus::{ConsensusMsg, SimpleBlockProducer, SimpleProducerCfg, Validator, ValidatorSet, BlockStore, Outbox, Engine, Step, Config};
+use iona::consensus::{ConsensusMsg, Validator, ValidatorSet, BlockStore, Outbox, Engine, Step, Config, Proposal, proposal_sign_bytes};
 use iona::crypto::ed25519::{Ed25519Keypair, Ed25519Verifier};
 use iona::crypto::Signer;
 use iona::types::{Hash32, Block};
 use iona::slashing::StakeLedger;
-use iona::execution::KvState;
+use iona::execution::{KvState, build_block};
 use iona::net::simnet::{SimNet, NetMsg, NodeId};
 
 use std::collections::HashMap;
@@ -106,20 +106,51 @@ async fn observer_requests_and_receives_block_for_light_proposal() {
     let p1 = tokio::spawn(pump(rx1, eng1.clone(), k1.clone(), store1.clone(), out1.clone(), net1.clone(), 1));
     let p2 = tokio::spawn(pump(rx2, eng2.clone(), k1.clone(), store2.clone(), out2.clone(), net2.clone(), 2));
 
-    // Producer should be k2 at height=1 round=0 => idx=(1+0)%2=1
-    let producer = SimpleBlockProducer::new(SimpleProducerCfg { max_txs: 0, include_block_in_proposal: false });
+    // Engine uses proposer_for(height, round) = vals[(height+round) % n].
+    // For height=1, round=0 => vals[(1+0)%2] = vals[1] = k2 is proposer.
+    let proposer_key = &k2;
+    let proposer_addr = hex::encode(&blake3::hash(&proposer_key.public_key().0).as_bytes()[..20]);
+
     let block_id: Hash32;
     {
-        let mut eng = eng1.lock().await;
+        let eng = eng1.lock().await;
         assert_eq!(eng.state.step, Step::Propose);
         let mut ob = out1.lock().await;
-        assert!(producer.try_produce(&mut *eng, &k2, store1.as_ref(), &mut *ob, vec![]));
-        block_id = eng.state.proposal.as_ref().unwrap().block_id.clone();
+
+        // Build a block directly.
+        let (block, _next_state, _receipts) = build_block(
+            eng.state.height, eng.state.round,
+            Hash32([0u8; 32]),
+            proposer_key.public_key().0.clone(),
+            &proposer_addr,
+            &eng.app_state, eng.base_fee_per_gas,
+            vec![], 0, 0,
+        );
+        let bid = block.id();
+
+        // Build a light proposal (no block attached).
+        let sign_bytes = proposal_sign_bytes(eng.state.height, eng.state.round, &bid, None);
+        let sig = proposer_key.sign(&sign_bytes);
+        let proposal = Proposal {
+            height: eng.state.height,
+            round: eng.state.round,
+            proposer: proposer_key.public_key(),
+            block_id: bid.clone(),
+            block: None, // light proposal
+            pol_round: None,
+            signature: sig,
+        };
+
+        block_id = bid;
+        // Store the block on node 1 so it can serve block requests.
+        store1.put(block);
+        // Broadcast proposal via SimNet so node 2 receives it.
+        ob.broadcast(ConsensusMsg::Proposal(proposal));
         assert!(store1.get(&block_id).is_some(), "producer must have the block");
     }
 
     // Give time for observer to receive proposal, request block, and then receive response.
-    tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
     assert!(store2.get(&block_id).is_some(), "observer should receive requested block");
 

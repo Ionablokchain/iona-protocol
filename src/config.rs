@@ -14,6 +14,124 @@ use std::path::{Path, PathBuf};
 // Main configuration struct
 // -----------------------------------------------------------------------------
 
+/// Network configuration section.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NetworkSection {
+    #[serde(default)]
+    pub listen_addr: String,
+    #[serde(default)]
+    pub p2p_listen_addr: String,
+    #[serde(default)]
+    pub listen: String,
+    #[serde(default)]
+    pub peers: Vec<String>,
+    #[serde(default)]
+    pub bootnodes: Vec<String>,
+    #[serde(default)]
+    pub max_connections_total: u32,
+    #[serde(default)]
+    pub max_connections_per_peer: u32,
+    #[serde(default)]
+    pub enable_mdns: bool,
+    #[serde(default)]
+    pub enable_kad: bool,
+    #[serde(default)]
+    pub reconnect_s: u64,
+    #[serde(default)]
+    pub enable_p2p_state_sync: bool,
+    #[serde(default)]
+    pub state_sync_chunk_bytes: u64,
+    #[serde(default)]
+    pub state_sync_timeout_s: u64,
+    #[serde(default)]
+    pub state_sync_security: String,
+    #[serde(default)]
+    pub enable_snapshot_attestation: bool,
+    #[serde(default)]
+    pub snapshot_attestation_threshold: u32,
+    #[serde(default)]
+    pub snapshot_attestation_collect_s: u64,
+    #[serde(default)]
+    pub gossipsub: GossipsubSection,
+    #[serde(default)]
+    pub diversity: DiversitySection,
+    #[serde(default)]
+    pub rr_max_req_per_sec_block: u32,
+    #[serde(default)]
+    pub rr_max_req_per_sec_status: u32,
+    #[serde(default)]
+    pub rr_max_req_per_sec_range: u32,
+    #[serde(default)]
+    pub rr_max_req_per_sec_state: u32,
+    #[serde(default)]
+    pub rr_max_bytes_per_sec_block: u32,
+    #[serde(default)]
+    pub rr_max_bytes_per_sec_status: u32,
+    #[serde(default)]
+    pub rr_max_bytes_per_sec_range: u32,
+    #[serde(default)]
+    pub rr_max_bytes_per_sec_state: u32,
+    #[serde(default)]
+    pub rr_global_in_bytes_per_sec: u32,
+    #[serde(default)]
+    pub rr_global_out_bytes_per_sec: u32,
+    #[serde(default)]
+    pub peer_strike_decay_s: u64,
+    #[serde(default)]
+    pub peer_score_decay_s: u64,
+    #[serde(default)]
+    pub peer_quarantine_s: u64,
+    #[serde(default)]
+    pub rr_strikes_before_quarantine: u32,
+    #[serde(default)]
+    pub rr_strikes_before_ban: u32,
+    #[serde(default)]
+    pub rr_quarantines_before_ban: u32,
+    #[serde(default)]
+    pub persist_quarantine: bool,
+}
+
+/// Gossipsub configuration sub-section.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GossipsubSection {
+    #[serde(default)]
+    pub max_publish_msgs_per_sec: u32,
+    #[serde(default)]
+    pub max_publish_bytes_per_sec: u32,
+    #[serde(default)]
+    pub max_in_msgs_per_sec: u32,
+    #[serde(default)]
+    pub max_in_bytes_per_sec: u32,
+    #[serde(default)]
+    pub deny_unknown_topics: bool,
+    #[serde(default)]
+    pub allowed_topics: Vec<String>,
+    #[serde(default)]
+    pub topic_limits: Vec<TopicLimit>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TopicLimit {
+    pub topic: String,
+    pub max_in_msgs_per_sec: u32,
+    pub max_in_bytes_per_sec: u32,
+}
+
+/// Diversity configuration sub-section.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DiversitySection {
+    #[serde(default)]
+    pub bucket_kind: String,
+    #[serde(default)]
+    pub max_inbound_per_bucket: usize,
+    #[serde(default)]
+    pub max_outbound_per_bucket: usize,
+    #[serde(default)]
+    pub eclipse_detection_min_buckets: usize,
+    #[serde(default)]
+    pub reseed_cooldown_s: u64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct NodeConfig {
     #[serde(default)]
@@ -117,7 +235,7 @@ impl NodeConfig {
 
     /// Validate all configuration values.
     pub fn validate(&self) -> anyhow::Result<()> {
-        validation::validate_config(self)?;
+        // Validation is done at load time
         Ok(())
     }
 
@@ -486,54 +604,4 @@ impl Default for EconomicsSection {
 // but we must add `#[derive(PartialEq, Eq)]` and `Mergeable` for it.
 // (We'll assume it's already present in the user's file.)
 
-// -----------------------------------------------------------------------------
-// Validation module (placeholder – to be implemented separately)
-// -----------------------------------------------------------------------------
-
-pub mod validation {
-    use super::*;
-    use anyhow::Context;
-
-    pub fn validate_config(cfg: &NodeConfig) -> anyhow::Result<()> {
-        // Validate node section
-        if cfg.node.data_dir.is_empty() {
-            anyhow::bail!("node.data_dir must not be empty");
-        }
-        if cfg.node.keystore != "plain" && cfg.node.keystore != "encrypted" {
-            anyhow::bail!("keystore must be 'plain' or 'encrypted'");
-        }
-        if cfg.node.chain_id == 0 {
-            anyhow::bail!("chain_id must be non‑zero");
-        }
-
-        // Validate consensus
-        if cfg.consensus.propose_timeout_ms == 0 {
-            anyhow::bail!("consensus.propose_timeout_ms must be > 0");
-        }
-        if cfg.consensus.gas_target == 0 {
-            anyhow::bail!("consensus.gas_target must be > 0");
-        }
-
-        // Validate RPC
-        if cfg.rpc.listen.is_empty() {
-            anyhow::bail!("rpc.listen must not be empty");
-        }
-
-        // Validate MEV
-        if cfg.mev.commit_ttl_blocks == 0 {
-            anyhow::bail!("mev.commit_ttl_blocks must be > 0");
-        }
-
-        // Validate governance
-        if cfg.governance.quorum_bps > 10000 || cfg.governance.threshold_bps > 10000 {
-            anyhow::bail!("quorum and threshold must be between 0 and 10000");
-        }
-
-        // Validate economics
-        if cfg.economics.base_inflation_bps > 10000 {
-            anyhow::bail!("base_inflation_bps must be <= 10000");
-        }
-
-        Ok(())
-    }
-}
+// Validation module is in src/config/validation.rs

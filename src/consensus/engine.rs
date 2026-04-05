@@ -3,6 +3,7 @@
 //! Implements a Tendermint‑style BFT consensus with fast quorum, double‑sign protection,
 //! and proper handling of `valid_round` and `locked_round`.
 
+use std::collections::{HashMap, BTreeMap};
 use crate::consensus::messages::*;
 use crate::consensus::quorum::*;
 use crate::consensus::validator_set::*;
@@ -365,6 +366,8 @@ impl<V: Verifier> Engine<V> {
             &self.app_state,
             self.base_fee_per_gas,
             txs,
+            0, // block_timestamp
+            0, // chain_id
         );
         let bid = block.id();
         (block, bid)
@@ -489,7 +492,7 @@ impl<V: Verifier> Engine<V> {
             return Ok(());
         }
 
-        let block = block.unwrap();
+        let block = block.expect("block is Some: None case handled above");
         let proposer_addr = self.proposer_addr_string(&p.proposer);
         // Verify the block against the current state.
         if verify_block_with_vset(&self.app_state, &block, &proposer_addr, &p.proposer).is_none() {
@@ -499,6 +502,17 @@ impl<V: Verifier> Engine<V> {
             self.broadcast_vote(signer, out, VoteType::Prevote, None);
             return Ok(());
         }
+
+        self.state.proposal = Some(p.clone());
+        self.state.proposal_block = Some(block);
+        self.state.step = Step::Prevote;
+        self.step_elapsed_ms = 0;
+
+        // Compute vote choice BEFORE applying locking, so that the lock we are
+        // about to set does not cause prevote_choice to return nil for a fresh
+        // proposal (pol_round == None < locked_round).
+        let vote_block = self.prevote_choice();
+        self.broadcast_vote(signer, out, VoteType::Prevote, vote_block);
 
         // Locking logic: if pol_round >= locked_round, we lock on this block.
         if let Some(locked_round) = self.state.locked_round {
@@ -513,14 +527,6 @@ impl<V: Verifier> Engine<V> {
             self.state.locked_round = Some(self.state.round);
             self.state.locked_value = Some(p.block_id.clone());
         }
-
-        self.state.proposal = Some(p);
-        self.state.proposal_block = Some(block);
-        self.state.step = Step::Prevote;
-        self.step_elapsed_ms = 0;
-
-        let vote_block = self.prevote_choice();
-        self.broadcast_vote(signer, out, VoteType::Prevote, vote_block);
         Ok(())
     }
 

@@ -98,7 +98,7 @@ impl Evidence {
                 buf.extend_from_slice(voter.as_bytes());
                 buf.extend_from_slice(&height.to_le_bytes());
                 buf.extend_from_slice(&round.to_le_bytes());
-                buf.extend_from_slice(&[vote_type as u8]);
+                buf.extend_from_slice(&[*vote_type as u8]);
                 if let Some(h) = a {
                     buf.extend_from_slice(&h.0);
                 }
@@ -193,16 +193,16 @@ impl Evidence {
                 proposer,
                 ..
             } => {
-                if proposal_a.header.height != *height || proposal_b.header.height != *height {
+                if proposal_a.height != *height || proposal_b.height != *height {
                     warn!("DoubleProposal height mismatch");
                     return false;
                 }
-                if proposal_a.header.round != *round || proposal_b.header.round != *round {
+                if proposal_a.round != *round || proposal_b.round != *round {
                     warn!("DoubleProposal round mismatch");
                     return false;
                 }
-                if proposal_a.header.proposer_pk != proposer.0
-                    || proposal_b.header.proposer_pk != proposer.0
+                if proposal_a.proposer.0 != proposer.0
+                    || proposal_b.proposer.0 != proposer.0
                 {
                     warn!("DoubleProposal proposer mismatch");
                     return false;
@@ -251,24 +251,24 @@ impl Evidence {
 
     /// Factory: create a double‑proposal evidence from two conflicting proposals.
     pub fn from_proposals(proposal_a: Proposal, proposal_b: Proposal) -> Option<Self> {
-        if proposal_a.header.proposer_pk != proposal_b.header.proposer_pk {
+        if proposal_a.proposer.0 != proposal_b.proposer.0 {
             return None;
         }
-        if proposal_a.header.height != proposal_b.header.height
-            || proposal_a.header.round != proposal_b.header.round
+        if proposal_a.height != proposal_b.height
+            || proposal_a.round != proposal_b.round
         {
             return None;
         }
-        let a = Some(proposal_a.header.hash());
-        let b = Some(proposal_b.header.hash());
+        let a = Some(proposal_a.block_id.clone());
+        let b = Some(proposal_b.block_id.clone());
         if a == b {
             return None;
         }
 
         Some(Evidence::DoubleProposal {
-            proposer: PublicKeyBytes(proposal_a.header.proposer_pk.clone()),
-            height: proposal_a.header.height,
-            round: proposal_a.header.round,
+            proposer: PublicKeyBytes(proposal_a.proposer.0.clone()),
+            height: proposal_a.height,
+            round: proposal_a.round,
             a,
             b,
             proposal_a,
@@ -326,34 +326,19 @@ mod tests {
             round,
             vote_type: VoteType::Prevote,
             block_id: hash,
-            timestamp: 0,
-            signature: vec![],
+                        signature: crate::crypto::SignatureBytes(vec![]),
         }
     }
 
     fn dummy_proposal(hash: Hash32, height: Height, round: Round, proposer: &[u8]) -> Proposal {
         Proposal {
-            header: BlockHeader {
-                height,
-                round,
-                prev: Hash32::zero(),
-                proposer_pk: proposer.to_vec(),
-                tx_root: Hash32::zero(),
-                receipts_root: Hash32::zero(),
-                state_root: hash,
-                base_fee_per_gas: 1,
-                gas_used: 0,
-                intrinsic_gas_used: 0,
-                exec_gas_used: 0,
-                vm_gas_used: 0,
-                evm_gas_used: 0,
-                chain_id: 1,
-                timestamp: 0,
-                protocol_version: 1,
-            },
-            block: None, // we don't need full block for evidence
-            timestamp: 0,
-            signature: vec![],
+            height,
+            round,
+            proposer: crate::crypto::PublicKeyBytes(proposer.to_vec()),
+            block_id: hash,
+            pol_round: None,
+            block: None,
+            signature: crate::crypto::SignatureBytes(vec![]),
         }
     }
 
@@ -375,8 +360,8 @@ mod tests {
     fn test_double_vote_same_hash_invalid() {
         let voter = [1u8; 32];
         let hash = Some(Hash32([1; 32]));
-        let vote1 = dummy_vote(hash, 1, 0, &voter);
-        let vote2 = dummy_vote(hash, 1, 0, &voter);
+        let vote1 = dummy_vote(hash.clone(), 1, 0, &voter);
+        let vote2 = dummy_vote(hash.clone(), 1, 0, &voter);
         assert!(Evidence::from_votes(vote1, vote2).is_none());
     }
 

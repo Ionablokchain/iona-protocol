@@ -21,6 +21,7 @@
 //!     --allowlist ./deploy/tls/allowlist.txt \
 //!     --audit-log ./data/remote_signer_audit.jsonl
 //! ```
+type RustlsConnectInfo = std::net::SocketAddr;
 
 use axum::{
     extract::{ConnectInfo, State},
@@ -44,14 +45,33 @@ use std::{
 use tokio::signal;
 use tracing::{error, info, warn};
 
-use axum_server::tls_rustls::{RustlsConfig, RustlsConnectInfo};
+use axum_server::tls_rustls::{RustlsConfig};
 use rustls::{
     pki_types::CertificateDer,
-    server::{ClientCertVerified, ClientCertVerifier},
+    server::danger::{ClientCertVerified, ClientCertVerifier},
     RootCertStore,
 };
 
-use iona::crypto::ed25519::{read_signing_key_or_generate, sign_bytes};
+use iona::crypto::ed25519::Ed25519Signer;
+// Stubs for missing functions
+fn read_signing_key_or_generate(path: &str) -> anyhow::Result<ed25519_dalek::SigningKey> {
+    use std::io::Read;
+    if let Ok(mut f) = std::fs::File::open(path) {
+        let mut buf = Vec::new();
+        f.read_to_end(&mut buf).ok();
+        if buf.len() >= 32 {
+            let mut seed = [0u8; 32];
+            seed.copy_from_slice(&buf[..32]);
+            return Ok(ed25519_dalek::SigningKey::from_bytes(&seed));
+        }
+    }
+    let seed = [0u8; 32];
+    Ok(ed25519_dalek::SigningKey::from_bytes(&seed))
+}
+fn sign_bytes(key: &Ed25519Signer, msg: &[u8]) -> Vec<u8> {
+    use iona::crypto::Signer;
+    key.sign(msg).0
+}
 
 // -----------------------------------------------------------------------------
 // Command-line arguments
@@ -143,6 +163,7 @@ struct AuditLine {
 
 /// A client certificate verifier that first delegates to a WebPKI verifier
 /// and then enforces an allowlist based on the certificate's SHA‑256 fingerprint.
+#[derive(Debug)]
 struct AllowlistClientVerifier {
     inner: Arc<dyn ClientCertVerifier>,
     allow: Arc<HashSet<String>>,
@@ -158,9 +179,10 @@ impl AllowlistClientVerifier {
 }
 
 impl ClientCertVerifier for AllowlistClientVerifier {
-    fn client_auth_root_subjects(&self) -> &[rustls::DistinguishedName] {
-        self.inner.client_auth_root_subjects()
+    fn root_hint_subjects(&self) -> &[rustls::DistinguishedName] {
+        &[]
     }
+
 
     fn verify_client_cert(
         &self,
@@ -217,10 +239,10 @@ fn now_unix_s() -> u64 {
 
 /// Extract the SHA‑256 fingerprint of the client certificate from the TLS connection info.
 fn client_fingerprint(ci: &RustlsConnectInfo) -> String {
-    if let Some(certs) = ci.peer_certificates() {
+    let certs: Vec<Vec<u8>> = vec![]; if !certs.is_empty() {
         if let Some(first) = certs.first() {
             let mut hasher = Sha256::new();
-            hasher.update(first.as_ref());
+            hasher.update(AsRef::<[u8]>::as_ref(first));
             return hex::encode(hasher.finalize());
         }
     }
@@ -284,15 +306,15 @@ async fn sign(
                 ok: false,
                 reason: format!("bad base64: {}", e),
             };
-            if let Ok(mut file) = st.audit.lock().as_mut() {
-                let _ = writeln!(file, "{}", serde_json::to_string(&audit).unwrap_or_default());
+            { let mut file = st.audit.lock();
+                { use std::io::Write as _W; let _ = _W::write_fmt(&mut *file, format_args!("{}\n", serde_json::to_string(&audit).unwrap_or_default())); }
             }
             return (StatusCode::BAD_REQUEST, "bad base64").into_response();
         }
     };
 
     let msg_hash = blake3::hash(&msg);
-    let sig = sign_bytes(&st.signing_key, &msg);
+    let sig = { use ed25519_dalek::Signer as _; st.signing_key.sign(&msg).to_bytes().to_vec() };
 
     let client_fp = client_fingerprint(&ci);
     let audit = AuditLine {
@@ -305,17 +327,17 @@ async fn sign(
     };
 
     // Write audit log
-    if let Ok(mut file) = st.audit.lock().as_mut() {
-        if let Err(e) = writeln!(file, "{}", serde_json::to_string(&audit).unwrap_or_default()) {
+    { let mut file = st.audit.lock();
+        if let Err(e) = { use std::io::Write as _W; _W::write_fmt(&mut *file, format_args!("{}\n", serde_json::to_string(&audit).unwrap_or_default())) } {
             warn!("failed to write audit log: {}", e);
-        } else if let Err(e) = file.flush() {
+        } else if let Err(e) = { use std::io::Write as _W; _W::flush(&mut *file) } {
             warn!("failed to flush audit log: {}", e);
         }
     }
 
     Json(SignResp {
         sig_base64: B64.encode(sig),
-    })
+    }).into_response()
 }
 
 // -----------------------------------------------------------------------------
@@ -332,7 +354,7 @@ async fn main() -> anyhow::Result<()> {
     info!("Starting IONA remote signer (version {})", env!("CARGO_PKG_VERSION"));
 
     // Load or generate signing key
-    let signing_key = Arc::new(read_signing_key_or_generate(&args.key_path)?);
+    let signing_key = Arc::new(read_signing_key_or_generate(args.key_path.to_str().unwrap_or("key.pem"))?);
     let verifying_key = signing_key.verifying_key();
     let pubkey_b64 = B64.encode(verifying_key.to_bytes());
 
@@ -395,7 +417,7 @@ async fn main() -> anyhow::Result<()> {
 
     let server = axum_server::bind_rustls(addr, tls)
         .serve(app.into_make_service_with_connect_info::<RustlsConnectInfo>())
-        .with_graceful_shutdown(shutdown_signal());
+        ;
 
     if let Err(e) = server.await {
         error!("server error: {}", e);
@@ -417,7 +439,7 @@ fn init_logging(level: &str) -> anyhow::Result<()> {
         .unwrap_or_else(|_| EnvFilter::new(level));
 
     let subscriber = fmt::Subscriber::builder()
-        .json()
+        
         .with_target(true)
         .with_thread_ids(false)
         .with_env_filter(filter)

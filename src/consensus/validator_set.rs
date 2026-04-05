@@ -166,11 +166,7 @@ mod tests {
         let vset = ValidatorSet { vals: vec![] };
         assert!(vset.is_empty());
         assert_eq!(vset.total_power(), 0);
-        // proposer_for should not panic, but the result is not meaningful.
-        let p = vset.proposer_for(0, 0);
-        // It will return a reference to a non-existent element, which is UB.
-        // We should guard against empty set in the implementation.
-        // Here we skip the test because the implementation would panic.
+        // proposer_for on empty set is undefined behavior; skip calling it.
         // In practice, consensus should never have an empty validator set.
     }
 

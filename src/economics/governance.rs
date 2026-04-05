@@ -168,7 +168,7 @@ impl GovernanceState {
         total_stake: u128,
         stake_of: impl Fn(&str) -> u128,
     ) -> Result<Option<ProposalResult>, &'static str> {
-        let proposal = self.proposals.get_mut(&proposal_id).ok_or("Proposal not found")?;
+        let proposal = self.proposals.get(&proposal_id).ok_or("Proposal not found")?;
         if proposal.processed {
             return Ok(proposal.result);
         }
@@ -178,6 +178,7 @@ impl GovernanceState {
 
         // Determine result (may be None if quorum not met even after end_epoch)
         let result = self.evaluate(proposal_id, total_stake, stake_of).unwrap_or(ProposalResult::Expired);
+        let proposal = self.proposals.get_mut(&proposal_id).ok_or("Proposal not found")?;
         proposal.result = Some(result);
         proposal.processed = true;
 
@@ -295,5 +296,26 @@ mod tests {
         let huge_total = 2_000_000;
         let res = gov.try_finalize(id2, 101, huge_total, stake_of).unwrap();
         assert_eq!(res, Some(ProposalResult::Expired));
+    }
+}
+
+pub fn submit_proposal(state: &mut GovernanceState, kind: ProposalKind, deposit: u128, current_epoch: u64) -> Option<u64> {
+    state.submit(kind, deposit, current_epoch)
+}
+pub fn vote(state: &mut GovernanceState, proposal_id: u64, voter: String, yes: bool) {
+    state.vote(proposal_id, voter, yes);
+}
+pub fn process_proposals(state: &mut GovernanceState, current_epoch: u64, total_stake: u128, stake_of: impl Fn(&str) -> u128) {
+    let ids: Vec<u64> = state.proposals.keys().cloned().collect();
+    for id in ids {
+        let should_process = state.proposals.get(&id).map(|p| !p.processed && current_epoch >= p.end_epoch).unwrap_or(false);
+        if should_process {
+            let (yes_stake, no_stake) = state.tally(id, total_stake, &stake_of);
+            let total_voted = yes_stake + no_stake;
+            let quorum_met = total_voted * 10_000 >= total_stake * state.params.quorum_bps as u128;
+            let threshold_met = total_voted > 0 && yes_stake * 10_000 >= total_voted * state.params.threshold_bps as u128;
+            let result = if !quorum_met { ProposalResult::Expired } else if threshold_met { ProposalResult::Passed } else { ProposalResult::Rejected };
+            if let Some(p) = state.proposals.get_mut(&id) { p.processed = true; p.result = Some(result); }
+        }
     }
 }

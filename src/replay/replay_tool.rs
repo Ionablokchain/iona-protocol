@@ -302,6 +302,7 @@ mod tests {
     fn empty_block(height: Height, state_root: Hash32) -> Block {
         Block {
             header: BlockHeader {
+                pv: 0,
                 height,
                 round: 0,
                 prev: Hash32::zero(),

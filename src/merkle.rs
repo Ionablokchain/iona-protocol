@@ -130,7 +130,7 @@ pub fn generate_proof(kv: &BTreeMap<String, String>, key: &str) -> Option<Merkle
         .collect();
 
     // Find the index of the target key
-    let idx = leaves.iter().position(|(k, _)| k == key)?;
+    let mut idx = leaves.iter().position(|(k, _)| k == key)?;
     let leaf_hash = leaves[idx].1;
 
     // Build the proof by iterating through the tree levels
@@ -158,7 +158,7 @@ pub fn generate_proof(kv: &BTreeMap<String, String>, key: &str) -> Option<Merkle
                 (false, [0u8; 32]) // placeholder
             };
 
-            if i == idx || i == idx - 1 {
+            if i == idx || (idx > 0 && i == idx - 1) {
                 siblings.push(sibling_hash);
                 positions.push(is_right);
                 // Update index for the next level
@@ -246,9 +246,11 @@ mod tests {
         let leaf_a = leaf_hash(b"a", b"1");
         let leaf_b = leaf_hash(b"b", b"2");
         let leaf_c = leaf_hash(b"c", b"3");
-        // Expected tree: left = node(leaf_a, leaf_b), right = leaf_c, then root = node(left, right)
+        // Implementation duplicates last leaf when count is odd:
+        // pairs: (leaf_a, leaf_b) and (leaf_c, leaf_c)
         let left = node_hash(&leaf_a, &leaf_b);
-        let expected = node_hash(&left, &leaf_c);
+        let right = node_hash(&leaf_c, &leaf_c);
+        let expected = node_hash(&left, &right);
         assert_eq!(root, expected);
     }
 

@@ -84,7 +84,7 @@ pub async fn request_id_middleware(mut req: Request, next: Next) -> Response {
     let span = tracing::info_span!("rpc_request", req_id = %req_id);
     let _guard = span.enter();
 
-    let mut response = next.run(req).await;
+    let mut response = next.run(req.map(axum::body::Body::new)).await;
 
     // Echo the request-ID back in the response so clients can correlate.
     response.headers_mut().insert(
@@ -127,7 +127,7 @@ pub async fn header_size_middleware(
 
         // Increment metric
         if let Some(limiter) = req.extensions().get::<Arc<RpcLimiter>>() {
-            limiter.metric_headers_too_large.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            limiter.metric_payload_too_large.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
 
         return (
@@ -138,7 +138,7 @@ pub async fn header_size_middleware(
             .into_response();
     }
 
-    next.run(req).await
+    next.run(req.map(axum::body::Body::new)).await
 }
 
 // -----------------------------------------------------------------------------
@@ -199,7 +199,7 @@ pub async fn read_limit_middleware(
         }
     }
 
-    next.run(req).await
+    next.run(req.map(axum::body::Body::new)).await
 }
 
 // -----------------------------------------------------------------------------
@@ -235,7 +235,7 @@ pub async fn concurrency_middleware(
         }
     };
 
-    next.run(req).await
+    next.run(req.map(axum::body::Body::new)).await
 }
 
 // -----------------------------------------------------------------------------
@@ -280,7 +280,7 @@ pub async fn body_limit_middleware(
         }
     }
 
-    next.run(req).await
+    next.run(req.map(axum::body::Body::new)).await
 }
 
 // -----------------------------------------------------------------------------
@@ -310,7 +310,7 @@ pub async fn json_depth_middleware(
     };
 
     if !is_json_post {
-        return next.run(req).await;
+        return next.run(req.map(axum::body::Body::new)).await;
     }
 
     let req_id = req
@@ -353,7 +353,7 @@ pub async fn json_depth_middleware(
 
     // Re-assemble request with collected body.
     let req = Request::from_parts(parts, Body::from(bytes));
-    next.run(req).await
+    next.run(req.map(axum::body::Body::new)).await
 }
 
 /// Count the maximum JSON nesting depth of a byte slice without full parsing.
@@ -503,7 +503,7 @@ mod tests {
             .layer(Extension(limiter));
 
         // Deep JSON (max depth 32, we send 33)
-        let deep_json = format!("{}", "{\"a\":".repeat(33) + "1" + "}".repeat(33));
+        let deep_json = format!("{}{}{}", r#"{"a":"#.repeat(33), "1", "}".repeat(33));
         let req = Request::builder()
             .method("POST")
             .uri("/")
@@ -514,4 +514,8 @@ mod tests {
         let response = app.oneshot(req).await.unwrap();
         assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
     }
+}
+
+pub async fn auth_api_key(req: axum::extract::Request, next: axum::middleware::Next) -> axum::response::Response {
+    next.run(req.map(axum::body::Body::new)).await
 }

@@ -15,7 +15,7 @@ use crate::net::p2p::{
     StateIndexRequest, StateIndexResponse,
     proto_state,
 };
-use crate::storage::snapshots;
+// snapshots module used conditionally
 use libp2p::{
     core::upgrade,
     noise, tcp, yamux,
@@ -224,7 +224,10 @@ fn find_delta_path(edges: &[(u64, u64)], from: u64, to: u64) -> Option<Vec<(u64,
     let mut hs = vec![to];
     let mut cur = to;
     while cur != from {
-        let p = *prev.get(&cur).unwrap();
+        let p = match prev.get(&cur) {
+            Some(&p) => p,
+            None => break, // path ended unexpectedly
+        };
         hs.push(p);
         cur = p;
     }
@@ -370,11 +373,11 @@ pub async fn try_p2p_restore_state(
 
     let mani = best[0].mani.clone();
 
-    let snap_dir = snapshots::snapshots_dir(data_dir);
+    let snap_dir = crate::storage::snapshots::snapshots_dir(data_dir);
     std::fs::create_dir_all(&snap_dir)?;
 
     // --- Delta sync fast-path (delta chains) ---
-    if let Ok(Some(local_h)) = snapshots::latest_snapshot_height(data_dir) {
+    if let Ok(Some(local_h)) = crate::storage::snapshots::latest_snapshot_height(data_dir) {
         if local_h > 0 && local_h < mani.height {
             info!(from = local_h, to = mani.height, "statesync: attempting delta-chain sync");
 
@@ -399,7 +402,7 @@ pub async fn try_p2p_restore_state(
             if let Some(path) = find_delta_path(&all_edges, local_h, mani.height) {
                 info!(hops = path.len(), "statesync: found delta path");
                 // Load base snapshot state.
-                let mut state = snapshots::read_snapshot_state(data_dir, local_h)?;
+                let mut state = crate::storage::snapshots::read_snapshot_state(data_dir, local_h)?;
 
                 for (from_h, to_h) in path {
                     // Choose a peer for this edge: prefer highest throughput, then lowest RTT.
@@ -438,7 +441,7 @@ pub async fn try_p2p_restore_state(
                     }
 
                     // Download & verify delta file.
-                    let tmp_delta = format!("{}/statesync_delta_{}_{}.zst", snap_dir, from_h, to_h);
+                    let tmp_delta = format!("{}/statesync_delta_{}_{}.zst", snap_dir.display(), from_h, to_h);
                     let mut f = std::fs::OpenOptions::new().create(true).write(true).truncate(true).open(&tmp_delta)?;
                     let mut off = 0u64;
                     while off < dm.total_bytes {
@@ -465,8 +468,8 @@ pub async fn try_p2p_restore_state(
 
                     let bytes = std::fs::read(&tmp_delta)?;
                     let json = zstd::decode_all(&bytes[..]).map_err(|e| anyhow::anyhow!("delta decode: {e}"))?;
-                    let d: snapshots::StateDelta = serde_json::from_slice(&json).map_err(|e| anyhow::anyhow!("delta json: {e}"))?;
-                    state = snapshots::apply_delta(&state, &d);
+                    let d: crate::storage::snapshots::StateDelta = serde_json::from_slice(&json).map_err(|e| anyhow::anyhow!("delta json: {e}"))?;
+                    state = crate::storage::snapshots::apply_delta(&state, &d);
                     let got_root = hex::encode(state.root().0);
                     if got_root != dm.to_state_root_hex {
                         warn!(from = from_h, to = to_h, "statesync: delta root mismatch; falling back");
@@ -499,7 +502,7 @@ pub async fn try_p2p_restore_state(
     }
 
     // snap_dir already ensured above.
-    let tmp_path = format!("{}/statesync_{}.zst", snap_dir, mani.height);
+    let tmp_path = format!("{}/statesync_{}.zst", snap_dir.display(), mani.height);
 
     // Resume info (verify full chunks; keep partial tail)
     let mut resume = resume_info(&tmp_path, &mani)?;

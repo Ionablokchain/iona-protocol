@@ -8,10 +8,10 @@ use iona::economics::staking::{StakingState, Validator as EconValidator};
 use iona::economics::staking_tx::try_apply_staking_tx;
 use iona::execution::KvState;
 
-fn make_validator(addr: &str, stake: u128, commission_bps: u64) -> (String, EconValidator) {
-    (addr.to_string(), EconValidator {
+fn make_validator(addr: &str, total_stake: u128, commission_bps: u64) -> (String, EconValidator) {
+    (addr.to_string(), EconValidator { tombstoned: false, jailed_until: None, pubkey: vec![], 
         operator: addr.to_string(),
-        stake,
+        self_stake: 0, total_stake: total_stake,
         jailed: false,
         commission_bps,
     })
@@ -130,8 +130,8 @@ fn test_higher_commission_means_more_operator_reward() {
     staking.validators.insert(b, v);
 
     // Add equal delegations so the difference comes from commission
-    staking.delegations.insert(("d1".into(), "high_commission".into()), 5_000_000_000);
-    staking.delegations.insert(("d2".into(), "low_commission".into()), 5_000_000_000);
+    staking.delegations.insert(("d1".into(), "high_commission".into()), iona::economics::staking::Delegation { amount: 5_000_000_000, unbondings: vec![] });
+    staking.delegations.insert(("d2".into(), "low_commission".into()), iona::economics::staking::Delegation { amount: 5_000_000_000, unbondings: vec![] });
 
     distribute_epoch_rewards(EPOCH_BLOCKS, &mut kv, &mut staking, &params);
 
@@ -154,8 +154,8 @@ fn test_delegator_reward_proportional() {
     staking.validators.insert(a, v);
 
     // carol delegates 2x more than dave
-    staking.delegations.insert(("carol".into(), "alice".into()), 2_000_000_000);
-    staking.delegations.insert(("dave".into(), "alice".into()), 1_000_000_000);
+    staking.delegations.insert(("carol".into(), "alice".into()), iona::economics::staking::Delegation { amount: 2_000_000_000, unbondings: vec![] });
+    staking.delegations.insert(("dave".into(), "alice".into()), iona::economics::staking::Delegation { amount: 1_000_000_000, unbondings: vec![] });
 
     distribute_epoch_rewards(EPOCH_BLOCKS, &mut kv, &mut staking, &params);
 
@@ -187,8 +187,8 @@ fn test_delegate_flow() {
     let res = try_apply_staking_tx("stake delegate alice 200000", "bob", &mut kv, &mut staking, &params, 0).unwrap();
     assert!(res.success, "{:?}", res.error);
     assert_eq!(*kv.balances.get("bob").unwrap(), 300_000);
-    assert_eq!(*staking.delegations.get(&("bob".into(), "alice".into())).unwrap(), 200_000);
-    assert_eq!(staking.validators["alice"].stake, 1_200_000);
+    assert_eq!(staking.delegations.get(&("bob".into(), "alice".into())).unwrap().amount, 200_000);
+    assert_eq!(staking.validators["alice"].total_stake, 1_200_000);
 }
 
 #[test]
@@ -280,11 +280,11 @@ fn test_cannot_delegate_to_jailed_validator() {
 #[test]
 fn test_stake_rewards_auto_compound() {
     let (mut kv, mut staking, params) = default_staking();
-    let initial_stake = staking.validators["alice"].stake;
+    let initial_stake = staking.validators["alice"].total_stake;
 
     distribute_epoch_rewards(EPOCH_BLOCKS, &mut kv, &mut staking, &params);
 
-    let new_stake = staking.validators["alice"].stake;
+    let new_stake = staking.validators["alice"].total_stake;
     assert!(
         new_stake > initial_stake,
         "Validator stake should auto-compound from rewards (was {initial_stake}, now {new_stake})"

@@ -17,13 +17,14 @@
 //! them to this module. Validators sign governance proposals like any tx,
 //! and the proposer applies the change if they hold a GovCertificate.
 
+use std::collections::BTreeMap;
+use std::collections::HashMap;
 use crate::crypto::PublicKeyBytes;
 use crate::consensus::ValidatorSet;
 use crate::slashing::StakeLedger;
 use crate::types::Height;
 use crate::execution::KvState;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap};
 use tracing::{info, warn};
 
 // -----------------------------------------------------------------------------
@@ -425,8 +426,8 @@ mod tests {
     fn test_proposal_quorum() {
         // Setup fake stakes: validator with stake 100, another with 50
         let mut stakes = StakeLedger::default();
-        let pk1 = PublicKeyBytes([1u8; 32]);
-        let pk2 = PublicKeyBytes([2u8; 32]);
+        let pk1 = PublicKeyBytes([1u8; 32].to_vec());
+        let pk2 = PublicKeyBytes([2u8; 32].to_vec());
         let addr1 = address_of(&pk1);
         let addr2 = address_of(&pk2);
         use crate::slashing::ValidatorRecord;
@@ -469,34 +470,34 @@ mod tests {
     fn test_apply_ready_proposal() {
         let mut gov = GovernanceState::default();
         let mut kv = KvState::default();
-        kv.balances.insert("alice".into(), MIN_GOV_DEPOSIT);
         let mut stakes = StakeLedger::default();
-        let pk = PublicKeyBytes([1u8; 32]);
+        let pk = PublicKeyBytes([1u8; 32].to_vec());
         let addr = address_of(&pk);
+        kv.balances.insert(addr.clone(), MIN_GOV_DEPOSIT);
         use crate::slashing::ValidatorRecord;
         stakes.validators.insert(pk.clone(), ValidatorRecord::new(100));
-        let mut vset = ValidatorSet::default();
+        // Add a second validator so proposer alone doesn't have quorum
+        let pk2 = PublicKeyBytes([2u8; 32].to_vec());
+        let addr2 = address_of(&pk2);
+        stakes.validators.insert(pk2.clone(), ValidatorRecord::new(100));
+        let mut vset = ValidatorSet { vals: vec![] };
         vset.vals.push(crate::consensus::Validator { pk: pk.clone(), power: 100 });
+        vset.vals.push(crate::consensus::Validator { pk: pk2.clone(), power: 100 });
 
         let action = GovAction::AddValidator { pk_hex: "00".repeat(32), stake: 200 };
         gov.submit(action.clone(), addr.clone(), 1, &mut kv).unwrap();
 
         // Vote for it (proposer already voted yes)
         let yes_power = gov.pending.get(&0).unwrap().yes_power(&stakes);
-        assert_eq!(yes_power, 100); // auto‑vote by proposer
+        assert_eq!(yes_power, 100); // auto-vote by proposer
+        // total=200, yes=100: 100*3=300 > 200*2=400? No → no quorum
         assert!(!gov.pending.get(&0).unwrap().has_quorum(&stakes));
 
         // Apply ready (no quorum)
         let applied = gov.apply_ready(&mut stakes, &mut vset, 1);
         assert!(applied.is_empty());
 
-        // Add more stake to reach quorum
-        let pk2 = PublicKeyBytes([2u8; 32]);
-        let addr2 = address_of(&pk2);
-        stakes.validators.insert(pk2, ValidatorRecord::new(100));
-        vset.vals.push(crate::consensus::Validator { pk: pk2, power: 100 });
-        // Now total stake = 200, 2/3 = 133.33, yes = 100 (still insufficient)
-        // We need the second validator to vote yes
+        // Second validator votes yes to reach quorum
         gov.vote(0, addr2, true).unwrap();
 
         let applied = gov.apply_ready(&mut stakes, &mut vset, 1);

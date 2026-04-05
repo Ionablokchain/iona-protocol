@@ -1,3 +1,4 @@
+use revm::Database;
 use crate::evm::db::MemDb;
 use crate::evm::executor::{execute_evm_tx, EvmExecOutput};
 use crate::evm::executor_env::default_env;
@@ -112,9 +113,20 @@ fn err<T: Serialize>(id: serde_json::Value, code: i64, msg: impl Into<String>) -
     JsonRpcResp { jsonrpc: "2.0", id, result: None, error: Some(JsonRpcErr { code, message: msg.into() }) }
 }
 
+fn ok_val(id: serde_json::Value, result: impl Serialize) -> serde_json::Value {
+    serde_json::json!({ "jsonrpc": "2.0", "id": id, "result": result })
+}
+fn err_val(id: serde_json::Value, code: i64, msg: impl Into<String>) -> serde_json::Value {
+    serde_json::json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": msg.into() } })
+}
+
+
 /// Minimal receipt/log model (scaffold)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Receipt {
+    pub transaction_hash: String,
+    pub to: String,
+    pub from: String,
     pub tx_type: u8,
     pub block_hash: String,
     pub transaction_index: u64,
@@ -151,7 +163,7 @@ pub struct TxRecord {
     pub raw: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Block {
     pub number: u64,
     pub hash: String,
@@ -201,8 +213,8 @@ fn queue_pending_tx(st: &EthRpcState, raw_bytes: Vec<u8>) -> Result<String, Stat
     };
 
     let mut pool = st.txpool.lock().expect("txpool lock poisoned");
-    pool.insert(ptx).map_err(|_| StatusCode::BAD_REQUEST)?;
-    pool.prune(now, 3600, 10_000);
+    pool.insert(ptx.clone(), None).map_err(|_| StatusCode::BAD_REQUEST)?;
+    pool.prune(now);
     drop(pool);
     maybe_persist(st);
 
@@ -228,9 +240,9 @@ fn mine_one(st: &EthRpcState, raw_bytes: Vec<u8>) -> Result<String, StatusCode> 
     let parsed_legacy = crate::rpc::tx_decode::decode_legacy_signed_tx(&raw_bytes).ok();
 
     let mut db = st.db.lock().expect("db lock poisoned");
-    let env = default_env(st.chain_id);
+    let env = default_env(st.chain_id, revm::primitives::SpecId::CANCUN);
 
-    let out = execute_evm_tx(&mut db, env, evm_tx).map_err(|_| StatusCode::BAD_REQUEST)?;
+    let out = { let r: &mut MemDb = &mut db; execute_evm_tx(r, env, evm_tx).map_err(|_| StatusCode::BAD_REQUEST)? };
 
     let mut bn = st.block_number.lock().expect("block_number lock poisoned");
     *bn += 1;
@@ -244,11 +256,11 @@ fn mine_one(st: &EthRpcState, raw_bytes: Vec<u8>) -> Result<String, StatusCode> 
     let mut logs: Vec<Log> = vec![];
     for (i, l) in out.logs.iter().enumerate() {
         bloom.insert(l.address.as_slice());
-        for t in l.topics.iter() { bloom.insert(t.as_slice()); }
+        for t in l.topics().iter() { bloom.insert(t.as_slice()); }
         logs.push(Log {
             address: format!("0x{}", hex::encode(l.address)),
-            topics: l.topics.iter().map(|t| format!("0x{}", hex::encode(t))).collect(),
-            data: format!("0x{}", hex::encode(l.data.clone())),
+            topics: l.topics().iter().map(|t| format!("0x{}", hex::encode(t))).collect(),
+            data: format!("0x{}", hex::encode(l.data.data.as_ref())),
             block_number: *bn,
             tx_hash: tx_hash.clone(),
             log_index: i as u64,
@@ -258,12 +270,15 @@ fn mine_one(st: &EthRpcState, raw_bytes: Vec<u8>) -> Result<String, StatusCode> 
     let contract_address = out.created_address.map(|a| format!("0x{}", hex::encode(a)));
 
     let receipt = Receipt {
+        contract_address: None,
+        from: String::new(),
+        to: String::new(),
+        transaction_hash: String::new(),
         tx_type,
         tx_hash: tx_hash.clone(),
         block_number: *bn,
         status: out.success,
         gas_used: out.gas_used,
-        contract_address,
         logs,
         block_hash: bhash.clone(),
         transaction_index: 0,
@@ -318,20 +333,20 @@ fn mine_one(st: &EthRpcState, raw_bytes: Vec<u8>) -> Result<String, StatusCode> 
     let tx_root = eth_ordered_trie_root_hex(&tx_items);
 
     let receipts_vec = vec![receipt.clone()];
-    let receipt_items: Vec<Vec<u8>> = receipts_vec.iter().map(|r| rlp_encode_typed_receipt(r.tx_type, r)).collect();
+    let receipt_items: Vec<Vec<u8>> = receipts_vec.iter().filter_map(|r| rlp_encode_typed_receipt(r.tx_type, r).ok()).collect();
     let receipts_root = eth_ordered_trie_root_hex(&receipt_items);
 
     let logs_bloom_hex = receipt.logs_bloom.clone();
     st.receipts_by_block.lock().expect("receipts_by_block lock poisoned").insert(*bn, receipts_vec);
 
     let header = EthHeader {
-        parent_hash: h256_from_hex(&st.blocks.lock().expect("blocks lock poisoned").last().map(|b| b.hash.clone()).unwrap_or_else(|| "0x0".to_string())),
-        ommers_hash: empty_ommers_hash(),
+        parent_hash: h256_from_hex(&st.blocks.lock().expect("blocks lock poisoned").last().map(|b| b.hash.clone()).unwrap_or_else(|| "0x0".to_string())).unwrap_or([0u8; 32]),
+        ommers_hash: crate::rpc::eth_header::EMPTY_OMMERS_HASH,
         beneficiary: [0u8; 20],
-        state_root: h256_from_hex(&compute_state_root_hex(&db)),
-        transactions_root: crate::rpc::eth_header::h256_from_hex(&tx_root),
-        receipts_root: crate::rpc::eth_header::h256_from_hex(&receipts_root),
-        logs_bloom: crate::rpc::eth_header::bloom_from_hex(&logs_bloom_hex),
+        state_root: h256_from_hex(&compute_state_root_hex(&db)).unwrap_or([0u8; 32]),
+        transactions_root: crate::rpc::eth_header::h256_from_hex(&tx_root).unwrap_or([0u8; 32]),
+        receipts_root: crate::rpc::eth_header::h256_from_hex(&receipts_root).unwrap_or([0u8; 32]),
+        logs_bloom: crate::rpc::eth_header::bloom_from_hex(&logs_bloom_hex).unwrap_or_default(),
         difficulty: 0,
         number: *bn,
         gas_limit: 30_000_000,
@@ -341,7 +356,7 @@ fn mine_one(st: &EthRpcState, raw_bytes: Vec<u8>) -> Result<String, StatusCode> 
         mix_hash: [0u8; 32],
         nonce: [0u8; 8],
         base_fee_per_gas: *st.base_fee.lock().expect("base_fee lock poisoned"),
-        withdrawals_root: crate::rpc::eth_header::h256_from_hex(&withdrawals_root_hex(&block_withdrawals)),
+        withdrawals_root: crate::rpc::eth_header::h256_from_hex(&withdrawals_root_hex(&block_withdrawals)).unwrap_or([0u8; 32]),
     };
     let block_hash = header_hash_hex(&header);
 
@@ -365,7 +380,7 @@ fn mine_one(st: &EthRpcState, raw_bytes: Vec<u8>) -> Result<String, StatusCode> 
     });
     maybe_persist(st);
     if let Some(dir) = st.chain_db_dir.as_ref() {
-        let b = st.blocks.lock().expect("blocks lock poisoned").last().cloned().unwrap();
+        let b = st.blocks.lock().expect("blocks lock poisoned").last().cloned().unwrap_or_default();
         let rs = st.receipts_by_block.lock().expect("receipts_by_block lock poisoned").get(&b.number).cloned().unwrap_or_default();
         let mut txrecs = vec![];
         for h in b.transactions.iter() {
@@ -382,11 +397,11 @@ fn mine_pending_block(st: &EthRpcState, max_txs: usize) -> Result<Vec<String>, S
     let db = st.db.lock().expect("db lock poisoned");
     let mut nonces = std::collections::HashMap::<String, u64>::new();
     for (addr, info) in db.accounts.iter() {
-        nonces.insert(format!("0x{}", hex::encode(addr)), info.nonce.unwrap_or(0));
+        nonces.insert(format!("0x{}", hex::encode(addr)), info.nonce);
     }
     drop(db);
 
-    let txs = st.txpool.lock().expect("txpool lock poisoned").drain_next_ready(&nonces, max_txs);
+    let txs = st.txpool.lock().expect("txpool lock poisoned").ready_txs(&nonces, max_txs);
     let mut mined = vec![];
     for tx in txs {
         mined.push(mine_one(st, tx.raw)?);
@@ -397,22 +412,22 @@ fn mine_pending_block(st: &EthRpcState, max_txs: usize) -> Result<Vec<String>, S
 fn apply_pending_on_snapshot(st: &EthRpcState, db: &mut MemDb, max_txs: usize) {
     let mut nonces = std::collections::HashMap::<String, u64>::new();
     for (addr, info) in db.accounts.iter() {
-        nonces.insert(format!("0x{}", hex::encode(addr)), info.nonce.unwrap_or(0));
+        nonces.insert(format!("0x{}", hex::encode(addr)), info.nonce);
     }
-    let txs = st.txpool.lock().expect("txpool lock poisoned").drain_next_ready(&nonces, max_txs);
+    let txs = st.txpool.lock().expect("txpool lock poisoned").ready_txs(&nonces, max_txs);
     for tx in txs.iter() {
         let _ = mine_one_on_db(db, st.chain_id, &tx.raw);
     }
     let mut pool = st.txpool.lock().expect("txpool lock poisoned");
     for tx in txs {
-        let _ = pool.insert(tx);
+        let _ = pool.insert(tx, None);
     }
 }
 
 /// Execute a tx on a provided DB snapshot without producing blocks. Returns gas used if successful.
 fn mine_one_on_db(db: &mut MemDb, chain_id: u64, raw_bytes: &[u8]) -> Option<u64> {
     let evm_tx = crate::rpc::tx_decode::decode_typed_tx(raw_bytes).ok()?;
-    let env = default_env(chain_id);
+    let env = default_env(chain_id, revm::primitives::SpecId::LATEST);
     let out = execute_evm_tx(db, env, evm_tx).ok()?;
     Some(out.gas_used)
 }
@@ -425,55 +440,56 @@ pub async fn handle_rpc(
     let id = req.id.clone();
     let method = req.method.as_str();
 
-    let resp = match method {
-        "web3_clientVersion" => ok(id, "iona/MEGA-v6".to_string()),
-        "eth_chainId" => ok(id, format!("0x{:x}", st.chain_id)),
+    let resp: serde_json::Value = match method {
+        "web3_clientVersion" => ok_val(id, "iona/MEGA-v6".to_string()),
+        "eth_chainId" => ok_val(id, format!("0x{:x}", st.chain_id)),
         "eth_blockNumber" => {
             let n = *st.block_number.lock().expect("block_number lock poisoned");
-            ok(id, format!("0x{:x}", n))
+            ok_val(id, format!("0x{:x}", n))
         }
         "eth_getTransactionCount" => {
             let addr = get_addr(&req.params, 0)?;
             let tag = req.params.get(1).and_then(|v| v.as_str()).unwrap_or("latest");
             let ahex = format!("0x{}", hex::encode(addr));
             let db = st.db.lock().expect("db lock poisoned");
-            let base = db.accounts.get(&addr).map(|i| i.nonce.unwrap_or(0)).unwrap_or(0);
+            let base = db.accounts.get(&addr).map(|i| i.nonce).unwrap_or(0);
             drop(db);
             if tag == "pending" {
-                let extra = st.txpool.lock().expect("txpool lock poisoned").contiguous_from(&ahex, base);
-                ok(id, format!("0x{:x}", base + extra))
+                let pool_guard = st.txpool.lock().expect("txpool lock poisoned");
+                let extra = pool_guard.txs_for_sender(&ahex);
+                let extra_len = extra.len() as u64; drop(extra); drop(pool_guard); ok_val(id, format!("0x{:x}", base + extra_len))
             } else {
-                ok(id, format!("0x{:x}", base))
+                ok_val(id, format!("0x{:x}", base))
             }
         }
         "eth_getBalance" => {
             let addr = get_addr(&req.params, 0)?;
             let db = st.db.lock().expect("db lock poisoned");
             let bal = db.accounts.get(&addr).map(|a| a.balance).unwrap_or(U256::ZERO);
-            ok(id, u256_hex(bal))
+            ok_val(id, u256_hex(bal))
         }
         "eth_getCode" => {
             let addr = get_addr(&req.params, 0)?;
             let db = st.db.lock().expect("db lock poisoned");
             let info = db.accounts.get(&addr).cloned();
-            let code = match info.and_then(|i| i.code_hash) {
+            let code = match info.and_then(|i| Some(i.code_hash)) {
                 Some(h) => db.code.get(&h).map(|c| c.bytes().clone()).unwrap_or(Bytes::new()),
                 None => Bytes::new(),
             };
-            ok(id, format!("0x{}", hex::encode(code)))
+            ok_val(id, format!("0x{}", hex::encode(code)))
         }
         "eth_getStorageAt" => {
             let addr = get_addr(&req.params, 0)?;
             let key = get_h256_as_u256(&req.params, 1)?;
             let mut db = st.db.lock().expect("db lock poisoned");
             let v = db.storage(addr, key).map_err(|_| StatusCode::BAD_REQUEST)?;
-            ok(id, u256_hex(v))
+            ok_val(id, u256_hex(v))
         }
         "eth_estimateGas" => {
             let call = req.params.get(0).ok_or(StatusCode::BAD_REQUEST)?;
             let tag = req.params.get(1).and_then(|v| v.as_str()).unwrap_or("latest");
 
-            let to = parse_addr_hex(call.get("to").and_then(|v| v.as_str()).unwrap_or("0x0"))?;
+            let to = parse_addr_hex(call.get("to").and_then(|v| v.as_str()).unwrap_or("0x0")).map_err(|_| StatusCode::BAD_REQUEST)?;
             let data_hex = call.get("data").and_then(|v| v.as_str()).unwrap_or("0x");
             let data = hex::decode(data_hex.trim_start_matches("0x")).unwrap_or_default();
 
@@ -482,7 +498,7 @@ pub async fn handle_rpc(
             if tag == "pending" {
                 apply_pending_on_snapshot(&st, &mut db, 2048);
             }
-            let env = default_env(st.chain_id);
+            let env = default_env(st.chain_id, revm::primitives::SpecId::CANCUN);
 
             let gas_limit = 10_000_000u64;
             let tx = EvmTx::Legacy {
@@ -495,9 +511,9 @@ pub async fn handle_rpc(
                 data,
                 chain_id: st.chain_id,
             };
-            let out = execute_evm_tx(&mut db, env, tx).map_err(|_| StatusCode::BAD_REQUEST)?;
+            let out = { let r: &mut MemDb = &mut db; execute_evm_tx(r, env, tx).map_err(|_| StatusCode::BAD_REQUEST)? };
             let est = (out.gas_used.saturating_add(25_000)).min(gas_limit);
-            ok(id, format!("0x{:x}", est))
+            ok_val(id, format!("0x{:x}", est))
         }
         "eth_getProof" => {
             let addr = get_addr(&req.params, 0)?;
@@ -507,8 +523,8 @@ pub async fn handle_rpc(
             let info = db.accounts.get(&addr).cloned().unwrap_or_default();
 
             let balance = format!("0x{:x}", info.balance);
-            let nonce = format!("0x{:x}", info.nonce.unwrap_or(0));
-            let code_hash = info.code_hash.map(|h| format!("0x{}", hex::encode(h.0))).unwrap_or_else(|| "0x".to_string());
+            let nonce = format!("0x{:x}", info.nonce);
+            let code_hash = format!("0x{}", hex::encode(info.code_hash.as_slice()));
             let storage_hash = {
                 use sha3::{Digest, Keccak256};
                 let empty_storage = db.storage.iter().all(|((a, _), _)| a != &addr);
@@ -536,7 +552,7 @@ pub async fn handle_rpc(
                 })
             }).collect::<Vec<_>>();
 
-            ok(id, serde_json::json!({
+            ok_val(id, serde_json::to_string(&serde_json::json!({
                 "address": format!("0x{}", hex::encode(addr)),
                 "accountProof": [],
                 "balance": balance,
@@ -545,7 +561,7 @@ pub async fn handle_rpc(
                 "storageHash": storage_hash,
                 "storageProof": storage_proof,
                 "stateRoot": state_root
-            }))
+            })).unwrap_or_default())
         }
         "eth_feeHistory" => {
             let block_count = req.params.get(0).and_then(|v| v.as_str()).and_then(|s| u64::from_str_radix(s.trim_start_matches("0x"), 16).ok()).unwrap_or(1);
@@ -560,22 +576,22 @@ pub async fn handle_rpc(
             let gas_used_ratio = vec![0.0f64; block_count as usize];
             let reward: Vec<Vec<String>> = vec![vec![]; block_count as usize];
 
-            ok(id, serde_json::json!({
+            ok_val(id, serde_json::to_string(&serde_json::json!({
                 "oldestBlock": format!("0x{:x}", oldest),
                 "baseFeePerGas": base_fees,
                 "gasUsedRatio": gas_used_ratio,
                 "reward": reward
-            }))
+            })).unwrap_or_default())
         }
         "eth_call" => {
             let call = req.params.get(0).ok_or(StatusCode::BAD_REQUEST)?;
-            let to = parse_addr_hex(call.get("to").and_then(|v| v.as_str()).unwrap_or("0x0"))?;
+            let to = parse_addr_hex(call.get("to").and_then(|v| v.as_str()).unwrap_or("0x0")).map_err(|_| StatusCode::BAD_REQUEST)?;
             let data_hex = call.get("data").and_then(|v| v.as_str()).unwrap_or("0x");
             let data = hex::decode(data_hex.trim_start_matches("0x")).unwrap_or_default();
 
             let db0 = st.db.lock().expect("db lock poisoned").clone();
             let mut db = db0;
-            let env = default_env(st.chain_id);
+            let env = default_env(st.chain_id, revm::primitives::SpecId::CANCUN);
 
             let tx = EvmTx::Legacy {
                 from: [0u8; 20],
@@ -588,13 +604,13 @@ pub async fn handle_rpc(
                 chain_id: st.chain_id,
             };
 
-            let out = execute_evm_tx(&mut db, env, tx).map_err(|_| StatusCode::BAD_REQUEST)?;
-            ok(id, format!("0x{}", hex::encode(out.return_data)))
+            let out = { let r: &mut MemDb = &mut db; execute_evm_tx(r, env, tx).map_err(|_| StatusCode::BAD_REQUEST)? };
+            ok_val(id, format!("0x{}", hex::encode(out.return_data)))
         }
         "iona_mine" => {
             let max = req.params.get(0).and_then(|v| v.as_u64()).unwrap_or(128) as usize;
             let mined = mine_pending_block(&st, max)?;
-            ok(id, mined)
+            ok_val(id, mined.join(","))
         }
         "eth_sendRawTransaction" => {
             let raw = req.params.get(0).and_then(|v| v.as_str()).ok_or(StatusCode::BAD_REQUEST)?;
@@ -605,19 +621,19 @@ pub async fn handle_rpc(
                 let _ = mine_pending_block(&st, 1)?;
             }
 
-            ok(id, tx_hash)
+            ok_val(id, tx_hash)
         }
         "eth_getTransactionByHash" => {
             let h = req.params.get(0).and_then(|v| v.as_str()).unwrap_or_default().to_string();
             let txs = st.txs.lock().expect("txs lock poisoned");
             let found = txs.get(&h).cloned();
-            ok(id, found)
+            ok_val(id, serde_json::to_string(&found).unwrap_or("null".to_string()))
         }
         "eth_getTransactionReceipt" => {
             let h = req.params.get(0).and_then(|v| v.as_str()).unwrap_or_default().to_string();
             let rs = st.receipts.lock().expect("receipts lock poisoned");
             let found = rs.iter().find(|r| r.tx_hash == h).cloned();
-            ok(id, found)
+            ok_val(id, serde_json::to_string(&found).unwrap_or("null".to_string()))
         }
         "eth_getBlockByNumber" => {
             let tag = req.params.get(0).and_then(|v| v.as_str()).unwrap_or("latest");
@@ -629,8 +645,8 @@ pub async fn handle_rpc(
                 if let Some(mut lb) = latest {
                     let pool = st.txpool.lock().expect("txpool lock poisoned");
                     let mut txs_list = vec![];
-                    for lane in pool.by_sender.values() {
-                        for t in lane.values() { txs_list.push(t.hash.clone()); }
+                    for lane in pool.all_txs().iter() {
+                        txs_list.push(lane.hash.clone());
                     }
                     lb.transactions = txs_list;
                     Some(lb)
@@ -642,17 +658,17 @@ pub async fn handle_rpc(
                 blocks.iter().find(|b| b.number == n).cloned()
             };
             if !full {
-                ok(id, b)
+                ok_val(id, b.map(|bb| serde_json::to_value(&bb).unwrap_or_default()))
             } else {
                 let b2 = b.map(|bb| {
-                    let tx_objs: Vec<serde_json::Value> = bb.transactions.iter().filter_map(|h| txs.get(h)).map(|t| serde_json::to_value(t).unwrap()).collect();
-                    let mut v = serde_json::to_value(&bb).unwrap();
+                    let tx_objs: Vec<serde_json::Value> = bb.transactions.iter().filter_map(|h| txs.get(h)).filter_map(|t| serde_json::to_value(t).ok()).collect();
+                    let mut v = serde_json::to_value(&bb).unwrap_or(serde_json::Value::Null);
                     if let serde_json::Value::Object(ref mut o) = v {
                         o.insert("transactions".to_string(), serde_json::Value::Array(tx_objs));
                     }
                     v
                 });
-                ok(id, b2)
+                ok_val(id, b2)
             }
         }
         "eth_getBlockTransactionCountByNumber" => {
@@ -663,8 +679,8 @@ pub async fn handle_rpc(
                 if let Some(mut lb) = latest {
                     let pool = st.txpool.lock().expect("txpool lock poisoned");
                     let mut txs_list = vec![];
-                    for lane in pool.by_sender.values() {
-                        for t in lane.values() { txs_list.push(t.hash.clone()); }
+                    for lane in pool.all_txs().iter() {
+                        txs_list.push(lane.hash.clone());
                     }
                     lb.transactions = txs_list;
                     Some(lb)
@@ -675,13 +691,13 @@ pub async fn handle_rpc(
                 let n = u64::from_str_radix(tag.trim_start_matches("0x"), 16).unwrap_or(0);
                 blocks.iter().find(|b| b.number == n).cloned()
             };
-            ok(id, b.map(|bb| format!("0x{:x}", bb.transactions.len())))
+            ok_val(id, b.map(|bb| format!("0x{:x}", bb.transactions.len())))
         }
         "eth_getBlockTransactionCountByHash" => {
             let h = req.params.get(0).and_then(|v| v.as_str()).unwrap_or_default().to_string();
             let blocks = st.blocks.lock().expect("blocks lock poisoned");
             let b = blocks.iter().find(|b| b.hash == h).cloned();
-            ok(id, b.map(|bb| format!("0x{:x}", bb.transactions.len())))
+            ok_val(id, b.map(|bb| format!("0x{:x}", bb.transactions.len())))
         }
         "eth_getBlockByHash" => {
             let h = req.params.get(0).and_then(|v| v.as_str()).unwrap_or_default().to_string();
@@ -690,17 +706,17 @@ pub async fn handle_rpc(
             let txs = st.txs.lock().expect("txs lock poisoned");
             let b = blocks.iter().find(|b| b.hash == h).cloned();
             if !full {
-                ok(id, b)
+                ok_val(id, b.map(|bb| serde_json::to_value(&bb).unwrap_or_default()))
             } else {
                 let b2 = b.map(|bb| {
-                    let tx_objs: Vec<serde_json::Value> = bb.transactions.iter().filter_map(|h| txs.get(h)).map(|t| serde_json::to_value(t).unwrap()).collect();
-                    let mut v = serde_json::to_value(&bb).unwrap();
+                    let tx_objs: Vec<serde_json::Value> = bb.transactions.iter().filter_map(|h| txs.get(h)).filter_map(|t| serde_json::to_value(t).ok()).collect();
+                    let mut v = serde_json::to_value(&bb).unwrap_or(serde_json::Value::Null);
                     if let serde_json::Value::Object(ref mut o) = v {
                         o.insert("transactions".to_string(), serde_json::Value::Array(tx_objs));
                     }
                     v
                 });
-                ok(id, b2)
+                ok_val(id, b2)
             }
         }
         "eth_getLogs" => {
@@ -735,12 +751,12 @@ pub async fn handle_rpc(
                                 let have = lg.topics.get(i).map(|x| x.to_lowercase());
                                 if have.is_none() { ok_topics = false; break; }
                                 if let Some(ws) = want.as_str() {
-                                    if have.as_ref().unwrap() != &ws.to_lowercase() { ok_topics = false; break; }
+                                    if have.as_deref().unwrap_or("") != &ws.to_lowercase() { ok_topics = false; break; }
                                 } else if let Some(opts) = want.as_array() {
                                     let mut any = false;
                                     for o in opts {
                                         if let Some(ws) = o.as_str() {
-                                            if have.as_ref().unwrap() == &ws.to_lowercase() {
+                                            if have.as_deref().unwrap_or("") == &ws.to_lowercase() {
                                                 any = true;
                                                 break;
                                             }
@@ -764,27 +780,27 @@ pub async fn handle_rpc(
                     logs.push(lg.clone());
                 }
             }
-            ok(id, logs)
+            ok_val(id, logs)
         }
 
         // Additional standard methods
-        "net_version" => ok(id, st.chain_id.to_string()),
-        "net_listening" => ok(id, true),
-        "net_peerCount" => ok(id, "0x1".to_string()),
-        "eth_protocolVersion" => ok(id, "0x41".to_string()),
-        "eth_syncing" => ok(id, false),
-        "eth_mining" => ok(id, st.automine),
-        "eth_hashrate" => ok(id, "0x0".to_string()),
+        "net_version" => ok_val(id, st.chain_id.to_string()),
+        "net_listening" => ok_val(id, true),
+        "net_peerCount" => ok_val(id, "0x1".to_string()),
+        "eth_protocolVersion" => ok_val(id, "0x41".to_string()),
+        "eth_syncing" => ok_val(id, false),
+        "eth_mining" => ok_val(id, st.automine),
+        "eth_hashrate" => ok_val(id, "0x0".to_string()),
         "eth_gasPrice" => {
             let bf = st.base_fee.lock().expect("base_fee lock poisoned");
-            ok(id, format!("0x{:x}", *bf))
+            ok_val(id, format!("0x{:x}", *bf))
         }
-        "eth_maxPriorityFeePerGas" => ok(id, "0x3b9aca00".to_string()),
-        "eth_accounts" => ok(id, Vec::<String>::new()),
-        "eth_getUncleCountByBlockHash" => ok(id, "0x0".to_string()),
-        "eth_getUncleCountByBlockNumber" => ok(id, "0x0".to_string()),
-        "eth_getUncleByBlockHashAndIndex" => ok(id, serde_json::Value::Null),
-        "eth_getUncleByBlockNumberAndIndex" => ok(id, serde_json::Value::Null),
+        "eth_maxPriorityFeePerGas" => ok_val(id, "0x3b9aca00".to_string()),
+        "eth_accounts" => ok_val(id, Vec::<String>::new()),
+        "eth_getUncleCountByBlockHash" => ok_val(id, "0x0".to_string()),
+        "eth_getUncleCountByBlockNumber" => ok_val(id, "0x0".to_string()),
+        "eth_getUncleByBlockHashAndIndex" => ok_val(id, serde_json::Value::Null),
+        "eth_getUncleByBlockNumberAndIndex" => ok_val(id, serde_json::Value::Null),
         "eth_getTransactionByBlockHashAndIndex" => {
             let block_hash = req.params.get(0).and_then(|v| v.as_str()).unwrap_or_default();
             let idx_str = req.params.get(1).and_then(|v| v.as_str()).unwrap_or("0x0");
@@ -795,7 +811,7 @@ pub async fn handle_rpc(
                 .find(|b| b.hash == block_hash)
                 .and_then(|b| b.transactions.get(idx))
                 .and_then(|h| txs.get(h).cloned());
-            ok(id, found)
+            ok_val(id, found)
         }
         "eth_getTransactionByBlockNumberAndIndex" => {
             let tag = req.params.get(0).and_then(|v| v.as_str()).unwrap_or("latest");
@@ -812,17 +828,17 @@ pub async fn handle_rpc(
             let found = block
                 .and_then(|b| b.transactions.get(idx).cloned())
                 .and_then(|h| txs.get(&h).cloned());
-            ok(id, found)
+            ok_val(id, found)
         }
-        "eth_newFilter" | "eth_newBlockFilter" | "eth_newPendingTransactionFilter" => ok(id, "0x1"),
-        "eth_getFilterChanges" | "eth_getFilterLogs" => ok(id, Vec::<serde_json::Value>::new()),
-        "eth_uninstallFilter" => ok(id, true),
-        "eth_subscribe" | "eth_unsubscribe" => err::<serde_json::Value>(id, -32000, "Subscriptions not supported over HTTP. Use WebSocket.".to_string()),
-        "debug_traceTransaction" | "debug_traceBlock" => err::<serde_json::Value>(id, -32000, "debug namespace not enabled".to_string()),
-        _ => err::<serde_json::Value>(id, -32601, format!("Method not found: {}", method)),
+        "eth_newFilter" | "eth_newBlockFilter" | "eth_newPendingTransactionFilter" => ok_val(id, "0x1"),
+        "eth_getFilterChanges" | "eth_getFilterLogs" => ok_val(id, Vec::<serde_json::Value>::new()),
+        "eth_uninstallFilter" => ok_val(id, true),
+        "eth_subscribe" | "eth_unsubscribe" => err_val(id, -32000, "Subscriptions not supported over HTTP. Use WebSocket.".to_string()),
+        "debug_traceTransaction" | "debug_traceBlock" => err_val(id, -32000, "debug namespace not enabled".to_string()),
+        _ => err_val(id, -32601, format!("Method not found: {}", method)),
     };
 
-    Ok(Json(serde_json::to_value(resp).expect("serialization failed")))
+    Ok(Json(resp))
 }
 
 // Helper functions remain unchanged, but with proper error handling.

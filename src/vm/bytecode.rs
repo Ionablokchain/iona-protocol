@@ -202,6 +202,8 @@ pub const GAS_STATICCALL:     u64 = 40;
 pub const GAS_CREATE:         u64 = 32_000;
 pub const GAS_CREATE2:        u64 = 32_000;
 pub const GAS_SELFDESTRUCT:   u64 = 5_000;
+pub const GAS_JUMP:           u64 = GAS_MID;
+pub const GAS_JUMPI:          u64 = GAS_HIGH;
 
 // ============================================================================
 // Helper functions

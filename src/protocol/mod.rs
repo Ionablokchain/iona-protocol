@@ -19,9 +19,9 @@ pub use self::activation_guarantees::{
 };
 pub use self::compat::{
     build_compat_matrix, check_version_compat, generate_upgrade_guide, CompatChecker,
-    CompatDomain, CompatLevel, CompatReport, CompatSeverity,
+    CompatDomain, CompatLevel, CompatReport,
 };
-pub use self::dual_validate::{ShadowOutcome, ShadowStats, ShadowValidator};
+// dual_validate re-exports handled below
 pub use self::version::{
     version_for_height, ProtocolActivation, CURRENT_PROTOCOL_VERSION, SUPPORTED_PROTOCOL_VERSIONS,
 };
@@ -37,3 +37,5 @@ pub mod transitions;
 pub mod upgrade_constraints;
 pub mod version;
 pub mod wire;
+
+pub const MAX_FUTURE_BLOCK_TIME_SECS: u64 = 15;

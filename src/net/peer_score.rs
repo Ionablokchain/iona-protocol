@@ -75,6 +75,7 @@ impl ViolationReason {
 
 // ── Per-peer bandwidth token bucket ─────────────────────────────────────
 
+#[derive(Debug)]
 struct RateBucket {
     tokens: f64,
     max: f64,
@@ -109,6 +110,7 @@ impl RateBucket {
 
 // ── Per-peer state ────────────────────────────────────────────────────────
 
+#[derive(Debug)]
 struct PeerEntry {
     score: i64,
     msg_bucket: RateBucket,

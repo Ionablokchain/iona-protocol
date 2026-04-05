@@ -290,7 +290,7 @@ fn init_logging(level: &str) -> anyhow::Result<()> {
         .unwrap_or_else(|_| EnvFilter::new(level));
 
     let subscriber = fmt::Subscriber::builder()
-        .json()
+        
         .with_target(true)
         .with_thread_ids(false)
         .with_env_filter(filter)

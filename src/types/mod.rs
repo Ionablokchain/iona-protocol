@@ -103,7 +103,7 @@ impl AsRef<[u8]> for Hash32 {
 /// Transactions are signed by an account and contain a payload that is executed
 /// by the VM (KV store, custom VM, or EVM). The signature is verified before
 /// execution.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Tx {
     /// Public key of the sender (32 bytes for Ed25519).
     pub pubkey: Vec<u8>,
@@ -126,6 +126,10 @@ pub struct Tx {
 }
 
 impl Tx {
+    pub fn evm_to(&self) -> Option<[u8; 20]> {
+        None
+    }
+
     /// Returns the hash of this transaction (excluding signature).
     ///
     /// The hash is computed over a fixed binary format:
@@ -167,7 +171,7 @@ impl Tx {
 ///
 /// Contains the result of executing a transaction: success/failure, gas usage,
 /// and optional error message or return data.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct Receipt {
     /// Hash of the transaction this receipt belongs to.
     pub tx_hash: Hash32,
@@ -208,7 +212,7 @@ pub struct Receipt {
 ///
 /// Contains all metadata necessary to verify the block's validity and link it
 /// to the chain. The header is hashed to produce the block ID.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BlockHeader {
     /// Block height (genesis = 0 or 1, depending on convention).
     pub height: Height,
@@ -254,6 +258,8 @@ pub struct BlockHeader {
     /// Defaults to 1 for blocks produced before this field was added.
     #[serde(default = "default_protocol_version")]
     pub protocol_version: u32,
+    #[serde(default)]
+    pub pv: u32,
 }
 
 fn default_chain_id() -> u64 { DEFAULT_CHAIN_ID }
@@ -264,7 +270,7 @@ fn default_protocol_version() -> u32 { DEFAULT_PROTOCOL_VERSION }
 // ------------------------------
 
 /// A complete block containing a header and a list of transactions.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Block {
     pub header: BlockHeader,
     pub txs: Vec<Tx>,
@@ -434,6 +440,7 @@ mod tests {
     #[test]
     fn block_id_deterministic() {
         let header = BlockHeader {
+            pv: 0,
             height: 1,
             round: 0,
             prev: Hash32::zero(),

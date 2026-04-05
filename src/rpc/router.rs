@@ -1,5 +1,6 @@
 //! HTTP and WebSocket router for the JSON‑RPC server.
 
+use prometheus::Encoder;
 use axum::{
     extract::{State, WebSocketUpgrade},
     http::{header, Method, StatusCode},
@@ -45,7 +46,7 @@ pub struct RpcConfig {
 impl Default for RpcConfig {
     fn default() -> Self {
         Self {
-            listen_addr: "127.0.0.1:8545".parse().unwrap(),
+            listen_addr: "127.0.0.1:8545".parse().expect("valid socket addr literal"),
             cors_allow_all: false,
             allowed_origins: vec![],
             api_key: None,
@@ -66,7 +67,9 @@ pub fn build_router(state: EthRpcState, config: &RpcConfig) -> Router {
             .allow_methods([Method::POST, Method::GET])
             .allow_headers([header::CONTENT_TYPE]);
         if !config.allowed_origins.is_empty() {
-            cors = cors.allow_origin(config.allowed_origins.clone());
+            cors = cors.allow_origin(config.allowed_origins.iter()
+                .filter_map(|s| s.parse::<http::HeaderValue>().ok())
+                .collect::<Vec<_>>());
         }
         cors
     };
@@ -78,7 +81,7 @@ pub fn build_router(state: EthRpcState, config: &RpcConfig) -> Router {
         .finish()
         .expect("invalid rate limit configuration");
     let governor_layer = GovernorLayer {
-        config: Box::leak(Box::new(governor_conf)),
+        config: std::sync::Arc::new(governor_conf),
     };
 
     // Build the router with shared state
@@ -103,7 +106,7 @@ pub fn build_router(state: EthRpcState, config: &RpcConfig) -> Router {
 
     // If an API key is configured, protect the /faucet endpoint
     if let Some(key) = &config.api_key {
-        let auth = auth_api_key::AuthLayer::new(key.clone());
+        let auth = axum::middleware::from_fn(crate::rpc::middleware::auth_api_key);
         router.route("/faucet", post(faucet_handler).layer(auth))
     } else {
         router
@@ -120,8 +123,8 @@ async fn metrics_handler() -> String {
     let encoder = prometheus::TextEncoder::new();
     let metric_families = prometheus::gather();
     let mut buffer = vec![];
-    encoder.encode(&metric_families, &mut buffer).unwrap();
-    String::from_utf8(buffer).unwrap()
+    encoder.encode(&metric_families, &mut buffer).expect("prometheus encode failed");
+    String::from_utf8(buffer).unwrap_or_else(|_| String::from("invalid utf8"))
 }
 
 /// WebSocket upgrade handler (for subscriptions).
@@ -193,18 +196,17 @@ mod tests {
         let config = RpcConfig::default();
         let app = build_router(state, &config);
 
-        let response = app
-            .oneshot(
-                Request::builder()
+        let mut req = Request::builder()
                     .uri("/health")
                     .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
+                    .unwrap();
+        req.extensions_mut().insert(axum::extract::ConnectInfo(
+            "127.0.0.1:12345".parse::<SocketAddr>().unwrap()
+        ));
+        let response = app.oneshot(req).await.unwrap();
 
         assert_eq!(response.status(), StatusCode::OK);
-        let body = hyper::body::to_bytes(response.into_body()).await.unwrap();
+        let body = axum::body::to_bytes(response.into_body(), 1024*1024).await.unwrap();
         assert_eq!(body, "ok");
     }
 
@@ -217,4 +219,13 @@ mod tests {
         // We can't easily test the route in a unit test, but at least it compiles.
         assert!(true);
     }
+}
+
+pub async fn serve(state: crate::rpc::eth_rpc::EthRpcState, addr: &str) -> Result<(), Box<dyn std::error::Error>> {
+    use axum::Router;
+    use axum::routing::post;
+    let app = Router::new().route("/", post(crate::rpc::eth_rpc::handle_rpc)).with_state(state);
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    axum::serve(listener, app).await?;
+    Ok(())
 }

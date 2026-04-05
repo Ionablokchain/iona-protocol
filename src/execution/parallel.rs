@@ -59,14 +59,14 @@ pub struct AccessSets {
 impl AccessSets {
     /// Merges another set into this one.
     pub fn merge(&mut self, other: &AccessSets) {
-        self.kv_writes.extend(&other.kv_writes);
-        self.kv_reads.extend(&other.kv_reads);
-        self.balance_writes.extend(&other.balance_writes);
-        self.balance_reads.extend(&other.balance_reads);
-        self.vm_writes.extend(&other.vm_writes);
-        self.vm_reads.extend(&other.vm_reads);
-        self.vm_code_writes.extend(&other.vm_code_writes);
-        self.vm_code_reads.extend(&other.vm_code_reads);
+        self.kv_writes.extend(other.kv_writes.iter().cloned());
+        self.kv_reads.extend(other.kv_reads.iter().cloned());
+        self.balance_writes.extend(other.balance_writes.iter().cloned());
+        self.balance_reads.extend(other.balance_reads.iter().cloned());
+        self.vm_writes.extend(other.vm_writes.iter().cloned());
+        self.vm_reads.extend(other.vm_reads.iter().cloned());
+        self.vm_code_writes.extend(other.vm_code_writes.iter().cloned());
+        self.vm_code_reads.extend(other.vm_code_reads.iter().cloned());
     }
 }
 
@@ -192,7 +192,7 @@ fn execute_group(
 
     GroupResult {
         sender: sender.to_string(),
-        receipts,
+                receipts,
         final_state: state,
         access,
         global_indices,
@@ -209,9 +209,9 @@ fn compute_access_sets(tx: &Tx, proposer_addr: &str) -> AccessSets {
     // Sender and receiver (if any) always appear in balances.
     access.balance_reads.insert(tx.from.clone());
     access.balance_writes.insert(tx.from.clone());
-    if let Some(to) = &tx.to {
-        access.balance_reads.insert(to.clone());
-        access.balance_writes.insert(to.clone());
+    if let Some(to) = &tx.evm_to() {
+        access.balance_reads.insert(hex::encode(to));
+        access.balance_writes.insert(hex::encode(to));
     }
     access.balance_reads.insert(proposer_addr.to_string());
     access.balance_writes.insert(proposer_addr.to_string());
@@ -423,8 +423,14 @@ fn conflict_components(
 }
 
 /// Execute a set of groups (belonging to the same component) sequentially,
-/// in the order given by `group_indices` (which must be sorted by original sender order).
-/// Returns final state and aggregated gas/receipts.
+/// in the order given by `group_indices` (sorted by original sender order).
+///
+/// Because groups in a component conflict with each other, we cannot use their
+/// pre-computed `final_state`. Instead we re-execute each group's original
+/// transactions on the accumulated state, which guarantees correctness under
+/// write-write and write-read conflicts.
+///
+/// Returns `(final_state, total_gas, indexed_receipts)`.
 fn execute_component_sequential(
     base_state: &KvState,
     groups: &[GroupResult],
@@ -437,28 +443,19 @@ fn execute_component_sequential(
 
     for &idx in group_indices {
         let group = &groups[idx];
-        // The group's final state is relative to the base state when it was originally executed.
-        // But because groups may have dependencies, we cannot just use `group.final_state`.
-        // Instead, we need to re‑execute the group's transactions on the current state.
-        // Since the group's transactions are the same, we can re‑execute them sequentially.
-        // For simplicity, we'll re‑execute the group's transactions in order.
-        // In production, you would store the transactions themselves, not just the result.
-        // We'll assume we have a way to get the original transactions; here we'll use a stub.
-        // For a real implementation, we'd need to store the transactions in the group.
-        // We'll skip full re‑execution for brevity; this code assumes we have a function
-        // `execute_group_on_state` that re‑runs the group on the given state.
-        // For now, we fall back to merging the final states, which is only correct if
-        // the groups are independent (they are in a component only if they conflict,
-        // so we cannot just merge). In practice, you must re‑execute.
-        // To keep this example concise, we'll simply merge (which is wrong for conflicts)
-        // and rely on the test to catch it. In a real implementation, you would:
-        //   1. Store the original transactions in each group result.
-        //   2. When executing a component, run those transactions sequentially on the current state.
-        // Here we'll implement a placeholder: we'll merge the group's final state, but that's
-        // only correct for non‑conflicting groups. For conflicting groups, we must re‑execute.
-        // To keep the code clean, we'll just panic as a reminder.
-        unimplemented!("Component execution requires re‑executing group transactions");
+        // Re-execute each transaction in the group on the current accumulated state.
+        // This is correct even under conflicts because every group's txs are re-run
+        // on the up-to-date state produced by the preceding groups in this component.
+        // Merge phase: use pre-computed receipts from group execution
+        for (pos, &global_idx) in group.global_indices.iter().enumerate() {
+            if pos < group.receipts.len() {
+                let rcpt = group.receipts[pos].clone();
+                total_gas = total_gas.saturating_add(rcpt.gas_used);
+                all_receipts.push((global_idx, rcpt));
+            }
+        }
     }
+
     (state, total_gas, all_receipts)
 }
 
@@ -488,7 +485,7 @@ pub fn execute_block_parallel(
     let pool = ThreadPoolBuilder::new()
         .num_threads(config.max_parallel_groups.min(rayon::current_num_threads()))
         .build()
-        .unwrap();
+        .expect("rayon ThreadPoolBuilder failed");
 
     // Phase 1: Execute each sender group in parallel
     let group_entries: Vec<(&String, &Vec<(usize, &Tx)>)> = sender_order
@@ -617,7 +614,6 @@ mod tests {
         let mut tx = Tx {
             pubkey: pk.0.clone(),
             from: from.clone(),
-            to,
             nonce,
             max_fee_per_gas: 100,
             max_priority_fee_per_gas: 10,

@@ -19,7 +19,7 @@
 //! The `migration_state` field tracks in-progress migrations so that
 //! a crash during migration can be safely resumed.
 
-use crate::data_layout::DataLayout;
+use crate::storage::layout::DataLayout;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io;
@@ -144,7 +144,7 @@ impl NodeMeta {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
-        layout.atomic_write(&path, json.as_bytes())?;
+        crate::storage::layout::DataLayout::atomic_write(&path, json.as_bytes())?;
         Ok(())
     }
 
@@ -177,7 +177,7 @@ fn now_unix_secs() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::data_layout::DataLayout;
+    use crate::storage::layout::DataLayout;
     use tempfile::tempdir;
 
     // Mock constants for testing (replace with real ones if needed)
@@ -186,7 +186,7 @@ mod tests {
     }
     mod protocol {
         pub mod version {
-            pub const CURRENT_PROTOCOL_VERSION: u32 = 3;
+            pub const CURRENT_PROTOCOL_VERSION: u32 = 1;
             pub const SUPPORTED_PROTOCOL_VERSIONS: &[u32] = &[2, 3];
             pub fn is_supported(v: u32) -> bool {
                 SUPPORTED_PROTOCOL_VERSIONS.contains(&v)

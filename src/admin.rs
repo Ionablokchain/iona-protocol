@@ -142,7 +142,7 @@ pub fn exec_config(config_path: &str) -> Result<AdminResult, String> {
 pub fn exec_version() -> AdminResult {
     AdminResult::Version {
         version: env!("CARGO_PKG_VERSION").to_string(),
-        commit: env!("VERGEN_GIT_SHA").unwrap_or("unknown").to_string(),
+        commit: env!("VERGEN_GIT_SHA").to_string(),
     }
 }
 
@@ -279,6 +279,7 @@ mod tests {
     fn test_result_to_json() {
         let result = AdminResult::Status {
             info: NodeStatus {
+                disk_usage_human: None,
                 data_dir: "/tmp/test".into(),
                 has_identity: false,
                 has_validator_key: false,

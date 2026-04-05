@@ -12,7 +12,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 // -----------------------------------------------------------------------------
 
 /// Health check response.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct HealthResponse {
     /// "ok" or "degraded" or "error".
     pub status: String,
@@ -92,7 +92,7 @@ impl HealthResponse {
 // -----------------------------------------------------------------------------
 
 /// Validator set summary.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ValidatorSetInfo {
     pub total: usize,
     pub total_power: u64,
@@ -129,6 +129,19 @@ pub struct SyncInfo {
     /// Estimated remaining time in seconds (if known)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub eta_seconds: Option<u64>,
+}
+
+impl Default for SyncInfo {
+    fn default() -> Self {
+        Self {
+            catching_up: false,
+            latest_block_height: 0,
+            latest_block_time: 0,
+            earliest_block_height: 0,
+            earliest_block_time: 0,
+            eta_seconds: None,
+        }
+    }
 }
 
 /// Status response (detailed node info).

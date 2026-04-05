@@ -4,6 +4,7 @@
 //! Gas model follows EVM conventions.
 //! Opcodes: arithmetic, bitwise, memory, storage, control flow, logging, calldata.
 
+
 use crate::vm::{bytecode as op, errors::VmError, gas::GasMeter, state::{Memory, VmState}};
 use sha3::{Digest, Keccak256};
 use std::collections::HashSet;
@@ -25,7 +26,7 @@ pub struct VmResult {
 type Word = [u8; 32];
 
 fn word_to_u64(w: &Word) -> u64 {
-    u64::from_be_bytes(w[24..32].try_into().unwrap())
+    u64::from_be_bytes(w[24..32].try_into().expect("fixed-size slice conversion"))
 }
 
 fn word_to_usize(w: &Word) -> usize {
@@ -81,10 +82,10 @@ fn word_mul(a: &Word, b: &Word) -> Word {
     // Schoolbook 256-bit multiply, keep low 256 bits
     let mut result = [0u64; 8]; // 8 × 32-bit limbs
     let a_limbs: Vec<u32> = (0..8).map(|i| {
-        u32::from_be_bytes(a[i*4..(i+1)*4].try_into().unwrap())
+        u32::from_be_bytes(a[i*4..(i+1)*4].try_into().expect("fixed-size slice conversion"))
     }).rev().collect();
     let b_limbs: Vec<u32> = (0..8).map(|i| {
-        u32::from_be_bytes(b[i*4..(i+1)*4].try_into().unwrap())
+        u32::from_be_bytes(b[i*4..(i+1)*4].try_into().expect("fixed-size slice conversion"))
     }).rev().collect();
 
     for (i, &ai) in a_limbs.iter().enumerate() {
@@ -122,8 +123,8 @@ fn word_div(a: &Word, b: &Word) -> Word {
         return u64_to_word(a_lo / b_lo);
     }
     // Use u128 for 128-bit values
-    let au = u128::from_be_bytes(a[16..32].try_into().unwrap());
-    let bu = u128::from_be_bytes(b[16..32].try_into().unwrap());
+    let au = u128::from_be_bytes(a[16..32].try_into().expect("fixed-size slice conversion"));
+    let bu = u128::from_be_bytes(b[16..32].try_into().expect("fixed-size slice conversion"));
     if a[..16].iter().all(|&x|x==0) && b[..16].iter().all(|&x|x==0) {
         if bu == 0 { return [0u8; 32]; }
         let r = au / bu;
@@ -142,8 +143,8 @@ fn word_rem(a: &Word, b: &Word) -> Word {
     if a[..24].iter().all(|&x|x==0) && b[..24].iter().all(|&x|x==0) {
         return u64_to_word(a_lo % b_lo);
     }
-    let au = u128::from_be_bytes(a[16..32].try_into().unwrap());
-    let bu = u128::from_be_bytes(b[16..32].try_into().unwrap());
+    let au = u128::from_be_bytes(a[16..32].try_into().expect("fixed-size slice conversion"));
+    let bu = u128::from_be_bytes(b[16..32].try_into().expect("fixed-size slice conversion"));
     if a[..16].iter().all(|&x|x==0) && b[..16].iter().all(|&x|x==0) {
         if bu == 0 { return [0u8; 32]; }
         let r = au % bu;
@@ -215,11 +216,11 @@ fn keccak256_bytes(data: &[u8]) -> Word {
 // ── Stack helpers ─────────────────────────────────────────────────────────
 
 fn pop(stack: &mut Vec<Word>) -> Result<Word, VmError> {
-    stack.pop().ok_or(VmError::StackUnderflow)
+    stack.pop().ok_or(VmError::StackUnderflow { pc: 0, needed: 1, available: 0 })
 }
 
 fn push(stack: &mut Vec<Word>, v: Word) -> Result<(), VmError> {
-    if stack.len() >= STACK_LIMIT { return Err(VmError::StackOverflow); }
+    if stack.len() >= STACK_LIMIT { return Err(VmError::StackOverflow { pc: 0, limit: STACK_LIMIT }); }
     stack.push(v);
     Ok(())
 }
@@ -471,7 +472,7 @@ pub fn exec<S: VmState>(
             0x80..=0x8F => {
                 gas.charge(op::GAS_VERYLOW).map_err(|_| VmError::OutOfGas)?;
                 let n = (opcode - 0x80 + 1) as usize;
-                if stack.len() < n { return Err(VmError::StackUnderflow); }
+                if stack.len() < n { return Err(VmError::StackUnderflow { available: stack.len(), needed: n, pc }); }
                 let v = stack[stack.len() - n];
                 push(&mut stack, v)?;
             }
@@ -481,7 +482,7 @@ pub fn exec<S: VmState>(
                 gas.charge(op::GAS_VERYLOW).map_err(|_| VmError::OutOfGas)?;
                 let n = (opcode - 0x90 + 1) as usize;
                 let len = stack.len();
-                if len < n + 1 { return Err(VmError::StackUnderflow); }
+                if len < n + 1 { return Err(VmError::StackUnderflow { available: stack.len(), needed: n, pc }); }
                 stack.swap(len - 1, len - 1 - n);
             }
 
@@ -489,7 +490,7 @@ pub fn exec<S: VmState>(
             op::JUMP => {
                 gas.charge(op::GAS_JUMP).map_err(|_| VmError::OutOfGas)?;
                 let dest = word_to_usize(&pop(&mut stack)?);
-                if !jumpdests.contains(&dest) { return Err(VmError::InvalidJump(dest)); }
+                if !jumpdests.contains(&dest) { return Err(VmError::InvalidJump { pc, dest }); }
                 pc = dest + 1;
             }
             op::JUMPI => {
@@ -497,7 +498,7 @@ pub fn exec<S: VmState>(
                 let dest = word_to_usize(&pop(&mut stack)?);
                 let cond = pop(&mut stack)?;
                 if !word_is_zero(&cond) {
-                    if !jumpdests.contains(&dest) { return Err(VmError::InvalidJump(dest)); }
+                    if !jumpdests.contains(&dest) { return Err(VmError::InvalidJump { pc, dest }); }
                     pc = dest + 1;
                 }
             }
@@ -535,10 +536,10 @@ pub fn exec<S: VmState>(
                 return Ok(VmResult { return_data: data, gas_used: gas.used, reverted: true, logs_count: 0 });
             }
             op::INVALID => {
-                return Err(VmError::InvalidOpcode(op::INVALID));
+                return Err(VmError::InvalidOpcode { opcode: op::INVALID, pc });
             }
 
-            x => return Err(VmError::InvalidOpcode(x)),
+            x => return Err(VmError::InvalidOpcode { opcode: x, pc }),
         }
     }
 

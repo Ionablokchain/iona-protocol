@@ -168,9 +168,9 @@ impl Memory {
         }
         let new_end = offset
             .checked_add(size)
-            .ok_or(VmError::MemoryLimit)?;
+            .ok_or(VmError::MemoryLimit { pc: 0, requested: 0, limit: 0 })?;
         if new_end > MAX_MEMORY_BYTES {
-            return Err(VmError::MemoryLimit);
+            return Err(VmError::MemoryLimit { pc: 0, requested: 0, limit: 0 });
         }
         if new_end > self.data.len() {
             let old_words = (self.data.len() + 31) / 32;
@@ -271,7 +271,7 @@ mod tests {
 
         // Setting empty code removes it.
         storage.set_code(&contract, vec![]);
-        assert_eq!(storage.get_code(&contract), vec![]);
+        assert_eq!(storage.get_code(&contract), Vec::<u8>::new());
     }
 
     #[test]
@@ -345,7 +345,7 @@ mod tests {
         let mut mem = Memory::new();
         // Try to write beyond 4 MiB
         let result = mem.ensure(MAX_MEMORY_BYTES, 1);
-        assert!(matches!(result, Err(VmError::MemoryLimit)));
+        assert!(matches!(result, Err(VmError::MemoryLimit { pc: 0, requested: 0, limit: 0 })));
     }
 
     #[test]

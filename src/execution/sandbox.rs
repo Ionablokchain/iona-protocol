@@ -324,13 +324,13 @@ mod tests {
     fn test_height_affects_seed_fully() {
         // Two blocks with same hash but different heights should have different seeds.
         let hash = Hash32([0x42; 32]);
-        let ctx_low = ExecutionContext::from_block(100, 0, hash, 0, 0, "".into());
-        let ctx_high = ExecutionContext::from_block(300, 0, hash, 0, 0, "".into());
+        let ctx_low = ExecutionContext::from_block(100, 0, hash.clone(), 0, 0, "".into());
+        let ctx_high = ExecutionContext::from_block(300, 0, hash.clone(), 0, 0, "".into());
         assert_ne!(ctx_low.deterministic_seed, ctx_high.deterministic_seed);
 
         // Also test heights that differ only in high byte (e.g., 0x100 vs 0x200).
-        let ctx_a = ExecutionContext::from_block(0x100, 0, hash, 0, 0, "".into());
-        let ctx_b = ExecutionContext::from_block(0x200, 0, hash, 0, 0, "".into());
+        let ctx_a = ExecutionContext::from_block(0x100, 0, hash.clone(), 0, 0, "".into());
+        let ctx_b = ExecutionContext::from_block(0x200, 0, hash.clone(), 0, 0, "".into());
         assert_ne!(ctx_a.deterministic_seed, ctx_b.deterministic_seed);
     }
 

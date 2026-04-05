@@ -3,7 +3,7 @@
 //! This module provides an in‑memory block store suitable for testing and
 //! a file‑based persistent store for production.
 
-use crate::types::{Block, Hash32, Height};
+use iona::types::{Block, Hash32, Height};
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -29,18 +29,18 @@ impl MemBlockStore {
 
 impl BlockStore for MemBlockStore {
     fn get(&self, id: &Hash32) -> Option<Block> {
-        self.by_hash.read().unwrap().get(id).cloned()
+        self.by_hash.read().expect("rwlock read poisoned").get(id).cloned()
     }
 
     fn put(&self, block: Block) {
-        let id = block.id();
+        let id = block.id().clone();
         let height = block.header.height;
         {
-            let mut by_hash = self.by_hash.write().unwrap();
-            by_hash.insert(id, block.clone());
+            let mut by_hash = self.by_hash.write().expect("rwlock write poisoned");
+            by_hash.insert(id.clone(), block.clone());
         }
         {
-            let mut by_height = self.by_height.write().unwrap();
+            let mut by_height = self.by_height.write().expect("rwlock write poisoned");
             by_height.insert(height, id);
         }
     }
@@ -49,7 +49,7 @@ impl BlockStore for MemBlockStore {
 impl MemBlockStore {
     /// Get a block by its height (requires O(log n) lookup).
     pub fn get_by_height(&self, height: Height) -> Option<Block> {
-        let by_height = self.by_height.read().unwrap();
+        let by_height = self.by_height.read().expect("rwlock read poisoned");
         if let Some(id) = by_height.get(&height) {
             self.get(id)
         } else {
@@ -59,12 +59,12 @@ impl MemBlockStore {
 
     /// Return the highest height stored.
     pub fn latest_height(&self) -> Option<Height> {
-        self.by_height.read().unwrap().keys().next_back().copied()
+        self.by_height.read().expect("rwlock read poisoned").keys().next_back().copied()
     }
 
     /// Number of blocks stored.
     pub fn len(&self) -> usize {
-        self.by_hash.read().unwrap().len()
+        self.by_hash.read().expect("rwlock read poisoned").len()
     }
 
     /// Check if the store is empty.
@@ -107,7 +107,7 @@ impl FileBlockStore {
     /// Write the index to disk.
     fn save_index(&self) -> std::io::Result<()> {
         let index_path = self.root.join("index.json");
-        let data = serde_json::to_string_pretty(&*self.index.read().unwrap())
+        let data = serde_json::to_string_pretty(&*self.index.read().expect("rwlock read poisoned"))
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
         fs::write(&index_path, data)
     }
@@ -121,7 +121,7 @@ impl FileBlockStore {
 impl BlockStore for FileBlockStore {
     fn get(&self, id: &Hash32) -> Option<Block> {
         // Find height from index first.
-        let height = self.index.read().unwrap().iter().find_map(|(h, stored_id)| {
+        let height = self.index.read().expect("rwlock read poisoned").iter().find_map(|(h, stored_id)| {
             if stored_id == id { Some(*h) } else { None }
         })?;
         let path = self.block_path(height);
@@ -130,7 +130,7 @@ impl BlockStore for FileBlockStore {
     }
 
     fn put(&self, block: Block) {
-        let id = block.id();
+        let id = block.id().clone();
         let height = block.header.height;
 
         // Write block file
@@ -147,7 +147,7 @@ impl BlockStore for FileBlockStore {
 
         // Update index
         {
-            let mut idx = self.index.write().unwrap();
+            let mut idx = self.index.write().expect("rwlock write poisoned");
             idx.insert(height, id);
         }
         if let Err(e) = self.save_index() {
@@ -159,19 +159,19 @@ impl BlockStore for FileBlockStore {
 impl FileBlockStore {
     /// Get block by height.
     pub fn get_by_height(&self, height: Height) -> Option<Block> {
-        let idx = self.index.read().unwrap();
+        let idx = self.index.read().expect("rwlock read poisoned");
         let id = idx.get(&height)?;
         self.get(id)
     }
 
     /// Latest height stored.
     pub fn latest_height(&self) -> Option<Height> {
-        self.index.read().unwrap().keys().next_back().copied()
+        self.index.read().expect("rwlock read poisoned").keys().next_back().copied()
     }
 
     /// Prune blocks older than `keep` (keep the last `keep` blocks).
     pub fn prune(&self, keep: usize) -> std::io::Result<()> {
-        let heights: Vec<Height> = self.index.read().unwrap().keys().copied().collect();
+        let heights: Vec<Height> = self.index.read().expect("rwlock read poisoned").keys().copied().collect();
         let total = heights.len();
         if total <= keep {
             return Ok(());
@@ -185,7 +185,7 @@ impl FileBlockStore {
         }
         // Update index
         {
-            let mut idx = self.index.write().unwrap();
+            let mut idx = self.index.write().expect("rwlock write poisoned");
             for &h in to_remove {
                 idx.remove(&h);
             }
@@ -199,7 +199,7 @@ impl FileBlockStore {
 // Trait re‑export
 // -----------------------------------------------------------------------------
 
-pub use crate::consensus::engine::BlockStore;
+pub use iona::consensus::engine::BlockStore;
 
 // -----------------------------------------------------------------------------
 // Tests
@@ -208,10 +208,28 @@ pub use crate::consensus::engine::BlockStore;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{Block, BlockHeader, Hash32};
+    use iona::types::{Block, BlockHeader, Hash32};
 
     fn dummy_block(height: Height, hash: u8) -> Block {
-        let mut header = BlockHeader::default();
+        let mut header = BlockHeader {
+            height: 0,
+            round: 0,
+            prev: Hash32::zero(),
+            proposer_pk: vec![],
+            tx_root: Hash32::zero(),
+            receipts_root: Hash32::zero(),
+            state_root: Hash32::zero(),
+            base_fee_per_gas: 0,
+            gas_used: 0,
+            intrinsic_gas_used: 0,
+            exec_gas_used: 0,
+            vm_gas_used: 0,
+            evm_gas_used: 0,
+            chain_id: 0,
+            timestamp: 0,
+            protocol_version: 0,
+            pv: 0,
+        };
         header.height = height;
         let mut block = Block { header, txs: vec![] };
         // Override id with given hash (simulate)
@@ -230,10 +248,10 @@ mod tests {
         store.put(block1.clone());
         store.put(block2.clone());
 
-        assert_eq!(store.get(&block1.id()), Some(block1));
-        assert_eq!(store.get(&block2.id()), Some(block2));
-        assert_eq!(store.get_by_height(1), Some(block1));
-        assert_eq!(store.get_by_height(2), Some(block2));
+        assert_eq!(store.get(&block1.id()), Some(block1.clone()));
+        assert_eq!(store.get(&block2.id()), Some(block2.clone()));
+        assert_eq!(store.get_by_height(1), Some(block1.clone()));
+        assert_eq!(store.get_by_height(2), Some(block2.clone()));
         assert_eq!(store.latest_height(), Some(2));
         assert_eq!(store.len(), 2);
     }
@@ -247,17 +265,19 @@ mod tests {
         store.put(block1.clone());
         store.put(block2.clone());
 
-        assert_eq!(store.get(&block1.id()), Some(block1));
-        assert_eq!(store.get(&block2.id()), Some(block2));
-        assert_eq!(store.get_by_height(1), Some(block1));
-        assert_eq!(store.get_by_height(2), Some(block2));
+        assert_eq!(store.get(&block1.id()), Some(block1.clone()));
+        assert_eq!(store.get(&block2.id()), Some(block2.clone()));
+        assert_eq!(store.get_by_height(1), Some(block1.clone()));
+        assert_eq!(store.get_by_height(2), Some(block2.clone()));
         assert_eq!(store.latest_height(), Some(2));
 
         store.prune(1)?;
         assert_eq!(store.get_by_height(1), None);
-        assert_eq!(store.get_by_height(2), Some(block2));
+        assert_eq!(store.get_by_height(2), Some(block2.clone()));
         assert_eq!(store.latest_height(), Some(2));
 
         Ok(())
     }
 }
+
+fn main() {}

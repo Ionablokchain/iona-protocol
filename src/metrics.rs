@@ -33,7 +33,7 @@ static METRICS: OnceLock<Metrics> = OnceLock::new();
 /// Initialise the metrics system. This must be called once at node startup.
 pub fn init_metrics() -> anyhow::Result<()> {
     let _ = REGISTRY.get_or_init(Registry::new);
-    METRICS.get_or_try_init(Metrics::new)?;
+    METRICS.get_or_init(|| Metrics::new().expect("metrics init failed"));
     Ok(())
 }
 
@@ -136,7 +136,7 @@ pub struct Metrics {
 }
 
 impl Metrics {
-    fn new() -> anyhow::Result<Self> {
+    pub fn new() -> anyhow::Result<Self> {
         let r = registry();
 
         macro_rules! int_counter {

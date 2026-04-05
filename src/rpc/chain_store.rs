@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
 use std::collections::HashSet;
 use std::io::{self, BufRead, BufReader, Write};
@@ -105,31 +106,31 @@ pub fn load_into_state(dir: impl AsRef<Path>, st: &mut EthRpcState) -> io::Resul
     let logs: Vec<Log> = load_jsonl(&f.logs)?;
 
     // Apply
-    *st.blocks.lock().unwrap() = blocks.clone();
-    *st.receipts.lock().unwrap() = receipts.clone();
+    *st.blocks.lock().expect("mutex lock poisoned") = blocks.clone();
+    *st.receipts.lock().expect("mutex lock poisoned") = receipts.clone();
 
     // tx map
     let mut txmap = std::collections::HashMap::new();
     for t in txs {
         txmap.insert(t.hash.clone(), t);
     }
-    *st.txs.lock().unwrap() = txmap;
+    *st.txs.lock().expect("mutex lock poisoned") = txmap;
 
     // receipts_by_block
     let mut rb = std::collections::HashMap::<u64, Vec<Receipt>>::new();
     for r in receipts {
         rb.entry(r.block_number).or_default().push(r);
     }
-    *st.receipts_by_block.lock().unwrap() = rb;
+    *st.receipts_by_block.lock().expect("mutex lock poisoned") = rb;
 
     // logs + indices
-    *st.all_logs.lock().unwrap() = logs;
+    *st.all_logs.lock().expect("mutex lock poisoned") = logs;
 
     // block_number + base_fee best-effort
     if let Some(last) = blocks.last() {
-        *st.block_number.lock().unwrap() = last.number;
+        *st.block_number.lock().expect("mutex lock poisoned") = last.number;
         if let Ok(bf) = u64::from_str_radix(last.base_fee_per_gas.trim_start_matches("0x"), 16) {
-            *st.base_fee.lock().unwrap() = bf;
+            *st.base_fee.lock().expect("mutex lock poisoned") = bf;
         }
     }
 
@@ -146,7 +147,7 @@ pub fn persist_new_block_bundle(dir: impl AsRef<Path>, b: &Block, rs: &[Receipt]
 
 
 fn now_unix() -> u64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs()
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs()
 }
 
 pub fn ensure_meta(dir: impl AsRef<Path>) -> io::Result<Meta> {
@@ -160,7 +161,7 @@ pub fn ensure_meta(dir: impl AsRef<Path>) -> io::Result<Meta> {
         return Ok(m);
     }
     let m = Meta { schema_version: SCHEMA_VERSION, created_at_unix: now_unix() };
-    fs::write(&p, serde_json::to_string_pretty(&m).unwrap())?;
+    fs::write(&p, serde_json::to_string_pretty(&m).expect("chain store metadata serialization failed"))?;
     Ok(m)
 }
 
@@ -214,10 +215,10 @@ pub fn prune_and_compact(dir: impl AsRef<Path>, st: &EthRpcState, keep_blocks: u
     ensure_meta(dir)?;
     let f = files(dir);
 
-    let blocks = st.blocks.lock().unwrap().clone();
-    let receipts = st.receipts.lock().unwrap().clone();
-    let txs_map = st.txs.lock().unwrap().clone();
-    let logs = st.all_logs.lock().unwrap().clone();
+    let blocks = st.blocks.lock().expect("mutex lock poisoned").clone();
+    let receipts = st.receipts.lock().expect("mutex lock poisoned").clone();
+    let txs_map = st.txs.lock().expect("mutex lock poisoned").clone();
+    let logs = st.all_logs.lock().expect("mutex lock poisoned").clone();
 
     let start = blocks.len().saturating_sub(keep_blocks);
     let kept_blocks = blocks[start..].to_vec();
@@ -306,7 +307,7 @@ pub fn query_logs_indexed(dir: impl AsRef<Path>, from: u64, to: u64, address: Op
             let mut out = vec![];
             for e in t_entries {
                 if aset.contains(&(e.tx_hash.clone(), e.log_index)) {
-                    out.push(LogIndexEntry{ block_number: e.block_number, tx_hash: e.tx_hash, log_index: e.log_index });
+                    out.push(LogIndexEntry{ block_number: e.block_number, tx_hash: e.tx_hash, log_index: e.log_index, offset: Some(0) });
                 }
             }
             candidates = out;

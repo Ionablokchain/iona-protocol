@@ -3,6 +3,7 @@
 //! Provides an Ethereum‑compatible JSON‑RPC endpoint with optional block production
 //! (automine or periodic mining) and persistence to disk.
 
+use tracing::debug;
 use clap::Parser;
 use iona::rpc::router::build_router;
 use iona::rpc::eth_rpc::EthRpcState;
@@ -108,7 +109,7 @@ async fn main() -> anyhow::Result<()> {
     st.automine = !args.no_automine;
 
     // Build the HTTP router with the state.
-    let app = build_router(st.clone());
+    let app = build_router(st.clone(), &Default::default());
 
     // Start periodic block production if requested.
     if args.block_time_ms > 0 {
@@ -119,7 +120,7 @@ async fn main() -> anyhow::Result<()> {
             info!(block_time_ms = args.block_time_ms, max_txs, "starting periodic block production");
             loop {
                 sleep(block_time).await;
-                let txpool_len = st2.txpool.lock().unwrap().len();
+                let txpool_len = st2.txpool.lock().expect("txpool mutex poisoned").len();
                 if txpool_len > 0 {
                     if let Err(e) = iona::rpc::eth_rpc::mine_pending_block_public(&st2, max_txs) {
                         error!(error = %e, "periodic mining failed");
@@ -161,7 +162,7 @@ fn init_logging(level: &str) -> anyhow::Result<()> {
         .unwrap_or_else(|_| EnvFilter::new(level));
 
     let subscriber = fmt::Subscriber::builder()
-        .json()
+        
         .with_target(true)
         .with_thread_ids(false)
         .with_env_filter(filter)

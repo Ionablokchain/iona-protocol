@@ -14,15 +14,15 @@
 //! # Example
 //!
 //! ```rust,ignore
-//! use iona::storage::block_store::FsBlockStore;
-//! use iona::types::Block;
-//!
-//! let store = FsBlockStore::open("./data/blocks")?;
-//! store.put(block);
-//! if let Some(block) = store.get(&block.id()) {
-//!     println!("Found block: {}", block.header.height);
-//! }
-//! ```
+// use crate::consensus::engine::BlockStore;
+// use crate::types::Block;
+//
+// let store = FsBlockStore::open("./data/blocks")?;
+// store.put(block);
+// if let Some(block) = store.get(&block.id()) {
+//     println!("Found block: {}", block.header.height);
+// }
+// ```
 
 use crate::types::{Block, Hash32, Height};
 use lru::LruCache;
@@ -168,7 +168,7 @@ impl FsBlockStore {
             cache: Mutex::new({
                 let cap = NonZeroUsize::new(CACHE_SIZE).unwrap_or_else(|| {
                     warn!("CACHE_SIZE=0, falling back to 1");
-                    NonZeroUsize::new(1).unwrap()
+                    NonZeroUsize::new(1).expect("1 is non-zero")
                 });
                 LruCache::new(cap)
             }),
@@ -433,7 +433,7 @@ impl FsBlockStore {
         }
 
         // 6. Update cache last.
-        self.cache.lock().put(id, block);
+        self.cache.lock().put(id, block.clone());
         debug!(height = block.header.height, id = %id_hex, "block stored");
         Ok(())
     }
@@ -614,7 +614,15 @@ impl FsBlockStore {
     /// Returns the block at the given canonical height (if present).
     pub fn get_block_by_height(&self, height: Height) -> Option<Block> {
         let id = self.block_id_by_height(height)?;
-        self.get(&id)
+        // Check cache first
+        if let Some(b) = self.cache.lock().get(&id) {
+            return Some(b.clone());
+        }
+        // Read from disk
+        let path = self.block_path(&id);
+        let data = std::fs::read(&path).ok()?;
+        let block: Block = bincode::deserialize(&data).ok()?;
+        Some(block)
     }
 
     /// Lookup block location for a transaction hash.
@@ -675,19 +683,23 @@ impl crate::consensus::BlockStore for FsBlockStore {
 
 #[cfg(test)]
 mod tests {
+    use crate::consensus::engine::BlockStore;
     use super::*;
     use crate::types::{Block, BlockHeader, Tx};
     use tempfile::tempdir;
 
     fn dummy_block(height: Height, hash_byte: u8) -> Block {
+        let mut sr = [0u8; 32];
+        sr[0] = hash_byte;
         let header = BlockHeader {
+                pv: 0,
             height,
             round: 0,
             prev: Hash32([0; 32]),
             proposer_pk: vec![],
             tx_root: Hash32([0; 32]),
             receipts_root: Hash32([0; 32]),
-            state_root: Hash32([0; 32]),
+            state_root: Hash32(sr),
             base_fee_per_gas: 1,
             gas_used: 0,
             intrinsic_gas_used: 0,

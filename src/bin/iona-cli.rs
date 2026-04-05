@@ -265,7 +265,7 @@ fn print_staking_payload(action: &str, args: &str, usage_hint: &str) {
         "signature": "<your_signature_hex>"
     });
     println!("Example JSON:");
-    println!("{}", serde_json::to_string_pretty(&example).unwrap());
+    println!("{}", serde_json::to_string_pretty(&example).expect("example config serialization failed"));
 }
 
 fn cmd_gov_list(rpc: &str) {
@@ -331,7 +331,7 @@ fn cmd_gov_propose(args: &[String]) {
         "signature": "<your_signature_hex>"
     });
     println!("Example JSON:");
-    println!("{}", serde_json::to_string_pretty(&example).unwrap());
+    println!("{}", serde_json::to_string_pretty(&example).expect("example config serialization failed"));
 }
 
 fn cmd_gov_vote(id_str: &str, vote_str: &str) {
@@ -358,7 +358,7 @@ fn cmd_gov_vote(id_str: &str, vote_str: &str) {
         "signature": "<your_signature_hex>"
     });
     println!("Example JSON:");
-    println!("{}", serde_json::to_string_pretty(&example).unwrap());
+    println!("{}", serde_json::to_string_pretty(&example).expect("example config serialization failed"));
 }
 
 fn cmd_faucet(rpc: &str, address: &str, amount: &str) {
@@ -409,7 +409,7 @@ fn print_vm_deploy_help(init_code_hex: &str) {
         "signature": "<your_signature_hex>"
     });
     println!("Example JSON:");
-    println!("{}", serde_json::to_string_pretty(&example).unwrap());
+    println!("{}", serde_json::to_string_pretty(&example).expect("example config serialization failed"));
     println!();
     println!("After deploy, call the contract with:");
     println!("  iona-cli vm call <contract_address_from_receipt> <calldata_hex>");
@@ -488,7 +488,7 @@ fn main() {
                 }
                 Some("withdraw") => {
                     let val = require(&pos, 2, "staking withdraw <validator>");
-                    print_staking_payload("withdraw", val, "withdraw");
+                    print_staking_payload("withdraw", &val, "withdraw");
                 }
                 Some("register") => {
                     let bps = require(&pos, 2, "staking register <commission_bps>");

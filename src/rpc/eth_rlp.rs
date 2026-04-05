@@ -78,6 +78,9 @@ mod tests {
             address: "0x0000000000000000000000000000000000000000".to_string(),
             topics: vec!["0x0000000000000000000000000000000000000000000000000000000000000000".to_string()],
             data: "0x".to_string(),
+            block_number: 0,
+            log_index: 0,
+            tx_hash: String::new(),
         };
         let encoded = rlp_encode_log(&log).unwrap();
         assert!(!encoded.is_empty());
@@ -90,6 +93,17 @@ mod tests {
             cumulative_gas_used: 21000,
             logs_bloom: "0x".to_string() + &"00".repeat(256),
             logs: vec![],
+            tx_hash: String::new(),
+            block_hash: String::new(),
+            block_number: 0,
+            contract_address: None,
+            from: String::new(),
+            gas_used: 21000,
+            to: String::new(),
+            transaction_hash: String::new(),
+            transaction_index: 0,
+            tx_type: 0,
+            effective_gas_price: "0".to_string(),
         };
         let encoded = rlp_encode_receipt(&receipt).unwrap();
         assert!(!encoded.is_empty());
@@ -101,6 +115,9 @@ mod tests {
             address: "0x123".to_string(),
             topics: vec![],
             data: "0x".to_string(),
+            block_number: 0,
+            log_index: 0,
+            tx_hash: String::new(),
         };
         assert!(rlp_encode_log(&log).is_err());
     }

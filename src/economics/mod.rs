@@ -45,6 +45,7 @@ pub use staking_tx::{
 };
 
 // Optionally, re‑export error types for convenience.
+pub use staking::StakeLedger;
 pub use staking::StakingError as Error;
 
 // Module declarations (kept private to enforce re‑export interface).

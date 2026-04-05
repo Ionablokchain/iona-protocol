@@ -57,7 +57,7 @@ pub fn bloom_or_hex(blooms: &[Bloom]) -> String {
 /// # Errors
 /// If the underlying `keccak_rlp_root` fails (e.g., invalid RLP data), an error string is returned.
 pub fn rlp_root_hex(items: &[Vec<u8>]) -> Result<String, String> {
-    keccak_rlp_root(items).map(|hash| format!("0x{}", hex::encode(hash)))
+    Ok(keccak_rlp_root(items))
 }
 
 #[cfg(test)]
@@ -88,7 +88,9 @@ mod tests {
         b2.0[1] = 0x02;
         let result = bloom_or_hex(&[b1, b2]);
         // Expect hex of a bloom where first byte = 0x01, second = 0x02, rest zero.
-        let expected_hex = "0x".to_string() + &hex::encode(&[0x01, 0x02, 0u8; 254]);
+        let mut expected_bytes = vec![0x01u8, 0x02];
+        expected_bytes.extend_from_slice(&[0u8; 254]);
+        let expected_hex = "0x".to_string() + &hex::encode(&expected_bytes);
         assert_eq!(result, expected_hex);
     }
 
@@ -103,4 +105,9 @@ mod tests {
             "0x56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421"
         );
     }
+}
+
+pub fn pseudo_root(items: &[String]) -> String {
+    if items.is_empty() { return "0x0000000000000000000000000000000000000000000000000000000000000000".to_string(); }
+    keccak_hex(items.join("").as_bytes())
 }

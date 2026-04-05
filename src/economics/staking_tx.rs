@@ -190,13 +190,12 @@ fn apply_register(
         .ok_or(StakingError::CommissionOutOfRange)?;
     staking.validators.insert(from.to_string(), validator);
 
-    // Record self-delegation
-    staking.delegate(from.to_string(), from.to_string(), params.min_stake, |addr| {
-        // At this point, the balance has been reduced, but the closure will be called
-        // to verify balance again. We'll just return the current balance (which is already
-        // reduced, but that's okay because we know we have enough).
-        *kv.balances.get(addr).unwrap_or(&0) as u128
-    }).map_err(|e| e)?;
+    // Record self-delegation (without calling delegate() to avoid double-counting total_stake)
+    let key = (from.to_string(), from.to_string());
+    staking.delegations.insert(key, crate::economics::staking::Delegation {
+        amount: params.min_stake,
+        unbondings: Vec::new(),
+    });
 
     Ok(GAS_REGISTER)
 }
@@ -252,8 +251,11 @@ mod tests {
         // Pre-register alice as validator with some stake
         let validator = EconValidator::new("alice".to_string(), 1_000_000, 500).unwrap();
         staking.validators.insert("alice".to_string(), validator);
-        // Add self-delegation for alice
-        staking.delegate("alice".to_string(), "alice".to_string(), 1_000_000, |_| 1_000_000).unwrap();
+        // Add self-delegation for alice (direct insert to avoid double-counting total_stake)
+        staking.delegations.insert(
+            ("alice".to_string(), "alice".to_string()),
+            crate::economics::staking::Delegation { amount: 1_000_000, unbondings: Vec::new() },
+        );
 
         // Give bob some balance to delegate
         kv.balances.insert("bob".to_string(), 500_000);
@@ -327,7 +329,7 @@ mod tests {
         assert!(staking.validators.contains_key("charlie"));
         assert_eq!(staking.validators["charlie"].commission_bps, 500);
         assert_eq!(staking.validators["charlie"].total_stake, params.min_stake);
-        assert_eq!(*kv.balances.get("charlie").unwrap(), 100_000 - params.min_stake);
+        assert_eq!(*kv.balances.get("charlie").unwrap(), 100_000 - params.min_stake as u64);
     }
 
     #[test]
@@ -361,5 +363,57 @@ mod tests {
         assert!(res.success, "{:?}", res.error);
         assert!(!staking.validators.contains_key("alice"));
         assert_eq!(*kv.balances.get("alice").unwrap(), 1_000_000, "Self-stake returned");
+    }
+}
+
+
+/// Staking transaction kind.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub enum StakingTxKind {
+    Delegate,
+    Undelegate,
+    Withdraw,
+    Register,
+    Deregister,
+}
+
+/// Wrapper for a parsed staking transaction.
+#[derive(Debug, Clone)]
+pub struct StakingTx {
+    pub kind: StakingTxKind,
+    pub from: String,
+    pub validator: Option<String>,
+    pub amount: Option<u128>,
+    pub commission_bps: Option<u64>,
+}
+
+/// Validate a staking transaction payload.
+pub fn validate_staking_tx(payload: &str) -> Result<StakingTx, String> {
+    let parts: Vec<&str> = payload.split_whitespace().collect();
+    if parts.len() < 2 || parts[0] != "stake" {
+        return Err("not a staking transaction".into());
+    }
+    match parts[1] {
+        "delegate" if parts.len() >= 4 => Ok(StakingTx {
+            kind: StakingTxKind::Delegate, from: String::new(),
+            validator: Some(parts[2].to_string()), amount: parts[3].parse().ok(), commission_bps: None,
+        }),
+        "undelegate" if parts.len() >= 4 => Ok(StakingTx {
+            kind: StakingTxKind::Undelegate, from: String::new(),
+            validator: Some(parts[2].to_string()), amount: parts[3].parse().ok(), commission_bps: None,
+        }),
+        "withdraw" if parts.len() >= 3 => Ok(StakingTx {
+            kind: StakingTxKind::Withdraw, from: String::new(),
+            validator: Some(parts[2].to_string()), amount: None, commission_bps: None,
+        }),
+        "register" if parts.len() >= 3 => Ok(StakingTx {
+            kind: StakingTxKind::Register, from: String::new(),
+            validator: None, amount: None, commission_bps: parts[2].parse().ok(),
+        }),
+        "deregister" => Ok(StakingTx {
+            kind: StakingTxKind::Deregister, from: String::new(),
+            validator: None, amount: None, commission_bps: None,
+        }),
+        _ => Err(format!("unknown staking operation: {}", parts[1])),
     }
 }

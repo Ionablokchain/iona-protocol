@@ -24,12 +24,13 @@ use prometheus::{register_int_counter_vec, IntCounterVec, Opts};
 // Prometheus metrics (optional)
 // -----------------------------------------------------------------------------
 
-lazy_static::lazy_static! {
-    #[cfg(feature = "prometheus")]
-    static ref SAFETY_VIOLATIONS: IntCounterVec = register_int_counter_vec!(
-        Opts::new("iona_safety_violations_total", "Number of safety invariant violations"),
-        &["invariant"]
-    ).expect("failed to register safety violations counter");
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+
+/// Safety violation counter.
+pub static SAFETY_VIOLATION_COUNT: AtomicU64 = AtomicU64::new(0);
+
+pub fn record_safety_violation(_kind: &str) {
+    SAFETY_VIOLATION_COUNT.fetch_add(1, AtomicOrdering::Relaxed);
 }
 
 // -----------------------------------------------------------------------------
@@ -394,4 +395,11 @@ mod tests {
         let s = sample_state();
         assert_eq!(total_supply(&s), 1000 + 2000 + 500);
     }
+}
+
+#[derive(Debug, Clone)]
+pub struct SafetyCheck {
+    pub name: String,
+    pub passed: bool,
+    pub detail: String,
 }

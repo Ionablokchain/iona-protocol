@@ -90,7 +90,7 @@ impl PendingTx {
 
     /// Convert back to `EvmTx` (requires decoding the raw bytes).
     pub fn to_evm_tx(&self) -> Result<EvmTx, String> {
-        crate::rpc::tx_decode::decode_typed_tx(&self.raw)
+        crate::rpc::tx_decode::decode_typed_tx(&self.raw).map_err(|e| e.to_string())
     }
 }
 
@@ -128,7 +128,7 @@ pub struct TxPoolMetrics {
 
 /// Mempool with per‑sender nonce lanes, strict replacement rules,
 /// hash index, and efficient pruning.
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TxPool {
     /// Primary storage: sender -> nonce -> transaction.
     by_sender: HashMap<String, BTreeMap<u64, PendingTx>>,
@@ -382,6 +382,12 @@ impl TxPool {
     /// Prune old transactions and enforce size limit.
     /// - Removes any transaction older than `max_age_secs`.
     /// - If total size exceeds `max_total`, keeps the newest `max_total` by insertion time.
+    pub fn all_txs(&self) -> Vec<&PendingTx> {
+        self.by_sender.values()
+            .flat_map(|lane| lane.values())
+            .collect()
+    }
+
     pub fn prune(&mut self, now_secs: u64) {
         // 1. Remove by age.
         let cutoff = now_secs.saturating_sub(self.max_age_secs);

@@ -136,7 +136,7 @@ impl NonceManager {
             return false;
         }
         if nonce > expected {
-            self.pending.insert((sender, nonce), tx);
+            self.pending.insert((sender.clone(), nonce), tx);
             debug!("queued out-of-order transaction from {} (nonce {}, expected {})", sender, nonce, expected);
             return false;
         }
@@ -268,7 +268,7 @@ fn deterministic_shuffle(
 
     for i in (1..n).rev() {
         state = hash_bytes(&state.0);
-        let rand_val = u64::from_le_bytes(state.0[..8].try_into().unwrap());
+        let rand_val = u64::from_le_bytes(state.0[..8].try_into().expect("state hash is >= 8 bytes"));
         let j = (rand_val as usize) % (i + 1);
         items.swap(i, j);
     }
@@ -332,8 +332,9 @@ impl MevMempool {
         }
 
         self.metrics.commits_received += 1;
+        let commit_hash_for_log = commit.commit_hash.clone();
         self.pending_commits.insert(commit.commit_hash.clone(), commit);
-        debug!(hash = ?commit.commit_hash, "commit submitted");
+        debug!(hash = ?commit_hash_for_log, "commit submitted");
         Ok(())
     }
 
@@ -547,7 +548,7 @@ impl MevMempool {
     }
 
     /// Check if a transaction might be a backrun attempt.
-    pub fn is_potential_backrun(&self, tx: &Tx) -> bool {
+    pub fn is_potential_backrun(&mut self, tx: &Tx) -> bool {
         if self.config.backrun_delay_blocks == 0 {
             return false;
         }
@@ -599,9 +600,9 @@ pub fn generate_random_salt() -> Vec<u8> {
     let mut salt = [0u8; 16];
     #[cfg(not(target_arch = "wasm32"))]
     {
-        if let Err(e) = getrandom::getrandom(&mut salt) {
+        if let Err(e) = { use rand::RngCore; rand::thread_rng().fill_bytes(&mut salt); Ok::<(), ()>(()) } {
             // fallback: use a deterministic but unpredictable? We'll just zero and warn.
-            warn!("getrandom failed: {e}, using zero salt (not secure)");
+            warn!("getrandom failed: {:?}, using zero salt (not secure)", e);
         }
     }
     #[cfg(target_arch = "wasm32")]

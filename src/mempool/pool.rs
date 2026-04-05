@@ -348,6 +348,9 @@ impl MempoolTrait for Mempool {
     }
 }
 
+/// Type alias for the standard mempool.
+pub type StandardMempool = Mempool;
+
 // -----------------------------------------------------------------------------
 // Tests
 // -----------------------------------------------------------------------------

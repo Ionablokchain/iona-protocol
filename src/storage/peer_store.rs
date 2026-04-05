@@ -15,7 +15,7 @@
 //! let addrs = store.addrs();
 //! ```
 
-use crate::data_layout::DataLayout;
+use crate::storage::layout::DataLayout;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io;
@@ -43,10 +43,12 @@ struct PeerStoreFile {
 /// All operations that modify the store acquire an internal mutex,
 /// so it is safe to share across threads.
 #[derive(Clone)]
+#[derive(Debug)]
 pub struct PeerStore {
     inner: Arc<Mutex<PeerStoreInner>>,
 }
 
+#[derive(Debug)]
 struct PeerStoreInner {
     path: PathBuf,
     data: PeerStoreFile,
@@ -93,13 +95,13 @@ impl PeerStore {
 
     /// Returns a copy of all known peer addresses.
     pub fn addrs(&self) -> Vec<String> {
-        let inner = self.inner.lock().unwrap();
+        let inner = self.inner.lock().expect("mutex lock poisoned");
         inner.data.addrs.clone()
     }
 
     /// Number of known peer addresses.
     pub fn len(&self) -> usize {
-        let inner = self.inner.lock().unwrap();
+        let inner = self.inner.lock().expect("mutex lock poisoned");
         inner.data.addrs.len()
     }
 
@@ -111,7 +113,7 @@ impl PeerStore {
     /// Adds a new peer address if it is not already present.
     /// Persists the change atomically.
     pub fn add(&self, addr: String) -> io::Result<()> {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.lock().expect("mutex lock poisoned");
         if !inner.data.addrs.contains(&addr) {
             debug!(addr = %addr, "adding new peer address");
             inner.data.addrs.push(addr);
@@ -125,7 +127,7 @@ impl PeerStore {
     /// Removes a peer address if present.
     /// Persists the change atomically.
     pub fn remove(&self, addr: &str) -> io::Result<()> {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.lock().expect("mutex lock poisoned");
         if let Some(pos) = inner.data.addrs.iter().position(|x| x == addr) {
             debug!(addr = %addr, "removing peer address");
             inner.data.addrs.remove(pos);
@@ -139,7 +141,7 @@ impl PeerStore {
     /// Replaces the entire list of addresses.
     /// Persists atomically.
     pub fn set_addrs(&self, new_addrs: Vec<String>) -> io::Result<()> {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.lock().expect("mutex lock poisoned");
         debug!(count = new_addrs.len(), "replacing all peer addresses");
         inner.data.addrs = new_addrs;
         inner.persist()

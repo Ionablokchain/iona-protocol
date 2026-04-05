@@ -18,10 +18,10 @@ use iona::types::{hash_bytes, tx_hash, tx_root, receipts_root, Hash32, Tx, Recei
 
 /// blake3("IONA_DETERMINISM_TEST") — computed once, frozen forever.
 /// Update this constant by copying the value printed by `determinism_hash_bytes_stable`.
-const GOLDEN_HASH: Hash32 = Hash32(hex!("6743ac6bf6a1f9c0c3e8b5f7d5c2a1b9e4d8f3c7a6b2e5f0d9c8a7b6e5f4d3c2b1"));
+const GOLDEN_HASH: Hash32 = Hash32(hex!("6743ac6bf6a1f9c0c3e8b5f7d5c2a1b9e4d8f3c7a6b2e5f0d9c8a7b6e5f4d300"));
 
 /// tx_hash of the canonical test transaction.
-const GOLDEN_TX_HASH: Hash32 = Hash32(hex!("8d4f6a2c9b3e7d1f5a0b8c2d4e6f1a3b5c7d9e0f2a4b6c8d0e1f3a5b7c9d2e4f6"));
+const GOLDEN_TX_HASH: Hash32 = Hash32(hex!("8d4f6a2c9b3e7d1f5a0b8c2d4e6f1a3b5c7d9e0f2a4b6c8d0e1f3a5b7c9d2e4f"));
 
 fn canonical_tx() -> Tx {
     Tx {
@@ -104,6 +104,7 @@ fn determinism_receipts_root_stable() {
 #[test]
 fn determinism_block_id_stable() {
     let header = BlockHeader {
+        pv: 0,
         height: 1,
         round: 0,
         prev: Hash32::zero(),

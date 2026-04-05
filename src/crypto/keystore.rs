@@ -167,11 +167,12 @@ impl Keystore {
     /// Derive a 32‑byte key from a password using Argon2id.
     fn derive_key(password: &str, salt: &[u8]) -> [u8; 32] {
         let argon2 = Argon2::default();
-        let salt_str = SaltString::encode_b64(salt).unwrap();
+        let salt_str = SaltString::encode_b64(salt).expect("32-byte salt fits in SaltString");
         let hash = argon2
             .hash_password(password.as_bytes(), &salt_str)
             .expect("password hashing failed");
-        let hash_bytes = hash.hash.unwrap().as_bytes();
+        let binding = hash.hash.expect("argon2 hash output present");
+        let hash_bytes = binding.as_bytes();
         let mut key = [0u8; 32];
         key.copy_from_slice(&hash_bytes[..32]);
         key
@@ -180,7 +181,7 @@ impl Keystore {
     /// Encrypt data with a password. Returns (salt + nonce + ciphertext).
     fn encrypt(plaintext: &[u8], password: &str) -> Result<Vec<u8>, String> {
         let mut salt = [0u8; 16];
-        OsRng.fill_bytes(&mut salt);
+        rand::RngCore::fill_bytes(&mut OsRng, &mut salt);
         let key = Self::derive_key(password, &salt);
         let cipher = Aes256Gcm::new_from_slice(&key)
             .map_err(|e| format!("failed to create cipher: {e}"))?;
@@ -217,6 +218,7 @@ impl Keystore {
 
 #[cfg(test)]
 mod tests {
+    use crate::crypto::Signer;
     use super::*;
     use tempfile::tempdir;
 
@@ -256,4 +258,30 @@ mod tests {
         let mut ks3 = Keystore::new(&path, true);
         assert!(ks3.load(Some("wrong")).is_err());
     }
+}
+
+pub fn decrypt_seed32_from_file(path: &std::path::Path, password: &str) -> std::io::Result<[u8; 32]> {
+    let data = std::fs::read(path)?;
+    // Simple XOR-based encryption for demo purposes
+    let key_hash = {
+        use sha2::{Digest, Sha256};
+        Sha256::digest(password.as_bytes())
+    };
+    let mut seed = [0u8; 32];
+    for i in 0..32 {
+        seed[i] = data.get(i).copied().unwrap_or(0) ^ key_hash[i];
+    }
+    Ok(seed)
+}
+
+pub fn encrypt_seed32_to_file(path: &std::path::Path, seed: [u8; 32], password: &str) -> std::io::Result<()> {
+    let key_hash = {
+        use sha2::{Digest, Sha256};
+        Sha256::digest(password.as_bytes())
+    };
+    let mut encrypted = [0u8; 32];
+    for i in 0..32 {
+        encrypted[i] = seed[i] ^ key_hash[i];
+    }
+    std::fs::write(path, &encrypted)
 }

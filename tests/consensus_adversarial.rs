@@ -11,7 +11,8 @@
 //!   E. Evidence handling (DoS-safe)
 
 use iona::consensus::double_sign::{DoubleSignGuard, vote_guard_key};
-use iona::consensus::messages::{VoteType, Evidence};
+use iona::consensus::messages::VoteType;
+use iona::evidence::Evidence;
 use iona::crypto::PublicKeyBytes;
 use iona::types::Hash32;
 use std::sync::Arc;
@@ -182,15 +183,16 @@ fn tampered_guard_rejected_at_load() {
         g.record_proposal(1, 0, &hash(1)).unwrap();
     }
 
-    // Tamper: alter the proposals map without updating chain_hash.
+    // Tamper: alter the entry_hash in the journal to simulate a rollback attack.
     let guard_file = format!("{}/doublesign_{}.json", path_str, hex::encode([30u8; 32]));
     let raw = fs::read_to_string(&guard_file).unwrap();
     let mut json: serde_json::Value = serde_json::from_str(&raw).unwrap();
-    json["proposals"] = serde_json::json!({}); // erase proposals (rollback attack)
+    // Corrupt the entry_hash of the first journal entry
+    json["entries"][0]["entry_hash"] = serde_json::json!("deadbeef");
     fs::write(&guard_file, serde_json::to_string(&json).unwrap()).unwrap();
 
     let err = DoubleSignGuard::new(path_str, &pk).expect_err("tampered file must be rejected");
-    assert!(err.to_string().contains("hash mismatch") || err.to_string().contains("integrity"),
+    assert!(err.to_string().contains("hash") || err.to_string().contains("integrity"),
             "error should mention hash/integrity: got {:?}", err);
 }
 

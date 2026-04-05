@@ -629,7 +629,7 @@ mod tests {
             },
         ];
         let c = ConstraintChecker::new(acts, 100, 5).unwrap();
-        let report = c.check_upgrade(3, 5, Some(600), 100); // [600, 700) overlaps
+        let report = c.check_upgrade(3, 5, Some(600), 100); // [600, 700) overlaps with [500, 650)
         assert!(!report.can_upgrade);
         assert!(report.blockers().iter().any(|r| r.id == "UC-7"));
     }
@@ -648,8 +648,9 @@ mod tests {
                 grace_blocks: 150, // [500, 650)
             },
         ];
-        let c = ConstraintChecker::new(acts, 100, 5).unwrap();
-        let report = c.check_upgrade(3, 5, Some(700), 100); // [700, 800) no overlap
+        // current_height=700 means PV=2 is active, so gap to PV=3 is 1 (within MAX_PV_GAP)
+        let c = ConstraintChecker::new(acts, 700, 5).unwrap();
+        let report = c.check_upgrade(3, 5, Some(1000), 100); // [1000, 1100) no overlap with [500, 650)
         assert!(report.can_upgrade, "report: {report}");
     }
 

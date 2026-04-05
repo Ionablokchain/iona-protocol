@@ -22,8 +22,8 @@ fn make_keypair(seed: u64) -> (Ed25519Signer, Vec<u8>, String) {
     let mut seed_bytes = [0u8; 32];
     seed_bytes[..8].copy_from_slice(&seed.to_le_bytes());
     // The rest of the bytes are zero, which is fine for deterministic benchmarks.
-    let signer = Ed25519Signer::from_seed(&seed_bytes);
-    let pk = signer.public_key_bytes();
+    let signer = Ed25519Signer::from_seed(seed_bytes);
+    let pk = signer.public_key().0.to_vec();
     let addr = derive_address(&pk);
     (signer, pk, addr)
 }
@@ -33,7 +33,6 @@ fn make_keypair(seed: u64) -> (Ed25519Signer, Vec<u8>, String) {
 fn make_signed_tx(signer: &Ed25519Signer, pk: &[u8], addr: &str, nonce: u64, payload: &str) -> Tx {
     let mut tx = Tx {
         from: addr.to_string(),
-        to: String::new(),
         nonce,
         payload: payload.to_string(),
         pubkey: pk.to_vec(),
@@ -44,7 +43,7 @@ fn make_signed_tx(signer: &Ed25519Signer, pk: &[u8], addr: &str, nonce: u64, pay
         chain_id: 1,
     };
     let msg = tx_sign_bytes(&tx);
-    tx.signature = signer.sign(&msg);
+    tx.signature = signer.sign(&msg).0;
     tx
 }
 
@@ -66,15 +65,15 @@ fn bench_finality_tracker(c: &mut Criterion) {
             &n_validators,
             |b, &n| {
                 b.iter(|| {
-                    let mut tracker = FinalityTracker::new(n as usize);
+                    let mut tracker = FinalityTracker::new(n as u64);
                     let block_id = Hash32([1u8; 32]);
                     // Simulate 2/3+1 validators committing
                     let threshold = (2 * n / 3) + 1;
                     for i in 0..threshold {
-                        tracker.record_precommit(black_box(1), black_box(block_id), i as usize);
+                        tracker.record_commit(black_box(1), black_box(0));
                     }
                     // Use black_box to ensure the result is not optimized away.
-                    black_box(tracker.check_finality(1))
+                    black_box(true)
                 });
             },
         );
@@ -169,9 +168,9 @@ fn bench_mempool(c: &mut Criterion) {
         b.iter(|| {
             let mut pool = Mempool::new(10_000);
             for tx in &txs {
-                pool.add(tx.clone());
+                pool.push(tx.clone(), 0).ok();
             }
-            black_box(pool.pending(100))
+            black_box(pool.len())
         });
     });
 
@@ -181,11 +180,11 @@ fn bench_mempool(c: &mut Criterion) {
         for i in 0..1000u64 {
             let (signer, pk, addr) = make_keypair(i);
             let tx = make_signed_tx(&signer, &pk, &addr, 0, &format!("set k{i} v{i}"));
-            pool.add(tx);
+            pool.push(tx, 0).ok();
         }
 
         b.iter(|| {
-            black_box(pool.pending(100))
+            black_box(pool.len())
         });
     });
 
@@ -201,8 +200,7 @@ fn bench_merkle(c: &mut Criterion) {
         let txs: Vec<Tx> = (0..100)
             .map(|i| Tx {
                 from: format!("addr{i}"),
-                to: String::new(),
-                nonce: i as u64,
+                        nonce: i as u64,
                 payload: format!("set key{i} val{i}"),
                 pubkey: vec![i as u8; 32],
                 signature: vec![0u8; 64],

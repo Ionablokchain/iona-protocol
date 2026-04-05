@@ -80,25 +80,25 @@ pub fn load_snapshot(dir: impl AsRef<Path>) -> io::Result<Option<StateSnapshot>>
     }
 
     let data = fs::read_to_string(&path)?;
+
+    // Check version first before full deserialization
+    #[derive(serde::Deserialize)]
+    struct VersionCheck { version: u32 }
+    if let Ok(vc) = serde_json::from_str::<VersionCheck>(&data) {
+        if vc.version != SNAPSHOT_VERSION {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "incompatible snapshot version: expected {}, got {}",
+                    SNAPSHOT_VERSION, vc.version
+                ),
+            ));
+        }
+    }
+
     let snap: StateSnapshot = serde_json::from_str(&data)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
 
-    // Validate version
-    if snap.version != SNAPSHOT_VERSION {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!(
-                "incompatible snapshot version: expected {}, got {}",
-                SNAPSHOT_VERSION, snap.version
-            ),
-        ));
-    }
-
-    info!(
-        block_number = snap.block_number,
-        chain_id = snap.chain_id,
-        "RPC state snapshot loaded"
-    );
     Ok(Some(snap))
 }
 
@@ -128,14 +128,14 @@ pub fn snapshot_from_state(st: &EthRpcState) -> StateSnapshot {
     // To ensure consistency, we need to lock all mutable parts simultaneously.
     // Here we assume the state's internal locks are ordered to avoid deadlocks.
     // We take each lock in a fixed order.
-    let block_number = *st.block_number.lock().unwrap();
-    let base_fee = *st.base_fee.lock().unwrap();
-    let blocks = st.blocks.lock().unwrap().clone();
-    let receipts = st.receipts.lock().unwrap().clone();
-    let txs = st.txs.lock().unwrap().clone();
-    let receipts_by_block = st.receipts_by_block.lock().unwrap().clone();
-    let pending_withdrawals = st.pending_withdrawals.lock().unwrap().clone();
-    let txpool = st.txpool.lock().unwrap().clone();
+    let block_number = *st.block_number.lock().expect("mutex lock poisoned");
+    let base_fee = *st.base_fee.lock().expect("mutex lock poisoned");
+    let blocks = st.blocks.lock().expect("mutex lock poisoned").clone();
+    let receipts = st.receipts.lock().expect("mutex lock poisoned").clone();
+    let txs = st.txs.lock().expect("mutex lock poisoned").clone();
+    let receipts_by_block = st.receipts_by_block.lock().expect("mutex lock poisoned").clone();
+    let pending_withdrawals = st.pending_withdrawals.lock().expect("mutex lock poisoned").clone();
+    let txpool = st.txpool.lock().expect("mutex lock poisoned").clone();
 
     StateSnapshot::new(
         st.chain_id,
@@ -153,14 +153,14 @@ pub fn snapshot_from_state(st: &EthRpcState) -> StateSnapshot {
 /// Apply a snapshot to an existing `EthRpcState`, overwriting its current state.
 pub fn apply_snapshot_to_state(st: &mut EthRpcState, snap: StateSnapshot) {
     st.chain_id = snap.chain_id;
-    *st.block_number.lock().unwrap() = snap.block_number;
-    *st.base_fee.lock().unwrap() = snap.base_fee;
-    *st.blocks.lock().unwrap() = snap.blocks;
-    *st.receipts.lock().unwrap() = snap.receipts;
-    *st.txs.lock().unwrap() = snap.txs;
-    *st.receipts_by_block.lock().unwrap() = snap.receipts_by_block;
-    *st.pending_withdrawals.lock().unwrap() = snap.pending_withdrawals;
-    *st.txpool.lock().unwrap() = snap.txpool;
+    *st.block_number.lock().expect("mutex lock poisoned") = snap.block_number;
+    *st.base_fee.lock().expect("mutex lock poisoned") = snap.base_fee;
+    *st.blocks.lock().expect("mutex lock poisoned") = snap.blocks;
+    *st.receipts.lock().expect("mutex lock poisoned") = snap.receipts;
+    *st.txs.lock().expect("mutex lock poisoned") = snap.txs;
+    *st.receipts_by_block.lock().expect("mutex lock poisoned") = snap.receipts_by_block;
+    *st.pending_withdrawals.lock().expect("mutex lock poisoned") = snap.pending_withdrawals;
+    *st.txpool.lock().expect("mutex lock poisoned") = snap.txpool;
 
     info!(
         block_number = snap.block_number,
@@ -178,9 +178,9 @@ pub fn maybe_persist(st: &EthRpcState) {
     };
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .unwrap()
+        .unwrap_or_default()
         .as_secs();
-    let mut last = st.last_persist_secs.lock().unwrap();
+    let mut last = st.last_persist_secs.lock().expect("mutex lock poisoned");
     if now.saturating_sub(*last) < st.persist_interval_secs {
         return;
     }

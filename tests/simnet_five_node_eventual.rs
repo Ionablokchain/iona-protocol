@@ -1,10 +1,10 @@
 
-use iona::consensus::{ConsensusMsg, SimpleBlockProducer, SimpleProducerCfg, Validator, ValidatorSet, BlockStore, Outbox, Engine, Step, Config};
+use iona::consensus::{ConsensusMsg, Validator, ValidatorSet, BlockStore, Outbox, Engine, Step, Config, Proposal, proposal_sign_bytes};
 use iona::crypto::ed25519::{Ed25519Keypair, Ed25519Verifier};
 use iona::crypto::Signer;
 use iona::types::{Hash32, Block};
 use iona::slashing::StakeLedger;
-use iona::execution::KvState;
+use iona::execution::{KvState, build_block};
 use iona::net::simnet::{SimNet, NetMsg, NodeId, SimNetConfig};
 
 use std::collections::HashMap;
@@ -124,16 +124,44 @@ async fn five_nodes_eventually_receive_block_under_loss() {
         tasks.push(tokio::spawn(pump(rx, eng_c, signer, store, out_c, net, (i+1) as u64)));
     }
 
-    // Producer: use node1 engine, proposer determined by round-robin
-    let producer = SimpleBlockProducer::new(SimpleProducerCfg { max_txs: 0, include_block_in_proposal: false });
+    // Engine uses proposer_for(height, round) = vals[(height+round) % n].
+    // height=1 round=0 => vals[(1+0)%5] = vals[1] => ks[1] is proposer.
+    let proposer_key = &ks[1];
+    let proposer_addr = hex::encode(&blake3::hash(&proposer_key.public_key().0).as_bytes()[..20]);
+
     let block_id: Hash32;
     {
-        let mut eng = engines[0].lock().await;
+        let eng = engines[0].lock().await;
         assert_eq!(eng.state.step, Step::Propose);
-        // height=1 round=0 proposer idx=(1+0)%5=1 => validator #2 (seed [2;32])
         let mut ob = outboxes[0].lock().await;
-        assert!(producer.try_produce(&mut *eng, &ks[1], stores[0].as_ref(), &mut *ob, vec![]));
-        block_id = eng.state.proposal.as_ref().unwrap().block_id.clone();
+
+        // Build block directly.
+        let (block, _next_state, _receipts) = build_block(
+            eng.state.height, eng.state.round,
+            Hash32([0u8; 32]),
+            proposer_key.public_key().0.clone(),
+            &proposer_addr,
+            &eng.app_state, eng.base_fee_per_gas,
+            vec![], 0, 0,
+        );
+        let bid = block.id();
+
+        // Build a light proposal (no block attached).
+        let sign_bytes = proposal_sign_bytes(eng.state.height, eng.state.round, &bid, None);
+        let sig = proposer_key.sign(&sign_bytes);
+        let proposal = Proposal {
+            height: eng.state.height,
+            round: eng.state.round,
+            proposer: proposer_key.public_key(),
+            block_id: bid.clone(),
+            block: None,
+            pol_round: None,
+            signature: sig,
+        };
+
+        block_id = bid;
+        stores[0].put(block);
+        ob.broadcast(ConsensusMsg::Proposal(proposal));
         assert!(stores[0].get(&block_id).is_some());
     }
 

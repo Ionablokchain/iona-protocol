@@ -124,7 +124,7 @@ impl GenesisConfig {
             return Err(GenesisError::InvalidActivations("empty activation list".into()));
         }
         let has_v1_at_zero = self.protocol_activations.iter().any(|a| {
-            a.protocol_version == 1 && a.activation_height == Some(0)
+            a.protocol_version == 1 && (a.activation_height == Some(0) || a.activation_height.is_none())
         });
         if !has_v1_at_zero {
             return Err(GenesisError::InvalidActivations(

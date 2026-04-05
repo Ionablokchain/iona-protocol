@@ -57,12 +57,12 @@ fn invariant_balance_conservation() {
 /// INVARIANT: Nonces must be strictly increasing per sender in mempool.
 #[test]
 fn invariant_mempool_nonce_ordering() {
-    let mut pool = Mempool::new(1000);
+    let mut pool = iona::mempool::pool::Mempool::new(1000);
 
     // Submit nonces 0, 1, 2 for alice
-    pool.push(make_tx("alice", 0, 10, 5, "set x 1")).unwrap();
-    pool.push(make_tx("alice", 1, 10, 5, "set x 2")).unwrap();
-    pool.push(make_tx("alice", 2, 10, 5, "set x 3")).unwrap();
+    pool.push(make_tx("alice", 0, 10, 5, "set x 1"), 0).unwrap();
+    pool.push(make_tx("alice", 1, 10, 5, "set x 2"), 0).unwrap();
+    pool.push(make_tx("alice", 2, 10, 5, "set x 3"), 0).unwrap();
 
     let drained = pool.drain_best(10);
     // Must be in nonce order
@@ -75,20 +75,20 @@ fn invariant_mempool_nonce_ordering() {
 /// INVARIANT: Mempool must reject duplicate nonce without sufficient fee bump.
 #[test]
 fn invariant_mempool_no_duplicate_nonce_without_rbf() {
-    let mut pool = Mempool::new(1000);
-    pool.push(make_tx("alice", 0, 100, 50, "set x 1")).unwrap();
+    let mut pool = iona::mempool::pool::Mempool::new(1000);
+    pool.push(make_tx("alice", 0, 100, 50, "set x 1"), 0).unwrap();
     // Same nonce, same tip — should be rejected
-    let res = pool.push(make_tx("alice", 0, 100, 50, "set x 2"));
+    let res = pool.push(make_tx("alice", 0, 100, 50, "set x 2"), 0);
     assert!(res.is_err(), "INVARIANT VIOLATED: duplicate nonce accepted without fee bump");
 }
 
 /// INVARIANT: After confirming nonce N, mempool must not return txs with nonce < N.
 #[test]
 fn invariant_mempool_remove_confirmed() {
-    let mut pool = Mempool::new(1000);
-    pool.push(make_tx("alice", 0, 10, 5, "set x 0")).unwrap();
-    pool.push(make_tx("alice", 1, 10, 5, "set x 1")).unwrap();
-    pool.push(make_tx("alice", 2, 10, 5, "set x 2")).unwrap();
+    let mut pool = iona::mempool::pool::Mempool::new(1000);
+    pool.push(make_tx("alice", 0, 10, 5, "set x 0"), 0).unwrap();
+    pool.push(make_tx("alice", 1, 10, 5, "set x 1"), 0).unwrap();
+    pool.push(make_tx("alice", 2, 10, 5, "set x 2"), 0).unwrap();
 
     // Confirm nonce 0 and 1
     pool.remove_confirmed("alice", 2);
@@ -105,10 +105,10 @@ fn invariant_mempool_remove_confirmed() {
 #[test]
 fn invariant_mempool_cap() {
     let cap = 5;
-    let mut pool = Mempool::new(cap);
+    let mut pool = iona::mempool::pool::Mempool::new(cap);
     for i in 0..10u64 {
         let sender = format!("user{}", i);
-        let _ = pool.push(make_tx(&sender, 0, 10, 5, "set x 1"));
+        let _ = pool.push(make_tx(&sender, 0, 10, 5, "set x 1"), 0);
     }
     assert!(
         pool.len() <= cap,

@@ -1,10 +1,10 @@
 
-use iona::consensus::{ConsensusMsg, SimpleBlockProducer, SimpleProducerCfg, Validator, ValidatorSet, BlockStore, Outbox, Engine, Step, Config};
+use iona::consensus::{ConsensusMsg, Validator, ValidatorSet, BlockStore, Outbox, Engine, Step, Config, Proposal, proposal_sign_bytes};
 use iona::crypto::ed25519::{Ed25519Keypair, Ed25519Verifier};
 use iona::crypto::Signer;
 use iona::types::{Hash32, Block};
 use iona::slashing::StakeLedger;
-use iona::execution::KvState;
+use iona::execution::{KvState, build_block};
 use iona::net::simnet::{SimNet, NetMsg, SimNetConfig};
 
 use std::collections::HashMap;
@@ -102,16 +102,46 @@ async fn partition_then_heal_converges_without_double_proposals() {
     let t3 = tokio::spawn(pump(rx3, engines[2].clone(), ks[0].clone(), stores[2].clone(), outs[2].clone(), net3.clone(), 3));
     let t4 = tokio::spawn(pump(rx4, engines[3].clone(), ks[0].clone(), stores[3].clone(), outs[3].clone(), net4.clone(), 4));
 
-    // Producer is validator idx=(1+0)%4 = 1 => key #2, node 1 triggers producer logic
-    let producer = SimpleBlockProducer::new(SimpleProducerCfg { max_txs: 0, include_block_in_proposal: false });
+    // Engine uses proposer_for(height, round) = vals[(height+round) % n].
+    // height=1 round=0 => vals[(1+0)%4] = vals[1] => ks[1] is proposer.
+    let proposer_key = &ks[1];
+    let proposer_addr = hex::encode(&blake3::hash(&proposer_key.public_key().0).as_bytes()[..20]);
 
     let block_id: Hash32;
     {
         let mut eng = engines[0].lock().await;
         assert_eq!(eng.state.step, Step::Propose);
         let mut ob = outs[0].lock().await;
-        assert!(producer.try_produce(&mut *eng, &ks[1], stores[0].as_ref(), &mut *ob, vec![]));
-        block_id = eng.state.proposal.as_ref().unwrap().block_id.clone();
+
+        let (block, _next_state, _receipts) = build_block(
+            eng.state.height, eng.state.round,
+            Hash32([0u8; 32]),
+            proposer_key.public_key().0.clone(),
+            &proposer_addr,
+            &eng.app_state, eng.base_fee_per_gas,
+            vec![], 0, 0,
+        );
+        let bid = block.id();
+
+        let sign_bytes = proposal_sign_bytes(eng.state.height, eng.state.round, &bid, None);
+        let sig = proposer_key.sign(&sign_bytes);
+        let proposal = Proposal {
+            height: eng.state.height,
+            round: eng.state.round,
+            proposer: proposer_key.public_key(),
+            block_id: bid.clone(),
+            block: None,
+            pol_round: None,
+            signature: sig,
+        };
+
+        block_id = bid;
+        stores[0].put(block);
+        // Feed proposal into node 0's engine so it records it locally.
+        let proposal_msg = ConsensusMsg::Proposal(proposal.clone());
+        let _ = eng.on_message(&ks[1], stores[0].as_ref(), &mut *ob, proposal_msg);
+        // Also broadcast so other nodes in the same partition receive it.
+        ob.broadcast(ConsensusMsg::Proposal(proposal));
         assert!(stores[0].get(&block_id).is_some());
     }
 

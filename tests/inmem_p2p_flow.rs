@@ -9,7 +9,7 @@
 
 use iona::consensus::{
     ConsensusMsg, SimpleBlockProducer, SimpleProducerCfg, Validator, ValidatorSet,
-    BlockStore, Outbox, Engine, Step, Config,
+    BlockStore, Outbox, Engine, Step, Config, ValidatorIdentity,
 };
 use iona::crypto::ed25519::{Ed25519Keypair, Ed25519Verifier};
 use iona::crypto::Signer;
@@ -165,24 +165,37 @@ async fn inmem_network_delivers_proposal_to_observer() {
     // At height 1, round 0, the producer is validator with index (height + round) % n = (1+0)%2 = 1,
     // which is validator 2 (keypair2). We'll let node2 produce the block.
     let producer = SimpleBlockProducer::new(SimpleProducerCfg {
-        max_txs: 0,
+        max_txs: 100,
         include_block_in_proposal: true,
+        allow_empty_blocks: true,
     });
+
+    // Build validator identities for proposer selection.
+    let addr1 = hex::encode(&blake3::hash(&keypair1.public_key().0).as_bytes()[..20]);
+    let addr2 = hex::encode(&blake3::hash(&keypair2.public_key().0).as_bytes()[..20]);
+    // Order validators so that at height=1, round=0: index = (0+0)%2 = 0 → addr2 is proposer.
+    let val_ids = vec![
+        ValidatorIdentity::new(&addr2),
+        ValidatorIdentity::new(&addr1),
+    ];
 
     {
         // Lock node2's engine and outbox to produce.
-        let mut eng2 = engine2.lock().await;
+        let eng2 = engine2.lock().await;
         // Ensure engine is in Propose step.
         assert_eq!(eng2.state.step, Step::Propose);
         let mut out2 = outbox2.lock().await;
         let produced = producer.try_produce(
-            &mut *eng2,
-            &keypair2,
-            store2.as_ref(),
-            &mut *out2,
-            vec![], // no extra txs
-        );
-        assert!(produced, "Producer should have created a proposal");
+            eng2.state.height, eng2.state.round, None, [0u8; 32],
+            &eng2.app_state, eng2.base_fee_per_gas, &keypair2,
+            &addr2,
+            keypair2.public_key().0.clone(), &val_ids, &[], false,
+        ).ok().flatten();
+        assert!(produced.is_some(), "Producer should have created a proposal");
+        let (proposal, block) = produced.unwrap();
+        // Store the block locally and broadcast the proposal.
+        store2.put(block);
+        out2.broadcast(ConsensusMsg::Proposal(proposal));
     }
 
     // Wait for the proposal to be delivered to node1 (observer).

@@ -14,6 +14,24 @@ pub type H160 = [u8; 20];
 ///
 /// Withdrawals are included in the execution block header via the `withdrawals_root` field,
 /// which is the root of an ordered Merkle‑Patricia Trie over RLP‑encoded withdrawals.
+fn deserialize_hex_address<'de, D>(deserializer: D) -> Result<[u8; 20], D::Error>
+where D: serde::Deserializer<'de> {
+    let s: String = serde::Deserialize::deserialize(deserializer)?;
+    let hex_str = s.trim_start_matches("0x");
+    let bytes = hex::decode(hex_str).map_err(serde::de::Error::custom)?;
+    if bytes.len() != 20 {
+        return Err(serde::de::Error::custom("address must be 20 bytes"));
+    }
+    let mut arr = [0u8; 20];
+    arr.copy_from_slice(&bytes);
+    Ok(arr)
+}
+
+fn serialize_hex_address<S>(addr: &[u8; 20], serializer: S) -> Result<S::Ok, S::Error>
+where S: serde::Serializer {
+    serializer.serialize_str(&format!("0x{}", hex::encode(addr)))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Withdrawal {
     /// Unique index of the withdrawal.
@@ -21,6 +39,7 @@ pub struct Withdrawal {
     /// Index of the validator making the withdrawal.
     pub validator_index: u64,
     /// Execution layer address receiving the funds.
+    #[serde(serialize_with = "serialize_hex_address", deserialize_with = "deserialize_hex_address")]
     pub address: H160,
     /// Amount in Gwei (1 Gwei = 10^9 wei).
     pub amount_gwei: u64,

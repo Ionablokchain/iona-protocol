@@ -284,7 +284,7 @@ struct GuardInner {
     index: GuardIndex,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct DoubleSignGuard {
     path: PathBuf,
     inner: Arc<Mutex<GuardInner>>,
@@ -352,7 +352,7 @@ impl DoubleSignGuard {
         if let Some(existing) = inner.index.proposals.get(&key) {
             if existing != &want {
                 return Err(format!(
-                    "DOUBLE-PROPOSAL REFUSED height={height} round={round} existing={existing} attempted={want}"
+                    "equivocation: DOUBLE-PROPOSAL REFUSED height={height} round={round} existing={existing} attempted={want}"
                 ));
             }
         }
@@ -372,7 +372,7 @@ impl DoubleSignGuard {
             round,
             block_id: h32_hex(block_id),
         };
-        self.append_checked(record, "DOUBLE-PROPOSAL REFUSED")
+        self.append_checked(record, "equivocation: DOUBLE-PROPOSAL REFUSED")
     }
 
     pub fn check_and_record_proposal(
@@ -402,7 +402,7 @@ impl DoubleSignGuard {
         if let Some(existing) = inner.index.votes.get(&key) {
             if existing != &want {
                 return Err(format!(
-                    "DOUBLE-VOTE REFUSED type={vt:?} height={height} round={round} existing={existing} attempted={want}"
+                    "equivocation: DOUBLE-VOTE REFUSED type={vt:?} height={height} round={round} existing={existing} attempted={want}"
                 ));
             }
         }
@@ -424,7 +424,7 @@ impl DoubleSignGuard {
             round,
             block_id: opt_h32_hex(block_id),
         };
-        self.append_checked(record, "DOUBLE-VOTE REFUSED")
+        self.append_checked(record, "equivocation: DOUBLE-VOTE REFUSED")
     }
 
     pub fn check_and_record_vote(

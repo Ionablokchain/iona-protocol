@@ -46,7 +46,6 @@ impl AccessListItem {
 
     /// Returns `true` if the access list item is valid (no additional checks needed).
     pub fn is_valid(&self) -> bool {
-        // No inherent validity rules beyond type correctness.
         true
     }
 }
@@ -192,10 +191,15 @@ impl EvmTx {
         // Additional checks:
         match self {
             EvmTx::Eip2930 { gas_limit, access_list, .. }
-            | EvmTx::Legacy { gas_limit, .. }
             | EvmTx::Eip1559 { gas_limit, access_list, .. } => {
                 if *gas_limit == 0 {
                     return false; // Gas limit must be positive
+                }
+            }
+        
+            EvmTx::Legacy { gas_limit, .. } => {
+                if *gas_limit == 0 {
+                    return false;
                 }
             }
         }
@@ -217,41 +221,144 @@ impl EvmTx {
         match self {
             EvmTx::Eip2930 { .. } => "eip2930",
             EvmTx::Legacy { .. } => "legacy",
-            EvmTx::Eip1559 { .. } => "eip1559",
+            EvmTx::Legacy { .. } | EvmTx::Eip1559 { .. } => "eip1559",
         }
     }
 
-    /// Computes the transaction hash (Keccak256 of the RLP-encoded transaction *without* signature).
-    /// This matches Ethereum's `tx.hash` semantics.
+    /// Computes the transaction hash (Keccak256 of the RLP-encoded signing payload).
     ///
-    /// Note: This function requires the `rlp` crate and the `keccak-hash` crate.
-    /// It is implemented as a placeholder; you will need to add the actual RLP encoding.
+    /// Matches Ethereum semantics:
+    /// - Legacy (EIP-155): keccak256(rlp([nonce, gas_price, gas_limit, to, value, data, chain_id, 0, 0]))
+    /// - EIP-2930: keccak256(0x01 || rlp([chain_id, nonce, gas_price, gas_limit, to, value, data, access_list]))
+    /// - EIP-1559: keccak256(0x02 || rlp([chain_id, nonce, max_priority_fee_per_gas, max_fee_per_gas, gas_limit, to, value, data, access_list]))
     #[cfg(feature = "evm_hash")]
     pub fn hash(&self) -> H256 {
-        use keccak_hash::keccak;
-        use rlp::Encodable;
+        use sha3::{Digest, Keccak256};
 
-        // Encode the transaction according to its type.
-        // This is a placeholder – you must implement the actual RLP encoding.
+        /// RLP-encode a big-endian minimal integer (strips leading zeros).
+        fn rlp_uint(n: u128) -> Vec<u8> {
+            if n == 0 {
+                return vec![0x80]; // RLP empty string = 0
+            }
+            let bytes = n.to_be_bytes();
+            let start = bytes.iter().position(|&b| b != 0).unwrap_or(15);
+            let stripped = &bytes[start..];
+            rlp_bytes_encode(stripped)
+        }
+
+        fn rlp_uint64(n: u64) -> Vec<u8> {
+            rlp_uint(n as u128)
+        }
+
+        /// RLP-encode a raw byte string.
+        fn rlp_bytes_encode(b: &[u8]) -> Vec<u8> {
+            if b.len() == 1 && b[0] < 0x80 {
+                return b.to_vec();
+            }
+            let mut out = rlp_length_prefix(b.len(), 0x80);
+            out.extend_from_slice(b);
+            out
+        }
+
+        /// RLP length prefix for strings/lists.
+        fn rlp_length_prefix(len: usize, base: u8) -> Vec<u8> {
+            if len <= 55 {
+                vec![base + len as u8]
+            } else {
+                let len_bytes = {
+                    let b = len.to_be_bytes();
+                    let s = b.iter().position(|&x| x != 0).unwrap_or(7);
+                    b[s..].to_vec()
+                };
+                let mut out = vec![base + 55 + len_bytes.len() as u8];
+                out.extend_from_slice(&len_bytes);
+                out
+            }
+        }
+
+        /// RLP-encode a list of already-encoded items.
+        fn rlp_list(items: &[Vec<u8>]) -> Vec<u8> {
+            let payload: Vec<u8> = items.iter().flat_map(|v| v.iter().copied()).collect();
+            let mut out = rlp_length_prefix(payload.len(), 0xc0);
+            out.extend_from_slice(&payload);
+            out
+        }
+
+        /// RLP-encode an optional 20-byte address (None = empty string = contract creation).
+        fn rlp_addr(a: &Option<Address20>) -> Vec<u8> {
+            match a {
+                None => vec![0x80], // empty
+                Some(addr) => rlp_bytes_encode(addr),
+            }
+        }
+
+        /// RLP-encode an access list item.
+        fn rlp_access_item(item: &AccessListItem) -> Vec<u8> {
+            let addr_enc = rlp_bytes_encode(&item.address);
+            let keys_items: Vec<Vec<u8>> = item.storage_keys.iter()
+                .map(|k| rlp_bytes_encode(k))
+                .collect();
+            let keys_enc = rlp_list(&keys_items);
+            rlp_list(&[addr_enc, keys_enc])
+        }
+
+        /// RLP-encode an access list.
+        fn rlp_access_list(al: &[AccessListItem]) -> Vec<u8> {
+            let items: Vec<Vec<u8>> = al.iter().map(rlp_access_item).collect();
+            rlp_list(&items)
+        }
+
         let rlp_bytes = match self {
-            EvmTx::Legacy { .. } => {
-                // Legacy: [nonce, gas_price, gas_limit, to, value, data, v, r, s]
-                // For hash we exclude signature fields (v, r, s are zero or omitted).
-                // In Ethereum, the hash is over the transaction *without* the signature,
-                // but with a dummy `v` for chain ID (EIP-155). This is complex.
-                // We'll omit full implementation here; you need to match the exact Ethereum rules.
-                unimplemented!("Legacy tx hash requires EIP-155 chain ID handling")
+            // EIP-155 Legacy: hash = keccak256(rlp([nonce, gas_price, gas_limit, to, value, data, chain_id, 0, 0]))
+            EvmTx::Legacy { nonce, gas_price, gas_limit, to, value, data, chain_id, .. } => {
+                rlp_list(&[
+                    rlp_uint64(*nonce),
+                    rlp_uint(*gas_price),
+                    rlp_uint64(*gas_limit),
+                    rlp_addr(to),
+                    rlp_uint(*value),
+                    rlp_bytes_encode(data),
+                    rlp_uint64(*chain_id),  // v = chain_id for EIP-155 signing
+                    vec![0x80],              // r = 0
+                    vec![0x80],              // s = 0
+                ])
             }
-            EvmTx::Eip2930 { .. } => {
-                // EIP-2930: [chain_id, nonce, gas_price, gas_limit, to, value, data, access_list]
-                unimplemented!("EIP-2930 tx hash requires RLP encoding")
+            // EIP-2930: hash = keccak256(0x01 || rlp([chain_id, nonce, gas_price, gas_limit, to, value, data, access_list]))
+            EvmTx::Eip2930 { chain_id, nonce, gas_price, gas_limit, to, value, data, access_list, .. } => {
+                let mut payload = vec![0x01u8];
+                payload.extend_from_slice(&rlp_list(&[
+                    rlp_uint64(*chain_id),
+                    rlp_uint64(*nonce),
+                    rlp_uint(*gas_price),
+                    rlp_uint64(*gas_limit),
+                    rlp_addr(to),
+                    rlp_uint(*value),
+                    rlp_bytes_encode(data),
+                    rlp_access_list(access_list),
+                ]));
+                payload
             }
-            EvmTx::Eip1559 { .. } => {
-                // EIP-1559: [chain_id, nonce, max_priority_fee_per_gas, max_fee_per_gas, gas_limit, to, value, data, access_list]
-                unimplemented!("EIP-1559 tx hash requires RLP encoding")
+            // EIP-1559: hash = keccak256(0x02 || rlp([chain_id, nonce, max_priority_fee_per_gas, max_fee_per_gas, gas_limit, to, value, data, access_list]))
+            EvmTx::Eip1559 { chain_id, nonce, max_priority_fee_per_gas, max_fee_per_gas, gas_limit, to, value, data, access_list, .. } => {
+                let mut payload = vec![0x02u8];
+                payload.extend_from_slice(&rlp_list(&[
+                    rlp_uint64(*chain_id),
+                    rlp_uint64(*nonce),
+                    rlp_uint(*max_priority_fee_per_gas),
+                    rlp_uint(*max_fee_per_gas),
+                    rlp_uint64(*gas_limit),
+                    rlp_addr(to),
+                    rlp_uint(*value),
+                    rlp_bytes_encode(data),
+                    rlp_access_list(access_list),
+                ]));
+                payload
             }
         };
-        keccak(&rlp_bytes).0
+
+        let mut hasher = Keccak256::new();
+        hasher.update(&rlp_bytes);
+        hasher.finalize().into()
     }
 }
 

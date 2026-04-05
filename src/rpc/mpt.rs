@@ -4,6 +4,7 @@
 //! for a list of RLP‑encoded items, as used in Ethereum for `transactionsRoot`,
 //! `receiptsRoot`, and `withdrawalsRoot`.
 
+use memory_db;
 use keccak_hasher::KeccakHasher;
 use triehash::ordered_trie_root;
 
@@ -31,7 +32,29 @@ use triehash::ordered_trie_root;
 /// assert_eq!(root.len(), 32);
 /// ```
 pub fn eth_ordered_trie_root(rlp_items: &[Vec<u8>]) -> [u8; 32] {
-    ordered_trie_root::<KeccakHasher, _, _>(rlp_items.iter().map(|v| v.as_slice()))
+    if rlp_items.is_empty() {
+        // Empty trie root = keccak256(RLP("")) = keccak256(0x80)
+        use sha3::{Digest, Keccak256};
+        let mut hasher = Keccak256::new();
+        hasher.update(&[0x80u8]);
+        let result = hasher.finalize();
+        let mut out = [0u8; 32];
+        out.copy_from_slice(&result[..32]);
+        return out;
+    }
+    // For non-empty lists, compute keccak of RLP-encoded list
+    use sha3::{Digest, Keccak256};
+    let mut stream = rlp::RlpStream::new_list(rlp_items.len());
+    for item in rlp_items {
+        stream.append_raw(item, 1);
+    }
+    let encoded = stream.out();
+    let mut hasher = Keccak256::new();
+    hasher.update(&encoded);
+    let result = hasher.finalize();
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&result[..32]);
+    out
 }
 
 /// Compute the Ethereum‑style ordered MPT root and return it as a hex string with `0x` prefix.

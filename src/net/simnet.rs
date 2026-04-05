@@ -79,7 +79,7 @@ impl SimNet {
             cfg,
         }));
         let (tx, rx) = mpsc::unbounded_channel();
-        let mut g = inner.lock().unwrap();
+        let mut g = inner.lock().expect("mutex lock poisoned");
         g.peers.insert(node_id, tx);
         g.partitions.insert(node_id, 0);
         drop(g);
@@ -88,7 +88,7 @@ impl SimNet {
 
     pub fn register(&self, node_id: NodeId) -> mpsc::UnboundedReceiver<NetMsg> {
         let (tx, rx) = mpsc::unbounded_channel();
-        let mut g = self.inner.lock().unwrap();
+        let mut g = self.inner.lock().expect("mutex lock poisoned");
         g.peers.insert(node_id, tx);
         g.partitions.insert(node_id, 0);
         drop(g);
@@ -122,7 +122,7 @@ impl SimNet {
     /// Replay bounded consensus history to a given node (useful for late joiners).
     pub fn replay_consensus_to(&self, to: NodeId) {
         let (tx, msgs, delay_cfg, drop_ppm, from) = {
-            let inner = self.inner.lock().unwrap();
+            let inner = self.inner.lock().expect("mutex lock poisoned");
             let tx = match inner.peers.get(&to) {
                 Some(t) => t.clone(),
                 None => return,
@@ -136,7 +136,7 @@ impl SimNet {
 
     pub fn send_to(&self, to: NodeId, msg: NetMsg) {
         let (tx, cfg, drop_ppm, allow) = {
-            let inner = self.inner.lock().unwrap();
+            let inner = self.inner.lock().expect("mutex lock poisoned");
             let tx = match inner.peers.get(&to) { Some(t) => t.clone(), None => return };
             let drop_ppm = match msg {
                 NetMsg::Consensus { .. } => inner.cfg.drop_ppm_consensus,
@@ -155,7 +155,7 @@ impl SimNet {
 
     pub fn broadcast_consensus(&self, msg: ConsensusMsg) {
         let (peers, cfg, drop_ppm, from, _history, cfg_partitioning, partitions, my_part) = {
-            let mut inner = self.inner.lock().unwrap();
+            let mut inner = self.inner.lock().expect("mutex lock poisoned");
 
             // update bounded history
             inner.consensus_history.push(msg.clone());
@@ -179,7 +179,7 @@ impl SimNet {
 
     pub fn request_block(&self, id: Hash32) {
         let (peers, cfg, drop_ppm, from, cfg_partitioning, partitions, my_part) = {
-            let inner = self.inner.lock().unwrap();
+            let inner = self.inner.lock().expect("mutex lock poisoned");
             (inner.peers.clone(), inner.cfg.clone(), inner.cfg.drop_ppm_block, self.node_id,
              inner.partitioning_enabled, inner.partitions.clone(), inner.partitions.get(&self.node_id).copied().unwrap_or(0))
         };

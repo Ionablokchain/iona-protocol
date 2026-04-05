@@ -11,9 +11,10 @@
 //! It returns the proposal and block, leaving the engine to decide when to store
 //! and broadcast (typically after receiving enough votes).
 
+use crate::execution::KvState as AppState;
 use crate::consensus::{proposal_sign_bytes, Proposal};
 use crate::crypto::Signer;
-use crate::execution::{build_block, AppState};
+use crate::execution::build_block;
 use crate::types::{Block, Tx};
 
 use std::error::Error;
@@ -215,7 +216,7 @@ impl SimpleBlockProducer {
         validators: &[ValidatorIdentity],
         mempool_txs: &[Tx],
         already_proposed: bool,
-    ) -> Result<Option<(Proposal<S::PublicKey>, Block)>, ProducerError> {
+    ) -> Result<Option<(Proposal, Block)>, ProducerError> {
         if self.cfg.max_txs == 0 {
             return Err(ProducerError::InvalidMaxTxs);
         }
@@ -241,16 +242,15 @@ impl SimpleBlockProducer {
         let (block, _next_state, _receipts) = build_block(
             height,
             round,
-            prev_block_id,
+            crate::types::Hash32(prev_block_id),
             proposer_pubkey_bytes,
             proposer_addr,
             app_state,
             base_fee,
             txs,
-        )
-        .map_err(|e| ProducerError::BlockBuildFailed {
-            message: e.to_string(),
-        })?;
+            0, // block_timestamp
+            0, // chain_id
+        );
 
         let block_id = block.id();
 
@@ -258,14 +258,11 @@ impl SimpleBlockProducer {
             height,
             round,
             &block_id,
-            valid_round.map(|r| r as i32),
+            valid_round.map(|r| r as u32),
         );
 
         let signature = signer
-            .sign(&sign_bytes)
-            .map_err(|e| ProducerError::SigningFailed {
-                message: e.to_string(),
-            })?;
+            .sign(&sign_bytes);
 
         let proposal = Proposal {
             height,
@@ -277,7 +274,7 @@ impl SimpleBlockProducer {
             } else {
                 None
             },
-            pol_round: valid_round.map(|r| r as i32),
+            pol_round: valid_round.map(|r| r as u32),
             signature,
         };
 
@@ -317,16 +314,15 @@ mod tests {
     // If your actual Signer trait differs, adapt the mock below.
 
     impl Signer for MockSigner {
-        type PublicKey = MockPubKey;
 
-        fn public_key(&self) -> Self::PublicKey {
-            self.pubkey.clone()
+        fn public_key(&self) -> crate::crypto::PublicKeyBytes {
+            crate::crypto::PublicKeyBytes(self.pubkey.0.clone())
         }
 
-        fn sign(&self, msg: &[u8]) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+        fn sign(&self, msg: &[u8]) -> crate::crypto::SignatureBytes {
             let mut out = b"sig:".to_vec();
             out.extend_from_slice(msg);
-            Ok(out)
+            crate::crypto::SignatureBytes(out)
         }
     }
 

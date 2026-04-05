@@ -39,7 +39,7 @@ use std::path::{Path, PathBuf};
 pub struct DataLayout {
     pub root: PathBuf,
     // File lock guard – kept alive for the lifetime of the struct.
-    _lock: Option<RwLock<File>>,
+    _lock: Option<fd_lock::RwLockWriteGuard<'static, File>>,
 }
 
 impl DataLayout {
@@ -52,6 +52,7 @@ impl DataLayout {
         }
     }
 
+
     /// Attempts to acquire an exclusive lock on the data directory.
     /// Returns an error if the lock is already held by another process.
     /// Should be called once at startup, before any other operations.
@@ -62,12 +63,12 @@ impl DataLayout {
             .read(true)
             .write(true)
             .open(&lock_path)?;
-        let lock = RwLock::new(file);
-        // Try to acquire a write lock (exclusive). If it fails, another process holds it.
+        // Leak the RwLock to get a 'static lifetime guard we can store.
+        let lock = Box::new(RwLock::new(file));
+        let lock: &'static mut RwLock<File> = Box::leak(lock);
         match lock.try_write() {
-            Ok(_guard) => {
-                // We keep the lock guard inside self to keep the lock active.
-                self._lock = Some(lock);
+            Ok(guard) => {
+                self._lock = Some(guard);
                 Ok(())
             }
             Err(_) => Err(io::Error::new(
@@ -88,6 +89,14 @@ impl DataLayout {
 
     pub fn blocks_dir(&self) -> PathBuf { self.chain_dir().join("blocks") }
     pub fn wal_dir(&self) -> PathBuf { self.chain_dir().join("wal") }
+    /// Returns the root directory path.
+    pub fn root(&self) -> &std::path::Path { &self.root }
+    /// Path to the flat (legacy) WAL file, used by v2→v3 migration.
+    pub fn wal_flat_path(&self) -> PathBuf { self.root.join("wal.jsonl") }
+    /// Alias for wal_dir() for compatibility.
+    pub fn wal_path(&self) -> PathBuf { self.wal_dir() }
+    /// Path to the KV state file.
+    pub fn state_kv_path(&self) -> PathBuf { self.state_dir().join("state.json") }
     pub fn state_dir(&self) -> PathBuf { self.chain_dir().join("state") }
     pub fn receipts_dir(&self) -> PathBuf { self.chain_dir().join("receipts") }
     pub fn snapshots_dir(&self) -> PathBuf { self.chain_dir().join("snapshots") }
@@ -143,7 +152,7 @@ impl DataLayout {
         if !schema_path.exists() {
             // Write the current schema version.
             let schema = serde_json::json!({ "version": expected_version });
-            Self::atomic_write(&schema_path, serde_json::to_vec_pretty(&schema)?)?;
+            Self::atomic_write(&schema_path, &serde_json::to_vec_pretty(&schema)?)?;
             return Ok(true);
         }
         let content = fs::read_to_string(&schema_path)?;
@@ -396,16 +405,121 @@ impl DataLayout {
     }
 }
 
-// ── Integration with EvidenceStore ───────────────────────────────────────
+
+
+// ── Additional convenience methods ──────────────────────────────────────
 
 impl DataLayout {
-    /// Opens the evidence store using the path from this layout.
-    /// Assumes that `EvidenceStore` has a method `open(data_path, index_path)`.
-    /// This is just a convenience wrapper; you need to have `EvidenceStore` in scope.
-    pub fn open_evidence_store(&self) -> io::Result<crate::evidence_store::EvidenceStore> {
-        let evidence_path = self.evidence_path();
-        let index_path = evidence_path.with_extension("idx"); // optional index
-        crate::evidence_store::EvidenceStore::open(evidence_path, Some(index_path))
+    /// Temporary directory for atomic operations.
+    pub fn tmp_dir(&self) -> PathBuf { self.root.join("tmp") }
+
+    /// Load full state from disk.
+    pub fn load_state_full(&self) -> io::Result<crate::execution::KvState> {
+        let path = self.state_full_path();
+        if path.exists() {
+            let s = fs::read_to_string(&path)?;
+            serde_json::from_str(&s)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("state_full.json: {e}")))
+        } else {
+            Ok(crate::execution::KvState::default())
+        }
+    }
+
+    /// Save full state to disk atomically.
+    pub fn save_state_full(&self, state: &crate::execution::KvState) -> io::Result<()> {
+        let path = self.state_full_path();
+        let json = serde_json::to_string_pretty(state)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+        Self::atomic_write(&path, json.as_bytes())
+    }
+
+    /// Load stakes from disk.
+    pub fn load_stakes(&self) -> io::Result<crate::economics::staking::StakingState> {
+        let path = self.stakes_path();
+        if path.exists() {
+            let s = fs::read_to_string(&path)?;
+            serde_json::from_str(&s)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("stakes.json: {e}")))
+        } else {
+            Ok(crate::economics::staking::StakingState::default())
+        }
+    }
+
+    /// Save stakes to disk atomically.
+    pub fn save_stakes(&self, stakes: &crate::economics::staking::StakingState) -> io::Result<()> {
+        let path = self.stakes_path();
+        let json = serde_json::to_string_pretty(stakes)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+        Self::atomic_write(&path, json.as_bytes())
+    }
+
+    /// Load schema metadata.
+    pub fn load_schema(&self) -> io::Result<Option<serde_json::Value>> {
+        let path = self.schema_path();
+        if path.exists() {
+            let s = fs::read_to_string(&path)?;
+            Ok(Some(serde_json::from_str(&s)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Save schema metadata atomically.
+    pub fn save_schema(&self, schema: &serde_json::Value) -> io::Result<()> {
+        let path = self.schema_path();
+        let json = serde_json::to_string_pretty(schema)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+        Self::atomic_write(&path, json.as_bytes())
+    }
+
+    /// Load node metadata.
+    pub fn load_node_meta(&self) -> io::Result<Option<serde_json::Value>> {
+        let path = self.node_meta_path();
+        if path.exists() {
+            let s = fs::read_to_string(&path)?;
+            Ok(Some(serde_json::from_str(&s)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Save node metadata atomically.
+    pub fn save_node_meta(&self, meta: &serde_json::Value) -> io::Result<()> {
+        let path = self.node_meta_path();
+        let json = serde_json::to_string_pretty(meta)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+        Self::atomic_write(&path, json.as_bytes())
+    }
+
+    /// Get latest block height from blocks directory.
+    pub fn latest_height(&self) -> Option<u64> {
+        let dir = self.blocks_dir();
+        if !dir.exists() { return None; }
+        let mut max_height = None;
+        if let Ok(rd) = fs::read_dir(&dir) {
+            for entry in rd.filter_map(|e| e.ok()) {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if let Some(h) = name.strip_suffix(".json").and_then(|s| s.parse::<u64>().ok()) {
+                    max_height = Some(max_height.map_or(h, |m: u64| m.max(h)));
+                }
+            }
+        }
+        max_height
+    }
+
+    /// Get peer ID from the p2p key file.
+    pub fn peer_id(&self) -> io::Result<String> {
+        let path = self.p2p_key_path();
+        if path.exists() {
+            let s = fs::read_to_string(&path)?;
+            let v: serde_json::Value = serde_json::from_str(&s)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+            Ok(v.get("peer_id").and_then(|p| p.as_str()).unwrap_or("unknown").to_string())
+        } else {
+            Ok("unknown".to_string())
+        }
     }
 }
 

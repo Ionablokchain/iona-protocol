@@ -26,13 +26,13 @@ use libp2p::{
     kad::{self, store::MemoryStore},
     request_response::{
         self, Codec as RequestResponseCodec, Message as RequestResponseMessage,
-        ProtocolSupport, RequestResponseEvent,
+        ProtocolSupport, 
     },
     swarm::{NetworkBehaviour, SwarmEvent},
     swarm::behaviour::toggle::Toggle,
     swarm::StreamProtocol,
     multiaddr::Protocol,
-    tcp, yamux, ConnectionId, Multiaddr, PeerId, Swarm, Transport,
+    tcp, yamux,  Multiaddr, PeerId, Swarm, Transport,
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -57,37 +57,37 @@ lazy_static! {
     static ref P2P_CONNECTIONS: IntGaugeVec = register_int_gauge_vec!(
         opts!("iona_p2p_connections", "Number of active P2P connections"),
         &["direction"]
-    ).unwrap();
+    ).expect("prometheus metric registration failed");
     static ref P2P_MESSAGES_TOTAL: IntCounterVec = register_int_counter_vec!(
         opts!("iona_p2p_messages_total", "Total P2P messages by type"),
         &["type", "direction"]
-    ).unwrap();
+    ).expect("prometheus metric registration failed");
     static ref P2P_MESSAGE_BYTES: HistogramVec = register_histogram_vec!(
         opts!("iona_p2p_message_bytes", "Message size distribution"),
         &["type", "direction"],
         vec![256.0, 1024.0, 4096.0, 16384.0, 65536.0, 262144.0, 1048576.0, 4194304.0, 16777216.0]
-    ).unwrap();
+    ).expect("prometheus metric registration failed");
     static ref P2P_RATE_LIMITED: IntCounterVec = register_int_counter_vec!(
         opts!("iona_p2p_rate_limited_total", "Requests dropped due to rate limiting"),
         &["reason"]
-    ).unwrap();
+    ).expect("prometheus metric registration failed");
     static ref P2P_QUARANTINED: IntCounterVec = register_int_counter_vec!(
         opts!("iona_p2p_quarantined_total", "Peers quarantined by reason"),
         &["reason"]
-    ).unwrap();
+    ).expect("prometheus metric registration failed");
     static ref P2P_BUCKET_DIVERSITY: IntGauge = register_int_gauge!(
         opts!("iona_p2p_bucket_diversity", "Number of distinct diversity buckets")
-    ).unwrap();
+    ).expect("prometheus metric registration failed");
     static ref P2P_PENDING_REQUESTS: IntGaugeVec = register_int_gauge_vec!(
         opts!("iona_p2p_pending_requests", "Pending requests by peer"),
         &["peer"]
-    ).unwrap();
+    ).expect("prometheus metric registration failed");
 }
 
 // ── Constants ──────────────────────────────────────────────────────────────
 
 const MAX_MSG_SIZE: usize = 16 * 1024 * 1024; // 16 MiB
-const MAX_RANGE_BLOCKS: u64 = 200;
+pub const MAX_RANGE_BLOCKS: u64 = 200;
 
 // ── Protocol definitions ──────────────────────────────────────────────────
 
@@ -603,7 +603,7 @@ impl Default for P2pConfig {
     fn default() -> Self {
         Self {
             local_key: libp2p::identity::Keypair::generate_ed25519(),
-            listen: "/ip4/0.0.0.0/tcp/0".parse().unwrap(),
+            listen: "/ip4/0.0.0.0/tcp/0".parse().expect("valid multiaddr literal"),
             static_peers: vec![],
             bootnodes: vec![],
             enable_mdns: false,
@@ -652,7 +652,7 @@ impl Default for P2pConfig {
 
 // ─── P2p ─────────────────────────────────────────────────────────────────
 
-type ConnectionKey = (PeerId, ConnectionId);
+type ConnectionKey = (PeerId, libp2p::swarm::ConnectionId);
 
 pub struct P2p {
     swarm: Swarm<Behaviour>,
@@ -1155,18 +1155,7 @@ impl P2p {
         // Set up peer scoring.
         let mut score_params = gossipsub::PeerScoreParams::default();
         let mut topic_params = HashMap::new();
-        let tp = gossipsub::TopicScoreParams::builder()
-            .topic_weight(1.0)
-            .time_in_mesh_weight(0.1)
-            .time_in_mesh_quantum(Duration::from_secs(1))
-            .time_in_mesh_cap(300.0)
-            .first_message_deliveries_weight(1.0)
-            .first_message_deliveries_decay(0.5)
-            .mesh_message_deliveries_weight(0.5)
-            .mesh_message_deliveries_decay(0.5)
-            .mesh_message_deliveries_cap(100.0)
-            .mesh_message_deliveries_activation(Duration::from_secs(5))
-            .build()?;
+        let tp = gossipsub::TopicScoreParams::default();
         topic_params.insert(topic_hash.clone(), tp);
         score_params.topics = topic_params;
         let thresholds = gossipsub::PeerScoreThresholds::default();
@@ -1176,7 +1165,7 @@ impl P2p {
 
         // Subscribe to all allowed topics.
         for t in allowed_hashes.iter() {
-            let _ = gossipsub.subscribe(&IdentTopic::new_from_topic_hash(t.clone()));
+            let _ = gossipsub.subscribe(&IdentTopic::new(t.to_string()));
         }
 
         let mdns = if cfg.enable_mdns {
@@ -1659,7 +1648,7 @@ impl P2p {
                         }
                     }
                 }
-                SwarmEvent::Behaviour(BehaviourEvent::Rr(RequestResponseEvent::Message { peer, message })) => {
+                SwarmEvent::Behaviour(BehaviourEvent::Rr(request_response::Event::Message { peer, message })) => {
                     match message {
                         RequestResponseMessage::Request {
                             request, channel, ..
@@ -1711,7 +1700,7 @@ impl P2p {
                         }
                     }
                 }
-                SwarmEvent::Behaviour(BehaviourEvent::Rr(RequestResponseEvent::OutboundFailure {
+                SwarmEvent::Behaviour(BehaviourEvent::Rr(request_response::Event::OutboundFailure {
                     peer,
                     request_id,
                     error,
@@ -1719,7 +1708,7 @@ impl P2p {
                     warn!(%peer, ?request_id, ?error, "outbound request failed");
                     self.request_completed(&request_id);
                 }
-                SwarmEvent::Behaviour(BehaviourEvent::Rr(RequestResponseEvent::InboundFailure {
+                SwarmEvent::Behaviour(BehaviourEvent::Rr(request_response::Event::InboundFailure {
                     peer,
                     request_id,
                     error,
@@ -1801,8 +1790,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_bucket_from_multiaddr() {
+    #[tokio::test]
+    async fn test_bucket_from_multiaddr() {
         let cfg = P2pConfig {
             diversity_bucket_kind: "ip16".into(),
             ..Default::default()
@@ -1826,8 +1815,8 @@ mod tests {
         assert!(bucket6.unwrap().starts_with("ip6:"));
     }
 
-    #[test]
-    fn test_quarantine_load_save() {
+    #[tokio::test]
+    async fn test_quarantine_load_save() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("quarantine.json");
 

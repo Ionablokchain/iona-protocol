@@ -28,14 +28,14 @@ impl InMemNet {
     pub fn new(node_id: NodeId) -> (Self, mpsc::UnboundedReceiver<ConsensusMsg>) {
         let inner = Arc::new(Mutex::new(Inner { peers: HashMap::new() }));
         let (tx, rx) = mpsc::unbounded_channel();
-        inner.lock().unwrap().peers.insert(node_id, tx);
+        inner.lock().expect("inmem mutex poisoned").peers.insert(node_id, tx);
         (Self { inner, node_id }, rx)
     }
 
     /// Register an additional node into the same network.
     pub fn register(&self, node_id: NodeId) -> mpsc::UnboundedReceiver<ConsensusMsg> {
         let (tx, rx) = mpsc::unbounded_channel();
-        self.inner.lock().unwrap().peers.insert(node_id, tx);
+        self.inner.lock().expect("inmem mutex poisoned").peers.insert(node_id, tx);
         rx
     }
 
@@ -47,7 +47,7 @@ impl InMemNet {
 
     /// Broadcast to all nodes except self.
     pub fn broadcast(&self, msg: ConsensusMsg) {
-        let peers = self.inner.lock().unwrap().peers.clone();
+        let peers = self.inner.lock().expect("inmem mutex poisoned").peers.clone();
         for (id, tx) in peers.into_iter() {
             if id == self.node_id { continue; }
             let _ = tx.send(msg.clone());

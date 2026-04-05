@@ -63,7 +63,7 @@ fn rlp_account(nonce: u64, balance: U256, storage_root: [u8; 32], code_hash: [u8
 
     // Balance as minimal big‑endian bytes
     let mut bal_bytes = [0u8; 32];
-    balance.to_big_endian(&mut bal_bytes);
+    let bal_bytes_tmp = balance.to_be_bytes::<32>(); bal_bytes.copy_from_slice(&bal_bytes_tmp);
     let trimmed = bal_bytes.iter().skip_while(|&&b| b == 0).cloned().collect::<Vec<u8>>();
     if trimmed.is_empty() {
         stream.append(&0u8);
@@ -95,9 +95,9 @@ fn compute_storage_root(addr: &Address, db: &MemDb) -> [u8; 32] {
     for ((a, slot), value) in &db.storage {
         if a == addr {
             let mut key = [0u8; 32];
-            slot.to_big_endian(&mut key);
+            let key_tmp = slot.to_be_bytes::<32>(); key.copy_from_slice(&key_tmp);
             let mut val = [0u8; 32];
-            value.to_big_endian(&mut val);
+            let val_tmp = value.to_be_bytes::<32>(); val.copy_from_slice(&val_tmp);
             slots.insert(key, val);
         }
     }
@@ -151,13 +151,10 @@ fn compute_state_root_mpt(db: &MemDb) -> [u8; 32] {
     {
         let mut trie = TrieDBMut::<KeccakHasher>::new(&mut memdb, &mut root);
         for (addr, info) in &db.accounts {
-            let nonce = info.nonce.unwrap_or(0);
+            let nonce = info.nonce;
             let balance = info.balance;
             let storage_root = compute_storage_root(addr, db);
-            let code_hash = match info.code_hash {
-                Some(h) => h.0,
-                None => keccak256(&[]),
-            };
+            let code_hash = info.code_hash.0;
 
             let value = rlp_account(nonce, balance, storage_root, code_hash);
             let key = keccak256(addr.as_slice()); // secure trie key
@@ -193,14 +190,14 @@ pub fn compute_state_root_hex(db: &MemDb) -> String {
 
         let mut items: Vec<Vec<u8>> = Vec::with_capacity(db.accounts.len());
         for (addr, info) in &db.accounts {
-            let nonce = info.nonce.unwrap_or(0);
+            let nonce = info.nonce;
             let balance = info.balance;
             let storage_root = compute_storage_root_hex_placeholder(addr, db);
-            let code_hash = match info.code_hash {
-                Some(h) => h.0,
-                None => keccak256(&[]),
-            };
-            let encoded = rlp_account(nonce, balance, storage_root, code_hash);
+            let code_hash = info.code_hash.0;
+            let sr_bytes = hex::decode(&storage_root).unwrap_or_else(|_| vec![0u8; 32]);
+            let mut storage_root_arr = [0u8; 32];
+            if sr_bytes.len() == 32 { storage_root_arr.copy_from_slice(&sr_bytes); }
+            let encoded = rlp_account(nonce, balance, storage_root_arr, code_hash);
             items.push(encoded);
         }
         items.sort(); // ensure determinism
@@ -237,8 +234,8 @@ fn compute_storage_root_hex_placeholder(addr: &Address, db: &MemDb) -> String {
         .map(|((_, slot), value)| {
             let mut key = [0u8; 32];
             let mut val = [0u8; 32];
-            slot.to_big_endian(&mut key);
-            value.to_big_endian(&mut val);
+            let key_tmp = slot.to_be_bytes::<32>(); key.copy_from_slice(&key_tmp);
+            let val_tmp = value.to_be_bytes::<32>(); val.copy_from_slice(&val_tmp);
             (key, val)
         })
         .collect();

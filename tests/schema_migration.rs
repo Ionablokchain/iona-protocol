@@ -18,7 +18,7 @@ fn make_dir() -> (TempDir, DataDir) {
 fn write_schema_version(data: &DataDir, version: u32) {
     data.ensure().unwrap();
     let meta = serde_json::json!({ "version": version });
-    let path = format!("{}/schema.json", data.root);
+    let path = data.layout().schema_path();
     fs::write(path, serde_json::to_string_pretty(&meta).unwrap()).unwrap();
 }
 
@@ -59,7 +59,7 @@ fn schema_migration_v1_to_current_normalises_state_full() {
         "nonces": {}
     });
     fs::write(
-        format!("{}/state_full.json", data.root),
+        data.layout().state_full_path(),
         serde_json::to_string_pretty(&old_state).unwrap(),
     )
     .unwrap();
@@ -68,7 +68,7 @@ fn schema_migration_v1_to_current_normalises_state_full() {
     assert_eq!(read_schema_version(&data), CURRENT_SCHEMA_VERSION);
 
     // state_full.json should now have a `vm` field.
-    let raw = fs::read_to_string(format!("{}/state_full.json", data.root)).unwrap();
+    let raw = fs::read_to_string(data.layout().state_full_path()).unwrap();
     let val: serde_json::Value = serde_json::from_str(&raw).unwrap();
     assert!(val.get("vm").is_some(), "vm field should be injected by migration");
     // Original data must be preserved.
@@ -76,7 +76,7 @@ fn schema_migration_v1_to_current_normalises_state_full() {
 
     // Backup must exist.
     assert!(
-        std::path::Path::new(&format!("{}/state_full.json.v1.bak", data.root)).exists(),
+        data.layout().state_full_path().with_extension("v1.bak").exists(),
         "backup file should be created"
     );
 }
@@ -88,7 +88,7 @@ fn schema_migration_v2_migrates_flat_wal_to_segments() {
     write_schema_version(&data, 2);
 
     // Write a flat wal.jsonl (pre-segmented format).
-    let old_wal = format!("{}/wal.jsonl", data.root);
+    let old_wal = data.layout().wal_flat_path();
     fs::write(&old_wal, b"{\"height\":1}\n{\"height\":2}\n").unwrap();
 
     data.ensure_schema_and_migrate().unwrap();
@@ -96,13 +96,13 @@ fn schema_migration_v2_migrates_flat_wal_to_segments() {
 
     // Old file should be gone (renamed).
     assert!(
-        !std::path::Path::new(&old_wal).exists(),
+        !old_wal.exists(),
         "old wal.jsonl should be renamed"
     );
     // Segment 0 should exist with original content.
-    let seg0 = format!("{}/wal/wal_00000000.jsonl", data.root);
+    let seg0 = data.layout().wal_dir().join("wal_00000000.jsonl");
     assert!(
-        std::path::Path::new(&seg0).exists(),
+        seg0.exists(),
         "segment 0 should be created"
     );
     let content = fs::read_to_string(&seg0).unwrap();
@@ -128,7 +128,7 @@ fn schema_migration_log_is_populated() {
     // Start from v0 so we exercise all migration steps.
     data.ensure_schema_and_migrate().unwrap();
 
-    let raw = fs::read_to_string(format!("{}/schema.json", data.root)).unwrap();
+    let raw = fs::read_to_string(data.layout().schema_path()).unwrap();
     let meta: serde_json::Value = serde_json::from_str(&raw).unwrap();
     let log = meta["migration_log"].as_array().unwrap();
     assert!(

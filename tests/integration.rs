@@ -101,10 +101,10 @@ fn make_stakes(keys: &[Ed25519Keypair]) -> StakeLedger {
 #[must_use]
 fn fast_config() -> Config {
     Config {
-        propose_timeout_ms: 5000,
-        prevote_timeout_ms: 5000,
-        precommit_timeout_ms: 5000,
-        max_rounds: 10,
+        propose_timeout_ms: 10,
+        prevote_timeout_ms: 10,
+        precommit_timeout_ms: 10,
+        max_rounds: 50,
         max_txs_per_block: 100,
         gas_target: GAS_TARGET,
         initial_base_fee_per_gas: BASE_FEE_INITIAL,
@@ -131,6 +131,7 @@ fn sample_tx() -> Tx {
 /// A sample block header (without transactions).
 fn sample_header() -> Block {
     let header = iona::types::BlockHeader {
+        pv: 0,
         height: 1,
         round: 0,
         prev: Hash32::zero(),
@@ -217,41 +218,34 @@ mod consensus_tests {
             })
             .collect();
 
-        // Tick the proposer — it will produce a proposal
-        let proposer_idx = vset
-            .vals
-            .iter()
-            .position(|v| v.pk == keys[0].public_key())
-            .unwrap_or(0);
+        // Determine the proposer for height=1, round=0.
+        let proposer_idx = (0..4).find(|&i| {
+            engines[i].is_proposer(&keys[i].public_key())
+        }).expect("one engine must be the proposer");
+
+        // Step 1: Tick ONLY the proposer so it produces a proposal + its own prevote.
+        // Do NOT tick non-proposers yet — they would vote nil without a proposal.
         {
             let mut ob = outboxes[proposer_idx].clone();
             engines[proposer_idx].tick(
-                &keys[proposer_idx],
-                &stores[proposer_idx],
-                &mut ob,
-                5001,
-                |_| vec![],
+                &keys[proposer_idx], &stores[proposer_idx], &mut ob,
+                cfg.propose_timeout_ms, |_| vec![],
             );
         }
+        // Step 2: Deliver proposer's messages (Proposal + Prevote) to all engines.
+        // on_proposal moves non-proposers to Prevote and they broadcast prevotes for the block.
+        drain_and_deliver(&mut engines, &mut outboxes, &stores, &keys);
 
-        // Deliver messages until all commit or timeout
-        let start = std::time::Instant::now();
-        let timeout = std::time::Duration::from_secs(2);
-        for _round in 0..10 {
-            if start.elapsed() > timeout {
-                panic!("consensus timed out after {:?}", timeout);
-            }
-            drain_and_deliver(&mut engines, &mut outboxes, &stores, &keys);
-            if engines.iter().all(|e| e.state.decided.is_some()) {
-                break;
-            }
-            // Tick all to advance timeouts if needed
-            for i in 0..4 {
-                let mut ob = outboxes[i].clone();
-                engines[i].tick(&keys[i], &stores[i], &mut ob, 100, |_| vec![]);
-            }
-            drain_and_deliver(&mut engines, &mut outboxes, &stores, &keys);
-        }
+        // Step 3: Deliver non-proposer prevotes. With 4 prevotes for the same block,
+        // quorum is reached and engines transition to Precommit, broadcasting precommits.
+        drain_and_deliver(&mut engines, &mut outboxes, &stores, &keys);
+
+        // Step 4: Deliver precommits. Quorum of precommits triggers commit.
+        drain_and_deliver(&mut engines, &mut outboxes, &stores, &keys);
+
+        // Step 5: Final delivery for any remaining messages.
+        drain_and_deliver(&mut engines, &mut outboxes, &stores, &keys);
+        drain_and_deliver(&mut engines, &mut outboxes, &stores, &keys);
 
         // All 4 validators must have decided
         for (i, engine) in engines.iter().enumerate() {
@@ -418,12 +412,12 @@ mod mempool_tests {
     /// Mempool: nonce ordering — must drain in ascending nonce order per sender.
     #[test]
     fn test_mempool_nonce_ordering() {
-        let mut mp = Mempool::new(1000);
-        mp.push(tx_with_nonce_tip("alice", 2, 10))
+        let mut mp = iona::mempool::pool::Mempool::new(1000);
+        mp.push(tx_with_nonce_tip("alice", 2, 10), 0)
             .expect("push 2");
-        mp.push(tx_with_nonce_tip("alice", 0, 10))
+        mp.push(tx_with_nonce_tip("alice", 0, 10), 0)
             .expect("push 0");
-        mp.push(tx_with_nonce_tip("alice", 1, 10))
+        mp.push(tx_with_nonce_tip("alice", 1, 10), 0)
             .expect("push 1");
 
         let drained = mp.drain_best(3);
@@ -448,21 +442,21 @@ mod mempool_tests {
     /// Mempool: RBF — replacement needs ≥10% bump, else rejected.
     #[test]
     fn test_mempool_rbf() {
-        let mut mp = Mempool::new(1000);
+        let mut mp = iona::mempool::pool::Mempool::new(1000);
         let base = tx_with_nonce_tip("bob", 0, 100);
-        mp.push(base).expect("initial push");
+        mp.push(base, 0).expect("initial push");
 
         // Same tip should be rejected
         let same_tip = tx_with_nonce_tip("bob", 0, 100);
         assert!(
-            mp.push(same_tip).is_err(),
+            mp.push(same_tip, 0).is_err(),
             "same tip should be rejected (RBF)"
         );
 
         // 10% bump should be accepted
         let bump = tx_with_nonce_tip("bob", 0, 110);
         assert!(
-            mp.push(bump).is_ok(),
+            mp.push(bump, 0).is_ok(),
             "10% bump should be accepted (RBF)"
         );
 
@@ -472,9 +466,9 @@ mod mempool_tests {
     /// Mempool: TTL expiry.
     #[test]
     fn test_mempool_ttl() {
-        let mut mp = Mempool::new(1000);
+        let mut mp = iona::mempool::pool::Mempool::new(1000);
         let tx = tx_with_nonce_tip("carol", 0, 5);
-        mp.push(tx).expect("push");
+        mp.push(tx, 0).expect("push");
         assert_eq!(mp.len(), 1, "mempool should contain 1 tx after push");
 
         mp.advance_height(10_000); // way past TTL
@@ -507,6 +501,8 @@ mod verification_tests {
             &state,
             BASE_FEE_INITIAL,
             vec![],
+            0u64, // block_timestamp
+            1u64, // chain_id
         );
 
         // Valid block passes
@@ -548,6 +544,8 @@ mod verification_tests {
             &state,
             BASE_FEE_INITIAL,
             vec![],
+            0u64, // block_timestamp
+            1u64, // chain_id
         );
 
         let correct = PublicKeyBytes(real_pk);
@@ -598,7 +596,7 @@ mod wal_tests {
         }
 
         // Replay events
-        let events = Wal::replay(wal_path).expect("failed to replay WAL");
+        let events = { let w = iona::wal::Wal::open(wal_path).expect("failed to open WAL"); w.replay().expect("replay should succeed") };
         assert_eq!(events.len(), 2, "expected 2 events, got {}", events.len());
 
         match &events[0] {

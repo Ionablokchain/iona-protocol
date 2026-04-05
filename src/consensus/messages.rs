@@ -41,7 +41,7 @@ impl fmt::Display for VoteType {
 // Proposal
 // -----------------------------------------------------------------------------
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Proposal {
     pub height: Height,
     pub round: Round,
@@ -90,7 +90,7 @@ impl fmt::Display for Proposal {
 // Vote
 // -----------------------------------------------------------------------------
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Vote {
     pub vote_type: VoteType,
     pub height: Height,

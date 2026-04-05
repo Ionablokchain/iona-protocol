@@ -459,7 +459,7 @@ mod tests {
         let payload = "vm call 0x1234 0x5678"; // contract length wrong
         assert!(parse_vm_payload(payload).is_none());
 
-        let payload = "vm call 0x" + &hex::encode([0xABu8; 32]) + " 0xZZZ";
+        let payload = "vm call 0x".to_owned() + &hex::encode([0xABu8; 32]) + " 0xZZZ";
         assert!(parse_vm_payload(&payload).is_none());
     }
 

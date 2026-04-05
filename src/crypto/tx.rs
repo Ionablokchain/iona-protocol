@@ -1,6 +1,7 @@
-//! Transaction signing and address derivation.
+/// Transaction signing and address derivation.
 
 use crate::crypto::ed25519::Ed25519Signer;
+use crate::crypto::Signer;
 use crate::crypto::{PublicKeyBytes, SignatureBytes};
 use crate::types::Tx;
 use blake3;

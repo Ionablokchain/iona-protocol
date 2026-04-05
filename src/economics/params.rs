@@ -146,3 +146,5 @@ mod tests {
         assert!((params.validator_reward_share() - 0.95).abs() < 1e-12);
     }
 }
+
+pub type StakingParams = EconomicsParams;

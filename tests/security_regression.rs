@@ -256,11 +256,11 @@ fn regression_rolled_back_guard_detected() {
         g.record_proposal(1, 0, &hash(1)).unwrap();
     }
 
-    // Read and corrupt the chain_hash (simulate rollback attack).
+    // Read and corrupt the entry_hash of the first entry (simulate rollback attack).
     let guard_file = format!("{path_str}/doublesign_{}.json", hex::encode([12u8; 32]));
     let raw = fs::read_to_string(&guard_file).unwrap();
     let mut json: serde_json::Value = serde_json::from_str(&raw).unwrap();
-    json["chain_hash"] = serde_json::json!("deadbeef");
+    json["entries"][0]["entry_hash"] = serde_json::json!("deadbeef");
     fs::write(&guard_file, serde_json::to_string(&json).unwrap()).unwrap();
 
     // Reload must fail.

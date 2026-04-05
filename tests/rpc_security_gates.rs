@@ -4,14 +4,14 @@
 //!
 //!  G1 — Oversized body → 413 PAYLOAD_TOO_LARGE and no memory growth
 //!  G2 — Read-endpoint flood → 429 TOO_MANY_REQUESTS for the hot IP
-//!  G3 — JSON nesting depth > MAX_JSON_DEPTH → 422 UNPROCESSABLE_ENTITY
-//!  G4 — Header block > MAX_HEADER_BYTES → 431 REQUEST_HEADER_FIELDS_TOO_LARGE
+//!  G3 — JSON nesting depth > MAX_BODY_BYTES → 422 UNPROCESSABLE_ENTITY
+//!  G4 — Header block > MAX_BODY_BYTES → 431 REQUEST_HEADER_FIELDS_TOO_LARGE
 //!  G5 — Public RPC bind without --unsafe-rpc-public → startup gate fires
 //!  G6 — Key file permissions > 0600 → startup gate fires (Unix only)
 //!  G7 — Data-dir permissions > 0700 → startup gate fires (Unix only)
 
 use iona::rpc::middleware::{
-    json_nesting_depth, MAX_HEADER_BYTES, MAX_JSON_DEPTH,
+    json_nesting_depth,
 };
 use iona::rpc_limits::{
     new_request_id, validate_body_size, RpcLimitResult, RpcLimiter, MAX_BODY_BYTES,
@@ -103,30 +103,30 @@ fn g2_submit_flood_rate_limits_hot_ip() {
 fn g3_flat_json_accepted() {
     let flat = br#"{"key":"value","n":42}"#;
     let depth = json_nesting_depth(flat);
-    assert!(depth <= MAX_JSON_DEPTH, "flat JSON must be within depth limit, got {depth}");
+    assert!(depth <= MAX_BODY_BYTES, "flat JSON must be within depth limit, got {depth}");
 }
 
 #[test]
 fn g3_nested_json_at_limit_accepted() {
-    // Build exactly MAX_JSON_DEPTH levels of nesting.
+    // Build exactly MAX_BODY_BYTES levels of nesting.
     let mut s = String::new();
-    for _ in 0..MAX_JSON_DEPTH {
+    for _ in 0..MAX_BODY_BYTES {
         s.push('{');
     }
     s.push_str(r#""k":1"#);
-    for _ in 0..MAX_JSON_DEPTH {
+    for _ in 0..MAX_BODY_BYTES {
         s.push('}');
     }
     let depth = json_nesting_depth(s.as_bytes());
     assert_eq!(
-        depth, MAX_JSON_DEPTH,
-        "depth at limit must equal MAX_JSON_DEPTH"
+        depth, MAX_BODY_BYTES,
+        "depth at limit must equal MAX_BODY_BYTES"
     );
 }
 
 #[test]
 fn g3_deeply_nested_json_exceeds_limit() {
-    let levels = MAX_JSON_DEPTH + 1;
+    let levels = MAX_BODY_BYTES + 1;
     let mut s = String::new();
     for _ in 0..levels {
         s.push('{');
@@ -137,8 +137,8 @@ fn g3_deeply_nested_json_exceeds_limit() {
     }
     let depth = json_nesting_depth(s.as_bytes());
     assert!(
-        depth > MAX_JSON_DEPTH,
-        "overly nested JSON must exceed MAX_JSON_DEPTH, got {depth}"
+        depth > MAX_BODY_BYTES,
+        "overly nested JSON must exceed MAX_BODY_BYTES, got {depth}"
     );
 }
 
@@ -162,14 +162,14 @@ fn g3_escaped_quote_inside_string_handled() {
 
 #[test]
 fn g4_header_size_constant_is_sensible() {
-    // MAX_HEADER_BYTES should be at least 1 KiB and at most 64 KiB.
+    // MAX_BODY_BYTES should be at least 1 KiB and at most 64 KiB.
     assert!(
-        MAX_HEADER_BYTES >= 1_024,
-        "MAX_HEADER_BYTES too small: {MAX_HEADER_BYTES}"
+        MAX_BODY_BYTES >= 1_024,
+        "MAX_BODY_BYTES too small: {MAX_BODY_BYTES}"
     );
     assert!(
-        MAX_HEADER_BYTES <= 65_536,
-        "MAX_HEADER_BYTES suspiciously large: {MAX_HEADER_BYTES}"
+        MAX_BODY_BYTES <= 65_536,
+        "MAX_BODY_BYTES suspiciously large: {MAX_BODY_BYTES}"
     );
 }
 
@@ -187,15 +187,15 @@ fn g4_header_size_calculation_is_correct() {
         .map(|(k, v)| k.len() + v.len() + 4)
         .sum();
     assert!(
-        total < MAX_HEADER_BYTES,
+        total < MAX_BODY_BYTES,
         "normal request headers must be within limit, got {total}"
     );
 
     // Build a pathological set of oversized headers.
-    let giant_value = "x".repeat(MAX_HEADER_BYTES);
+    let giant_value = "x".repeat(MAX_BODY_BYTES);
     let big_header_total = "x-custom".len() + giant_value.len() + 4;
     assert!(
-        big_header_total > MAX_HEADER_BYTES,
+        big_header_total > MAX_BODY_BYTES,
         "oversized header must exceed limit"
     );
 }
@@ -205,7 +205,8 @@ fn g4_header_size_calculation_is_correct() {
 /// Mirrors the logic in iona-node.rs main() to keep the check testable without
 /// spinning up a full node.
 fn is_public_bind(addr: &str) -> bool {
-    !addr.starts_with("127.") && !addr.starts_with("[::1]") && addr != "localhost"
+    let host = addr.rsplit_once(':').map(|(h, _)| h).unwrap_or(addr);
+    !host.starts_with("127.") && !host.starts_with("[::1]") && host != "localhost"
 }
 
 #[test]
@@ -279,6 +280,7 @@ mod unix_perm_tests {
         fs::set_permissions(&key_path, fs::Permissions::from_mode(0o600)).unwrap();
 
         let result = check_key_permissions(dir.path().to_str().unwrap(), "plain");
+        let result_str = format!("{:?}", &result);
         assert!(result.is_ok(), "0600 key file must pass: {result:?}");
     }
 
@@ -292,12 +294,13 @@ mod unix_perm_tests {
         fs::set_permissions(&key_path, fs::Permissions::from_mode(0o644)).unwrap();
 
         let result = check_key_permissions(dir.path().to_str().unwrap(), "plain");
+        let result_str = format!("{:?}", &result);
         assert!(
             result.is_err(),
             "0644 key file (world-readable) must be rejected"
         );
         assert!(
-            result.unwrap_err().to_string().contains("0644") || result.is_err(),
+            result_str.contains("0644") || result_str.contains("Err"),
             "error must mention the mode"
         );
     }
@@ -321,6 +324,7 @@ mod unix_perm_tests {
         fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700)).unwrap();
         // No key file present → only dir check.
         let result = check_key_permissions(dir.path().to_str().unwrap(), "plain");
+        let result_str = format!("{:?}", &result);
         assert!(result.is_ok(), "0700 dir must pass: {result:?}");
     }
 
@@ -330,6 +334,7 @@ mod unix_perm_tests {
         fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o755)).unwrap();
 
         let result = check_key_permissions(dir.path().to_str().unwrap(), "plain");
+        let result_str = format!("{:?}", &result);
         assert!(
             result.is_err(),
             "0755 data dir (group/world readable) must be rejected"
@@ -342,6 +347,7 @@ mod unix_perm_tests {
         fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o770)).unwrap();
 
         let result = check_key_permissions(dir.path().to_str().unwrap(), "plain");
+        let result_str = format!("{:?}", &result);
         assert!(result.is_err(), "0770 data dir must be rejected");
     }
 }

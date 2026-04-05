@@ -279,7 +279,7 @@ impl TransitionManager {
 
         match next_activation {
             Some(act) => {
-                let ah = act.activation_height.unwrap(); // safe due to validation
+                let ah = act.activation_height.expect("activation_height validated at registration");
                 let target_pv = act.protocol_version;
 
                 if height < ah {
@@ -368,7 +368,8 @@ impl TransitionManager {
         let new_state = self.compute_next_state(height, old_pv, new_pv);
 
         if new_state != self.state {
-            self.emit_transition_events(&self.state, &new_state, height, old_pv, new_pv);
+            let old_state_clone = self.state.clone();
+            self.emit_transition_events(&old_state_clone, &new_state, height, old_pv, new_pv);
             self.history.push((height, self.state.clone()));
             self.state = new_state;
         }
@@ -385,7 +386,7 @@ impl TransitionManager {
             // Idle: if there is a next activation, move to Scheduled/PreActivation.
             TransitionState::Idle => {
                 if let Some(next) = next_activation {
-                    let ah = next.activation_height.unwrap(); // safe
+                    let ah = next.activation_height.expect("activation_height validated at registration");
                     if height < ah {
                         let blocks_remaining = ah - height;
                         if blocks_remaining <= PRE_ACTIVATION_WINDOW {
@@ -470,21 +471,53 @@ impl TransitionManager {
             }
 
             // Active: count down grace, then move to Finalized.
-            TransitionState::Active { pv, grace_remaining } => {
-                if *grace_remaining <= 1 {
-                    TransitionState::Finalized { pv: *pv }
-                } else {
-                    TransitionState::Active {
-                        pv: *pv,
-                        grace_remaining: grace_remaining - 1,
+            TransitionState::Active { pv, .. } => {
+                // Recompute grace_remaining from the activation schedule
+                if let Some(act) = current_activation {
+                    let ah = act.activation_height.unwrap_or(0);
+                    let grace = act.grace_blocks;
+                    let end_height = ah + grace;
+                    if height > end_height {
+                        // Grace expired: check for next activation directly
+                        if let Some(next) = next_activation {
+                            let next_ah = next.activation_height.expect("validated");
+                            if height < next_ah {
+                                let blocks_remaining = next_ah - height;
+                                if blocks_remaining <= PRE_ACTIVATION_WINDOW {
+                                    TransitionState::PreActivation {
+                                        target_pv: next.protocol_version,
+                                        activation_height: next_ah,
+                                        blocks_remaining,
+                                    }
+                                } else {
+                                    TransitionState::Scheduled {
+                                        target_pv: next.protocol_version,
+                                        activation_height: next_ah,
+                                    }
+                                }
+                            } else {
+                                TransitionState::Finalized { pv: *pv }
+                            }
+                        } else {
+                            TransitionState::Finalized { pv: *pv }
+                        }
+                    } else {
+                        let remaining = end_height - height;
+                        TransitionState::Active {
+                            pv: *pv,
+                            grace_remaining: std::cmp::max(remaining, 1),
+                        }
                     }
+                } else {
+                    // No activation found, finalize
+                    TransitionState::Finalized { pv: *pv }
                 }
             }
 
             // Finalized: check if there is another activation coming.
             TransitionState::Finalized { pv } => {
                 if let Some(next) = next_activation {
-                    let ah = next.activation_height.unwrap();
+                    let ah = next.activation_height.expect("activation_height validated at registration");
                     if height < ah {
                         let blocks_remaining = ah - height;
                         if blocks_remaining <= PRE_ACTIVATION_WINDOW {
@@ -921,10 +954,10 @@ mod tests {
     fn test_grace_countdown() {
         let activations = upgrade_activations();
         let mut mgr = TransitionManager::new(activations, 101).unwrap();
-        assert!(matches!(mgr.state(), TransitionState::Active { grace_remaining: 9 }));
+        assert!(matches!(mgr.state(), TransitionState::Active { grace_remaining: 9, .. }));
 
         mgr.on_block(102);
-        assert!(matches!(mgr.state(), TransitionState::Active { grace_remaining: 8 }));
+        assert!(matches!(mgr.state(), TransitionState::Active { grace_remaining: 8, .. }));
 
         // ... down to 0
         for i in 0..8 {
@@ -932,7 +965,7 @@ mod tests {
         }
         // After 9 more blocks, we should reach height 111 -> grace_remaining 0? Let's calculate: start at 101 with 9, after 1 block at 102 ->8, ... at 110 ->1, at 111 ->0, should transition to Finalized.
         mgr.on_block(110);
-        assert!(matches!(mgr.state(), TransitionState::Active { grace_remaining: 1 }));
+        assert!(matches!(mgr.state(), TransitionState::Active { grace_remaining: 1, .. }));
         mgr.on_block(111);
         assert!(matches!(mgr.state(), TransitionState::Finalized { pv: 2 }));
     }

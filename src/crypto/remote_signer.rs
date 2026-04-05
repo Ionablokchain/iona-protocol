@@ -215,6 +215,15 @@ mod tests {
     fn test_health_check() {
         let server = MockServer::start();
 
+        // Mock /pubkey (called by connect)
+        let _pubkey_mock = server.mock(|when, then| {
+            when.method(GET).path("/pubkey");
+            // Return a valid base64-encoded 32-byte public key
+            then.status(200)
+                .header("content-type", "application/json")
+                .body(r#"{"pubkey_base64":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}"#);
+        });
+
         // Mock /health
         let health_mock = server.mock(|when, then| {
             when.method(GET).path("/health");
@@ -223,7 +232,8 @@ mod tests {
 
         let signer = RemoteSigner::connect(server.base_url(), Duration::from_secs(2)).unwrap();
         assert!(signer.is_healthy());
-        health_mock.assert();
+        // health_mock may be hit multiple times; just check it was called
+        assert!(health_mock.hits() >= 1);
 
         // Fallback to /pubkey if /health not implemented
         let no_health_server = MockServer::start();
@@ -234,7 +244,7 @@ mod tests {
         });
         let signer2 = RemoteSigner::connect(no_health_server.base_url(), Duration::from_secs(2)).unwrap();
         assert!(signer2.is_healthy()); // should fall back to /pubkey
-        pubkey_mock.assert();
+        assert!(pubkey_mock.hits() >= 1);
     }
 
     #[test]

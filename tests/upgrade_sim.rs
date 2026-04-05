@@ -32,6 +32,7 @@ fn make_block(height: u64, pv: u32) -> Block {
     let txs = vec![];
     Block {
         header: BlockHeader {
+            pv: 0,
             height,
             round: 0,
             prev: Hash32::zero(),
@@ -55,6 +56,8 @@ fn make_block(height: u64, pv: u32) -> Block {
 
 fn make_hello(pvs: Vec<u32>) -> Hello {
     Hello {
+        capabilities: 0,
+        peer_id: None,
         supported_pv: pvs,
         supported_sv: vec![0, 1, 2, 3, 4],
         software_version: "27.1.0".into(),
@@ -211,9 +214,9 @@ fn upgrade_sim_value_conservation() {
 #[test]
 fn upgrade_sim_root_equivalence() {
     let root = [42u8; 32];
-    assert!(check_root_equivalence(&root, &root).is_ok());
+    assert!(check_root_equivalence(&iona::types::Hash32(root), &iona::types::Hash32(root)).is_ok());
     let other = [43u8; 32];
-    assert!(check_root_equivalence(&root, &other).is_err());
+    assert!(check_root_equivalence(&iona::types::Hash32(root), &iona::types::Hash32(other)).is_err());
 }
 
 // ─── 10.2: Handshake / compatibility tests ─────────────────────────────────
@@ -344,8 +347,8 @@ fn upgrade_sim_meta_roundtrip() {
     assert!(!meta.has_pending_migration());
 
     // Save and reload
-    meta.save(data_dir).unwrap();
-    let loaded = NodeMeta::load(data_dir).unwrap().unwrap();
+    meta.save(&iona::storage::layout::DataLayout::new(data_dir)).unwrap();
+    let loaded = NodeMeta::load(&iona::storage::layout::DataLayout::new(data_dir)).unwrap().unwrap();
     assert_eq!(loaded.schema_version, meta.schema_version);
     assert_eq!(loaded.protocol_version, meta.protocol_version);
 
@@ -362,22 +365,22 @@ fn upgrade_sim_migration_crash_safe() {
     let data_dir = dir.path().to_str().unwrap();
 
     let mut meta = NodeMeta::new_current();
-    meta.save(data_dir).unwrap();
+    meta.save(&iona::storage::layout::DataLayout::new(data_dir)).unwrap();
 
     // Begin migration
-    meta.begin_migration(3, 4, "test migration", data_dir).unwrap();
+    meta.begin_migration(3, 4, "test migration", &iona::storage::layout::DataLayout::new(data_dir)).unwrap();
     assert!(meta.has_pending_migration());
 
     // Simulate crash: reload from disk
-    let reloaded = NodeMeta::load(data_dir).unwrap().unwrap();
+    let reloaded = NodeMeta::load(&iona::storage::layout::DataLayout::new(data_dir)).unwrap().unwrap();
     assert!(reloaded.has_pending_migration());
     let ms = reloaded.migration_state.unwrap();
     assert_eq!(ms.from_sv, 3);
     assert_eq!(ms.to_sv, 4);
 
     // Complete migration
-    meta.end_migration(data_dir).unwrap();
-    let reloaded2 = NodeMeta::load(data_dir).unwrap().unwrap();
+    meta.end_migration(&iona::storage::layout::DataLayout::new(data_dir)).unwrap();
+    let reloaded2 = NodeMeta::load(&iona::storage::layout::DataLayout::new(data_dir)).unwrap().unwrap();
     assert!(!reloaded2.has_pending_migration());
 }
 

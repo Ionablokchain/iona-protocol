@@ -25,7 +25,7 @@
 //! ```
 
 use crate::execution::{execute_block, KvState};
-use crate::replay::nondeterminism::{NdLogger, NdSource};
+use crate::replay::nondeterminism::{NdSeverity, NdLogger, NdSource};
 use crate::types::{Block, Hash32, Height, Receipt};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -127,7 +127,7 @@ pub fn verify_block_reproducibility(
     block: &Block,
     initial_state: &KvState,
     config: &ReproducibilityConfig,
-    logger: Option<&mut NdLogger>,
+    mut logger: Option<&mut NdLogger>,
 ) -> ReproducibilityResult {
     let proposer_addr = if block.header.proposer_pk.is_empty() {
         "0000000000000000000000000000000000000000".to_string()
@@ -141,9 +141,10 @@ pub fn verify_block_reproducibility(
         if let Some(ref mut l) = logger {
             l.log(
                 NdSource::HashmapIteration,
-                format!("block execution iteration {i} at height {}", block.header.height),
+                NdSeverity::Warning,
+                &format!("block execution iteration {i} at height {}", block.header.height),
+                "",
                 None,
-                Some(file!()),
             );
         }
 
@@ -159,8 +160,9 @@ pub fn verify_block_reproducibility(
             if let Some(ref mut l) = logger {
                 l.log(
                     NdSource::Custom("State root divergence".into()),
-                    format!("iteration {} root differs from canonical", i),
-                    Some(format!("root: {:?}", roots[i])),
+                    NdSeverity::Critical,
+                    &format!("iteration {} root differs from canonical", i),
+                    &format!("root: {:?}", roots[i]),
                     Some(file!()),
                 );
             }
@@ -201,7 +203,7 @@ pub fn verify_chain_reproducibility(
     config: &ReproducibilityConfig,
 ) -> BatchReproducibilityResult {
     let mut logger = if config.enable_nondeterminism_logging {
-        Some(NdLogger::new())
+        Some(NdLogger::new(true))
     } else {
         None
     };
@@ -244,7 +246,7 @@ pub fn verify_chain_reproducibility(
         info!("Verified block {} / {}", idx + 1, blocks.len());
     }
 
-    let nondeterminism_report = logger.map(|l| format!("{}", l.finalize()));
+    let nondeterminism_report = logger.map(|l| l.finalize().join("\n"));
 
     let all_reproducible = first_failure.is_none();
     BatchReproducibilityResult {
@@ -319,6 +321,7 @@ pub fn compare_states(a: &KvState, b: &KvState) -> Vec<String> {
             None => {
                 diffs.push(format!("balance {} only in A: {}", addr, bal_a));
             }
+                    Some(_) => { /* already set */ }
         }
     }
     for (addr, bal_b) in &b.balances {
@@ -336,6 +339,7 @@ pub fn compare_states(a: &KvState, b: &KvState) -> Vec<String> {
             None => {
                 diffs.push(format!("nonce {} only in A: {}", addr, nonce_a));
             }
+                    Some(_) => { /* already set */ }
         }
     }
     for (addr, nonce_b) in &b.nonces {
@@ -353,6 +357,7 @@ pub fn compare_states(a: &KvState, b: &KvState) -> Vec<String> {
             None => {
                 diffs.push(format!("kv {} only in A: {:?}", key, val_a));
             }
+                    Some(_) => { /* already set */ }
         }
     }
     for (key, val_b) in &b.kv {
@@ -376,6 +381,7 @@ mod tests {
     fn empty_block(height: Height, state_root: Hash32) -> Block {
         Block {
             header: BlockHeader {
+                pv: 0,
                 height,
                 round: 0,
                 prev: Hash32::zero(),

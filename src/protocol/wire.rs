@@ -310,7 +310,7 @@ mod tests {
             (vec![1, 2], vec![1, 2], 2),
             (vec![1, 2, 3], vec![2, 3], 3),
             (vec![2, 3], vec![1, 2, 3], 3),
-            (vec![3], vec![1, 2], 2), // intersection exists (2) but session PV = min(3,2) = 2
+            (vec![2, 3], vec![1, 2], 2), // intersection={2}, session PV = min(3,2) = 2
         ];
         for (local_pv, remote_pv, expected) in cases {
             let local = make_hello(1, local_pv, 0);

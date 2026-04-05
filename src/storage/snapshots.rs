@@ -26,12 +26,11 @@
 //! # Example
 //!
 //! ```rust,ignore
-//! use iona::snapshot::{write_snapshot, restore_latest_if_missing};
-//!
-//! write_snapshot("./data", 100, &state, 3)?;
-//! if let Some(height) = restore_latest_if_missing("./data", "./data/state_full.json")? {
-//!     println!("Restored snapshot from height {}", height);
-//! }
+//! use crate::storage::layout::DataLayout;
+//! // write_snapshot("./data", 100, &state, 3)?;
+//! // if let Some(height) = restore_latest_if_missing("./data", "./data/state_full.json")? {
+//! //     println!("Restored snapshot from height {}", height);
+//! // }
 //! ```
 
 use crate::crypto::Verifier;
@@ -277,6 +276,8 @@ pub fn list_snapshot_heights(data_dir: &str) -> io::Result<Vec<u64>> {
         }
     }
     heights.sort_unstable();
+    heights.sort();
+    heights.dedup();
     Ok(heights)
 }
 

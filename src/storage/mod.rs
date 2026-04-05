@@ -8,12 +8,23 @@
 //!
 //! It uses the underlying `DataLayout` for path management and atomic writes.
 
-use crate::crypto::ed25519::Ed25519Keypair;
+
+pub mod layout;
+pub mod meta;
+pub mod evidence_store;
+pub mod migrations;
+pub mod block_store;
+pub mod peer_store;
+pub mod receipts_store;
+pub mod schema_monotonicity;
+pub mod snapshots;
+
+use crate::crypto::ed25519::Ed25519Signer as Ed25519Keypair;
 use crate::crypto::keystore;
-use crate::data_layout::DataLayout;
+use crate::storage::layout::DataLayout;
 use crate::execution::KvState;
-use crate::node_meta::{NodeMeta, NodeMetaError};
-use crate::slashing::StakeLedger;
+use crate::storage::meta::{NodeMeta, NodeMetaError};
+use crate::economics::staking::StakingState as StakeLedger;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
@@ -21,16 +32,18 @@ use std::io;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+pub const CURRENT_SCHEMA_VERSION: u32 = 5;
+
 // Re-export current schema version for external use.
-pub use crate::storage::CURRENT_SCHEMA_VERSION;
+
 
 /// Metadata stored in `<data_dir>/schema.json`.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct SchemaMeta {
     pub version: u32,
-    /// Unix timestamp of the last migration (informational).
+    /// ISO-8601 timestamp of the last migration (informational).
     #[serde(default)]
-    pub migrated_at: Option<u64>,
+    pub migrated_at: Option<String>,
     /// Human-readable history of applied migrations.
     #[serde(default)]
     pub migration_log: Vec<String>,
@@ -47,7 +60,6 @@ impl SchemaMeta {
 }
 
 /// Main handle for node data directory.
-#[derive(Clone)]
 pub struct DataDir {
     layout: DataLayout,
 }
@@ -65,6 +77,15 @@ impl DataDir {
         self.layout.ensure_all()
     }
 
+    /// Returns the root path of the data directory.
+    pub fn root(&self) -> &std::path::Path {
+        self.layout.root()
+    }
+
+    /// Returns a reference to the underlying layout.
+    pub fn layout(&self) -> &DataLayout {
+        &self.layout
+    }
     // ------------------------------------------------------------------------
     // Path helpers (compatibility with existing API)
     // ------------------------------------------------------------------------
@@ -207,7 +228,7 @@ impl DataDir {
         let path = self.layout.state_kv_path();
         let out = serde_json::to_string_pretty(state)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("state.json encode: {e}")))?;
-        self.layout.atomic_write(&path, out.as_bytes())?;
+        DataLayout::atomic_write(&path, out.as_bytes())?;
         Ok(())
     }
 
@@ -228,7 +249,7 @@ impl DataDir {
         let path = self.layout.state_full_path();
         let out = serde_json::to_string_pretty(state)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("state_full.json encode: {e}")))?;
-        self.layout.atomic_write(&path, out.as_bytes())?;
+        DataLayout::atomic_write(&path, out.as_bytes())?;
         Ok(())
     }
 
@@ -253,7 +274,7 @@ impl DataDir {
         let path = self.layout.stakes_path();
         let out = serde_json::to_string_pretty(stakes)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("stakes.json encode: {e}")))?;
-        self.layout.atomic_write(&path, out.as_bytes())?;
+        DataLayout::atomic_write(&path, out.as_bytes())?;
         Ok(())
     }
 
@@ -278,7 +299,7 @@ impl DataDir {
         let path = self.layout.schema_path();
         let json = serde_json::to_string_pretty(meta)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("schema.json encode: {e}")))?;
-        self.layout.atomic_write(&path, json.as_bytes())
+        DataLayout::atomic_write(&path, json.as_bytes())
     }
 
     /// Run a single migration step from `from_version` to `from_version + 1`.
@@ -344,9 +365,9 @@ impl DataDir {
             2 => {
                 let old_wal = self.layout.wal_flat_path(); // was "wal.jsonl"
                 let wal_dir = self.layout.wal_dir();
-                if old_wal.exists() && !wal_dir.exists() {
+                let new_seg = wal_dir.join("wal_00000000.jsonl");
+                if old_wal.exists() && !new_seg.exists() {
                     fs::create_dir_all(&wal_dir)?;
-                    let new_seg = wal_dir.join("wal_00000000.jsonl");
                     fs::rename(&old_wal, &new_seg)?;
                     meta.migration_log.push(format!(
                         "[{timestamp}] v2 → v3: wal.jsonl migrated to wal/wal_00000000.jsonl"
@@ -360,12 +381,12 @@ impl DataDir {
 
             // v3 → v4: Introduce node_meta.json with protocol version.
             3 => {
-                crate::migrations::m0004_protocol_version::migrate(&self.layout, meta)?;
+                crate::storage::migrations::m0004_protocol_version::migrate(&self.layout, meta)?;
             }
 
             // v4 → v5: Add tx_index.json.
             4 => {
-                crate::migrations::m0005_add_tx_index::migrate(&self.layout, meta)?;
+                crate::storage::migrations::m0005_add_tx_index::migrate(&self.layout, meta)?;
             }
 
             v => {
@@ -426,7 +447,7 @@ impl DataDir {
             tracing::info!(version = v, "schema migration step complete");
         }
 
-        meta.migrated_at = Some(now_unix_secs());
+        meta.migrated_at = Some(now_iso8601());
         self.write_schema(&meta)?;
 
         tracing::info!(
@@ -443,4 +464,39 @@ fn now_unix_secs() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+/// Returns current time as an ISO-8601 UTC string.
+fn now_iso8601() -> String {
+    let secs = now_unix_secs();
+    // Simple UTC formatting without external crate.
+    let s = secs % 60;
+    let m = (secs / 60) % 60;
+    let h = (secs / 3600) % 24;
+    let days = secs / 86400;
+    // Days since 1970-01-01 → year/month/day (good enough for informational timestamp).
+    let (y, mo, d) = days_to_ymd(days);
+    format!("{y:04}-{mo:02}-{d:02}T{h:02}:{m:02}:{s:02}Z")
+}
+
+fn days_to_ymd(mut days: u64) -> (u64, u64, u64) {
+    let mut y = 1970u64;
+    loop {
+        let year_days = if is_leap(y) { 366 } else { 365 };
+        if days < year_days { break; }
+        days -= year_days;
+        y += 1;
+    }
+    let leap = is_leap(y);
+    let month_days: [u64; 12] = [31, if leap {29} else {28}, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    let mut mo = 0usize;
+    while mo < 12 && days >= month_days[mo] {
+        days -= month_days[mo];
+        mo += 1;
+    }
+    (y, (mo + 1) as u64, days + 1)
+}
+
+fn is_leap(y: u64) -> bool {
+    (y % 4 == 0 && y % 100 != 0) || y % 400 == 0
 }

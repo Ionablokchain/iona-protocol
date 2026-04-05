@@ -652,8 +652,8 @@ pub fn detect_divergence(snapshots: &[NodeSnapshot], compare_full_state: bool) -
 
     DivergenceReport {
         snapshots: snapshots.to_vec(),
-        divergences,
         all_agree: divergences.is_empty(),
+        divergences,
         node_count: snapshots.len(),
         heights_checked: heights,
     }
@@ -710,8 +710,8 @@ pub fn detect_divergence_range(
 
     DivergenceReport {
         snapshots,
-        divergences: all_divergences,
         all_agree: all_divergences.is_empty(),
+        divergences: all_divergences,
         node_count: node_snapshots.len(),
         heights_checked,
     }
