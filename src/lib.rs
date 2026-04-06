@@ -33,3 +33,5 @@ pub mod admin;
 pub mod rpc_health;
 
 pub mod rpc;
+
+pub mod upgrade;

@@ -1,0 +1,179 @@
+version: '3.9'
+
+services:
+  validator-1:
+    image: iona/iona-node:28.4.0
+    container_name: iona-validator-1
+    networks:
+      iona-testnet:
+        ipv4_address: 172.20.0.11
+    ports:
+      - "9001:9001"  # RPC server
+      - "7001:7001"  # P2P network
+      - "6001:6001"  # Metrics
+    volumes:
+      - ./data/validator-1:/var/lib/iona
+      - ./configs/validator-1.toml:/etc/iona/config.toml:ro
+    environment:
+      - RUST_LOG=info
+      - RUST_BACKTRACE=1
+    command: >
+      iona-node
+      --config /etc/iona/config.toml
+      --data /var/lib/iona
+      --profile prod
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9001/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+
+  validator-2:
+    image: iona/iona-node:28.4.0
+    container_name: iona-validator-2
+    networks:
+      iona-testnet:
+        ipv4_address: 172.20.0.12
+    ports:
+      - "9011:9001"  # RPC server
+      - "7011:7001"  # P2P network
+      - "6011:6001"  # Metrics
+    volumes:
+      - ./data/validator-2:/var/lib/iona
+      - ./configs/validator-2.toml:/etc/iona/config.toml:ro
+    environment:
+      - RUST_LOG=info
+      - RUST_BACKTRACE=1
+    command: >
+      iona-node
+      --config /etc/iona/config.toml
+      --data /var/lib/iona
+      --profile prod
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9001/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+    depends_on:
+      - validator-1
+
+  validator-3:
+    image: iona/iona-node:28.4.0
+    container_name: iona-validator-3
+    networks:
+      iona-testnet:
+        ipv4_address: 172.20.0.13
+    ports:
+      - "9021:9001"  # RPC server
+      - "7021:7001"  # P2P network
+      - "6021:6001"  # Metrics
+    volumes:
+      - ./data/validator-3:/var/lib/iona
+      - ./configs/validator-3.toml:/etc/iona/config.toml:ro
+    environment:
+      - RUST_LOG=info
+      - RUST_BACKTRACE=1
+    command: >
+      iona-node
+      --config /etc/iona/config.toml
+      --data /var/lib/iona
+      --profile prod
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9001/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+    depends_on:
+      - validator-1
+
+  validator-4:
+    image: iona/iona-node:28.4.0
+    container_name: iona-validator-4
+    networks:
+      iona-testnet:
+        ipv4_address: 172.20.0.14
+    ports:
+      - "9031:9001"  # RPC server
+      - "7031:7001"  # P2P network
+      - "6031:6001"  # Metrics
+    volumes:
+      - ./data/validator-4:/var/lib/iona
+      - ./configs/validator-4.toml:/etc/iona/config.toml:ro
+    environment:
+      - RUST_LOG=info
+      - RUST_BACKTRACE=1
+    command: >
+      iona-node
+      --config /etc/iona/config.toml
+      --data /var/lib/iona
+      --profile prod
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9001/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+    depends_on:
+      - validator-1
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: iona-prometheus
+    networks:
+      iona-testnet:
+        ipv4_address: 172.20.0.100
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/usr/share/prometheus/console_libraries'
+      - '--web.console.templates=/usr/share/prometheus/consoles'
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9090/-/healthy"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+    depends_on:
+      - validator-1
+      - validator-2
+      - validator-3
+      - validator-4
+
+networks:
+  iona-testnet:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/24
+
+volumes:
+  prometheus-data:
+    driver: local

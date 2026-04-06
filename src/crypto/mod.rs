@@ -1,17 +1,3 @@
-//! Cryptographic primitives and utilities.
-
-pub mod ed25519;
-pub mod keystore;
-pub mod remote_signer;
-pub mod tx;
-
-// Placeholder for HSM (if needed)
-#[cfg(feature = "hsm")]
-pub mod hsm;
-
-pub use ed25519::{Ed25519Signer, Ed25519Verifier};
-pub use keystore::{KeyEntry, Keystore};
-
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -24,14 +10,12 @@ pub enum CryptoError {
 }
 
 /// Public key bytes — serializes as hex string for JSON compatibility.
+///
+/// JSON map keys must be strings, so we serialize as hex instead of byte arrays.
+/// This fixes "stakes.json encode: key must be a string" when `BTreeMap<PublicKeyBytes, _>`
+/// is serialized to JSON.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct PublicKeyBytes(pub Vec<u8>);
-
-impl PublicKeyBytes {
-    pub fn as_bytes(&self) -> &[u8] {
-        &self.0
-    }
-}
 
 impl std::fmt::Display for PublicKeyBytes {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -61,16 +45,24 @@ impl<'de> Deserialize<'de> for PublicKeyBytes {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SignatureBytes(pub Vec<u8>);
 
-/// Trait for signing messages.
 pub trait Signer: Send + Sync {
     fn public_key(&self) -> PublicKeyBytes;
     fn sign(&self, msg: &[u8]) -> SignatureBytes;
 }
 
-/// Trait for verifying signatures.
 pub trait Verifier: Send + Sync {
     fn verify(pk: &PublicKeyBytes, msg: &[u8], sig: &SignatureBytes) -> Result<(), CryptoError>;
 }
+
+pub mod ed25519;
+
+pub mod tx;
+
+pub mod keystore;
+
+pub mod remote_signer;
+
+pub mod hsm;

@@ -1,0 +1,23 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    monitor: 'iona-testnet'
+
+scrape_configs:
+  - job_name: 'iona_validators'
+    static_configs:
+      - targets:
+          - 'validator-1:6001'
+          - 'validator-2:6001'
+          - 'validator-3:6001'
+          - 'validator-4:6001'
+        labels:
+          network: 'iona-testnet-1'
+    scrape_interval: 10s
+    scrape_timeout: 5s
+    metrics_path: '/metrics'
+
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']

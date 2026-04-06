@@ -1,0 +1,63 @@
+#!/bin/bash
+set -e
+
+# Post-installation script for iona-node
+
+case "$1" in
+  configure)
+    # Create iona system user if it doesn't exist
+    if ! id -u iona >/dev/null 2>&1; then
+      echo "Creating iona system user..."
+      adduser --system --no-create-home --group --home /var/lib/iona iona
+    fi
+    
+    # Create and configure data directory
+    mkdir -p /var/lib/iona
+    mkdir -p /var/log/iona
+    mkdir -p /etc/iona
+    
+    # Set ownership and permissions
+    chown -R iona:iona /var/lib/iona
+    chown -R iona:iona /var/log/iona
+    chown -R iona:iona /etc/iona
+    
+    chmod 0750 /var/lib/iona
+    chmod 0750 /var/log/iona
+    chmod 0750 /etc/iona
+    
+    # If config.toml doesn't exist, copy default
+    if [ ! -f /etc/iona/config.toml ]; then
+      cp /etc/iona/config.toml.default /etc/iona/config.toml
+      chmod 0640 /etc/iona/config.toml
+      chown iona:iona /etc/iona/config.toml
+      echo ""
+      echo "=========================================="
+      echo "IONA node installed successfully!"
+      echo "=========================================="
+      echo ""
+      echo "Next steps:"
+      echo "1. Edit configuration: /etc/iona/config.toml"
+      echo "2. Start the service: systemctl start iona-node"
+      echo "3. Check status: systemctl status iona-node"
+      echo "4. View logs: journalctl -u iona-node -f"
+      echo ""
+    fi
+    
+    # Enable systemd service
+    if command -v systemctl >/dev/null; then
+      echo "Enabling iona-node systemd service..."
+      systemctl daemon-reload
+      systemctl enable iona-node.service
+      systemctl start iona-node.service
+      echo "iona-node service enabled and started"
+    fi
+    ;;
+    
+  triggered)
+    if [ "$2" = "systemd-units-user.service" ]; then
+      systemctl daemon-reload
+    fi
+    ;;
+esac
+
+exit 0

@@ -1,60 +1,364 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# IONA Release Pipeline — v28.7.0
+#
+# Triggered by: git push tag  v28.X.Y  or  v28.X.Y-rcN
+#
+# Artefacts produced:
+#   iona-vX.Y.Z-linux-x86_64.tar.gz    + .sig + .cert + .bundle
+#   iona-vX.Y.Z-linux-aarch64.tar.gz   + .sig + .cert + .bundle
+#   iona-vX.Y.Z-darwin-aarch64.tar.gz  + .sig + .cert + .bundle
+#   iona-node_X.Y.Z_amd64.deb          + .sig
+#   iona-cli_X.Y.Z_amd64.deb           + .sig
+#   iona-signer_X.Y.Z_amd64.deb        + .sig
+#   SHA256SUMS  + SHA256SUMS.asc  (GPG)
+#   SHA512SUMS  + SHA512SUMS.asc  (GPG)
+#   sbom.cdx.json  + sbom.cdx.json.sig
+#   cosign.pub
+#   iona-release-signing-key.asc
+#   release-notes.md
+#   install.sh
+# ─────────────────────────────────────────────────────────────────────────────
 name: Release
 
 on:
   push:
     tags:
-      - "v*"
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+      - 'v[0-9]+.[0-9]+.[0-9]+-rc[0-9]+'
   workflow_dispatch:
-
-env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+    inputs:
+      tag:
+        description: 'Tag to release (e.g. v28.7.0)'
+        required: true
+        type: string
 
 permissions:
-  contents: read
+  contents: write
+  id-token: write
+  packages: write
+  security-events: write
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  RUST_BACKTRACE: 1
 
 jobs:
-  build-release:
-    runs-on: ubuntu-latest
+  # ── 0. Preflight ──────────────────────────────────────────────────────────
+  preflight:
+    name: Preflight
+    runs-on: ubuntu-22.04
+    outputs:
+      version:   ${{ steps.parse.outputs.version }}
+      tag:       ${{ steps.parse.outputs.tag }}
+      is_rc:     ${{ steps.parse.outputs.is_rc }}
+      toolchain: ${{ steps.parse.outputs.toolchain }}
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+
+      - name: Parse tag and validate
+        id: parse
+        run: |
+          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          VERSION="${TAG#v}"
+          VERSION_CORE="${VERSION%%-rc*}"
+          TOOLCHAIN=$(grep 'channel' rust-toolchain.toml | cut -d'"' -f2)
+
+          echo "tag=${TAG}"           >> "$GITHUB_OUTPUT"
+          echo "version=${VERSION}"   >> "$GITHUB_OUTPUT"
+          echo "toolchain=${TOOLCHAIN}" >> "$GITHUB_OUTPUT"
+          [[ "$TAG" == *"-rc"* ]] \
+            && echo "is_rc=true"  >> "$GITHUB_OUTPUT" \
+            || echo "is_rc=false" >> "$GITHUB_OUTPUT"
+
+          CARGO_VER=$(grep '^version' Cargo.toml | head -1 | sed -E 's/.*"(.*)".*/\1/')
+          if [[ "$CARGO_VER" != "$VERSION_CORE" ]]; then
+            echo "::error::Cargo.toml ($CARGO_VER) != tag ($VERSION_CORE)"
+            exit 1
+          fi
+          echo "::notice::Version match: $CARGO_VER == $VERSION_CORE"
+
+      - name: Security gate (cargo-audit)
+        run: |
+          cargo install cargo-audit --locked 2>/dev/null || true
+          cargo audit --deny warnings --file Cargo.lock \
+            && echo "::notice::cargo-audit passed" \
+            || { echo "::error::Vulnerabilities found — release blocked"; exit 1; }
+
+  # ── 1. Build binaries ─────────────────────────────────────────────────────
+  build:
+    name: Build — ${{ matrix.stem }}
+    needs: preflight
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-22.04
+            stem: linux-x86_64
+            use_cross: false
+            can_run: true
+
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-22.04
+            stem: linux-aarch64
+            use_cross: true
+            can_run: false
+
+          - target: aarch64-apple-darwin
+            os: macos-14
+            stem: darwin-aarch64
+            use_cross: false
+            can_run: true
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        run: |
+          rustup override set ${{ needs.preflight.outputs.toolchain }}
+          rustup target add ${{ matrix.target }}
+
+      - name: Install cross
+        if: matrix.use_cross
+        run: cargo install cross --locked
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
         with:
-          toolchain: "1.85.0"
-          components: rustfmt, clippy
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/
+          key: ${{ runner.os }}-release-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
 
-      - name: Build release binary
-        run: cargo build --release --locked --bin iona-node
-
-      - name: Package release artifact
+      - name: Build binaries
         run: |
-          mkdir -p dist
-          cp target/release/iona-node dist/iona-node
-          tar -czf dist/iona-${GITHUB_REF_NAME}.tar.gz -C dist iona-node
+          CMD=${{ matrix.use_cross && 'cross' || 'cargo' }}
+          $CMD build --release --locked --target ${{ matrix.target }} \
+            --bin iona-node --features bin-cli
+          $CMD build --release --locked --target ${{ matrix.target }} \
+            --bin iona-remote-signer --features bin-remote-signer
+          $CMD build --release --locked --target ${{ matrix.target }} \
+            --bin iona-cli --features bin-cli 2>/dev/null || true
 
-      - name: Generate SBOM
+      - name: Smoke test
+        if: matrix.can_run
+        run: target/${{ matrix.target }}/release/iona-node --version
+
+      - name: Create tarball
         run: |
-          cargo install cargo-cyclonedx --locked || true
-          cargo cyclonedx --format json --output-file dist/sbom.json || \
-            echo '{"bomFormat":"CycloneDX","specVersion":"1.4","components":[]}' > dist/sbom.json
+          TAG=${{ needs.preflight.outputs.tag }}
+          STEM=${{ matrix.stem }}
+          OUTDIR="iona-${TAG}-${STEM}"
+          BINDIR="target/${{ matrix.target }}/release"
+          mkdir -p "$OUTDIR"
 
-      - name: Generate SHA256 hashes
-        run: |
-          cd dist
-          sha256sum iona-${GITHUB_REF_NAME}.tar.gz > SHA256SUMS.txt
-          sha256sum sbom.json >> SHA256SUMS.txt
-          cat SHA256SUMS.txt
+          for bin in iona-node iona-cli iona-remote-signer; do
+            [ -f "$BINDIR/$bin" ] && cp "$BINDIR/$bin" "$OUTDIR/"
+          done
+          cp config.toml "$OUTDIR/config.toml.default"
+          cp packaging/deb/iona-node.service "$OUTDIR/" 2>/dev/null || true
+          cp CHANGELOG.md "$OUTDIR/"
+          cp dist/VERIFY.md "$OUTDIR/" 2>/dev/null || true
+          cp docs/VERIFY_RELEASE.md "$OUTDIR/" 2>/dev/null || true
+          cp -r dist/release-artifacts/validator-pack "$OUTDIR/" 2>/dev/null || true
 
-      - name: Upload release artifact
+          tar -czf "${OUTDIR}.tar.gz" "${OUTDIR}/"
+          ls -lh "${OUTDIR}.tar.gz"
+
+      - name: Upload tarball
         uses: actions/upload-artifact@v4
         with:
-          name: iona-${{ github.ref_name }}
-          if-no-files-found: error
-          retention-days: 14
-          path: |
-            dist/iona-${{ github.ref_name }}.tar.gz
-            dist/sbom.json
-            dist/SHA256SUMS.txt
+          name: tarball-${{ matrix.stem }}
+          path: iona-${{ needs.preflight.outputs.tag }}-${{ matrix.stem }}.tar.gz
+          retention-days: 7
+
+  # ── 2. Build .deb packages ────────────────────────────────────────────────
+  deb:
+    name: Build .deb — ${{ matrix.arch }}
+    needs: [preflight, build]
+    strategy:
+      matrix:
+        include:
+          - arch: amd64
+            stem: linux-x86_64
+          - arch: arm64
+            stem: linux-aarch64
+
+    runs-on: ubuntu-22.04
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download tarball
+        uses: actions/download-artifact@v4
+        with:
+          name: tarball-${{ matrix.stem }}
+
+      - name: Extract binaries
+        run: |
+          tar -xzf iona-${{ needs.preflight.outputs.tag }}-${{ matrix.stem }}.tar.gz
+          ls iona-${{ needs.preflight.outputs.tag }}-${{ matrix.stem }}/
+
+      - name: Build .deb packages
+        run: |
+          bash scripts/release/build-deb.sh \
+            "${{ needs.preflight.outputs.version }}" \
+            "${{ matrix.arch }}" \
+            "iona-${{ needs.preflight.outputs.tag }}-${{ matrix.stem }}"
+
+      - name: Upload .deb artefacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: debs-${{ matrix.arch }}
+          path: "*.deb"
+          retention-days: 7
+
+  # ── 3. Sign + SBOM + Publish ──────────────────────────────────────────────
+  sign-and-publish:
+    name: Sign, SBOM, Publish
+    needs: [preflight, build, deb]
+    runs-on: ubuntu-22.04
+    environment: release
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artefacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: tarball-*
+          merge-multiple: true
+          path: release_assets/
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: debs-*
+          merge-multiple: true
+          path: release_assets/
+
+      - name: Add installer script
+        run: cp scripts/install.sh release_assets/
+
+      - name: Generate SHA256SUMS + SHA512SUMS
+        run: |
+          cd release_assets
+          sha256sum $(ls | grep -v SHA) | sort > SHA256SUMS
+          sha512sum $(ls | grep -v SHA) | sort > SHA512SUMS
+          cat SHA256SUMS
+
+      - name: Import GPG signing key
+        env:
+          GPG_PRIVATE_KEY: ${{ secrets.IONA_RELEASE_GPG_KEY }}
+        run: echo "$GPG_PRIVATE_KEY" | gpg --batch --import
+
+      - name: GPG sign SHA256SUMS + SHA512SUMS
+        env:
+          GPG_PASSPHRASE: ${{ secrets.IONA_RELEASE_GPG_PASSPHRASE }}
+        run: |
+          cd release_assets
+          echo "$GPG_PASSPHRASE" | gpg --batch --yes --passphrase-fd 0 \
+            --detach-sign --armor SHA256SUMS
+          echo "$GPG_PASSPHRASE" | gpg --batch --yes --passphrase-fd 0 \
+            --detach-sign --armor SHA512SUMS
+          gpg --armor --export packages@example.invalid > iona-release-signing-key.asc
+          gpg --verify SHA256SUMS.asc SHA256SUMS \
+            && echo "::notice::GPG signature verified"
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: cosign sign (key-based)
+        env:
+          COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_PRIVATE_KEY }}
+          COSIGN_PASSWORD:    ${{ secrets.COSIGN_PASSWORD }}
+        run: |
+          cd release_assets
+          echo "$COSIGN_PRIVATE_KEY" | cosign public-key --key /dev/stdin > cosign.pub
+          for f in *.tar.gz *.deb install.sh; do
+            [ -f "$f" ] || continue
+            echo "$COSIGN_PRIVATE_KEY" | cosign sign-blob \
+              --key /dev/stdin \
+              --output-signature "${f}.sig" \
+              --output-certificate "${f}.cert" "$f"
+          done
+
+      - name: cosign sign keyless (Sigstore Rekor)
+        run: |
+          cd release_assets
+          for f in *.tar.gz *.deb; do
+            [ -f "$f" ] || continue
+            cosign sign-blob --output-bundle "${f}.bundle" "$f" \
+              && echo "keyless signed: $f" || echo "keyless skipped: $f"
+          done
+
+      - name: Generate SBOM (CycloneDX)
+        run: |
+          cargo install cargo-cyclonedx --locked
+          cargo cyclonedx --format json --output release_assets/sbom.cdx.json
+
+      - name: cosign sign SBOM
+        env:
+          COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_PRIVATE_KEY }}
+          COSIGN_PASSWORD:    ${{ secrets.COSIGN_PASSWORD }}
+        run: |
+          echo "$COSIGN_PRIVATE_KEY" | cosign sign-blob \
+            --key /dev/stdin \
+            --output-signature release_assets/sbom.cdx.json.sig \
+            release_assets/sbom.cdx.json
+
+      - name: Add SBOM to SHA256SUMS and re-sign
+        env:
+          GPG_PASSPHRASE: ${{ secrets.IONA_RELEASE_GPG_PASSPHRASE }}
+        run: |
+          cd release_assets
+          sha256sum sbom.cdx.json cosign.pub iona-release-signing-key.asc >> SHA256SUMS
+          rm -f SHA256SUMS.asc
+          echo "$GPG_PASSPHRASE" | gpg --batch --yes --passphrase-fd 0 \
+            --detach-sign --armor SHA256SUMS
+
+      - name: Extract release notes
+        run: |
+          VER=${{ needs.preflight.outputs.version }}
+          awk "/^## v${VER}/,/^## v[0-9]/{if(/^## v[0-9]/ && !/^## v${VER}/)exit; print}" \
+            CHANGELOG.md > release_assets/release-notes.md
+          [ -s release_assets/release-notes.md ] || \
+            cp dist/release-notes.md release_assets/release-notes.md 2>/dev/null || \
+            echo "# IONA v${VER} Release" > release_assets/release-notes.md
+
+      - name: Final asset count
+        run: |
+          echo "Assets: $(ls release_assets/ | wc -l) files"
+          ls -lh release_assets/ | sort -k9
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name:   ${{ needs.preflight.outputs.tag }}
+          name:       "IONA ${{ needs.preflight.outputs.tag }}"
+          prerelease: ${{ needs.preflight.outputs.is_rc == 'true' }}
+          body_path:  release_assets/release-notes.md
+          files:      release_assets/*
+          fail_on_unmatched_files: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Release summary
+        run: |
+          TAG=${{ needs.preflight.outputs.tag }}
+          {
+            echo "## IONA ${TAG} published"
+            echo ""
+            echo "### Verification (5 commands)"
+            echo '```bash'
+            echo "VERSION=${TAG}"
+            echo 'BASE=https://github.com/iona/iona/releases/download/${VERSION}'
+            echo 'curl -LO ${BASE}/iona-${VERSION}-linux-x86_64.tar.gz ${BASE}/SHA256SUMS ${BASE}/SHA256SUMS.asc ${BASE}/iona-release-signing-key.asc'
+            echo 'gpg --import iona-release-signing-key.asc'
+            echo 'gpg --verify SHA256SUMS.asc SHA256SUMS && sha256sum --check --ignore-missing SHA256SUMS'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

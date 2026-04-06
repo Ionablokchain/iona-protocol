@@ -1,0 +1,14 @@
+Package: iona-signer
+Version: 28.7.0
+Section: net
+Priority: optional
+Architecture: amd64
+Depends: libssl3 (>= 3.0), adduser
+Maintainer: IONA Engineering <packages@example.invalid>
+Homepage: https://github.com/iona/iona
+Description: IONA blockchain — mTLS remote signing server (v28.7.0)
+ Standalone mTLS remote signer for IONA validators.
+ Separates signing key from the main node process.
+ Supports hot certificate rotation via SIGHUP.
+ .
+ Use with HSM/KMS or air-gapped signing machines.

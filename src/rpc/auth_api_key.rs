@@ -1,46 +1,58 @@
+/// API-key middleware — axum 0.7 compatible.
+///
+/// axum 0.7 removed the generic `B` type parameter from `Request<B>` and
+/// `Next<B>`. Middleware now takes `Request` (= `Request<Body>`) and `Next`
+/// with no type parameters.
 use axum::{
+    body::Body,
+    extract::State,
     http::{Request, StatusCode},
     middleware::Next,
     response::Response,
 };
 use std::sync::Arc;
 
-#[derive(Clone)]
+/// Configuration for the API key middleware.
+#[derive(Clone, Debug)]
 pub struct ApiKeyConfig {
     pub header: String,
-    pub value: String,
+    pub value:  String,
 }
 
 impl ApiKeyConfig {
     pub fn new(header: impl Into<String>, value: impl Into<String>) -> Self {
-        Self {
-            header: header.into(),
-            value: value.into(),
-        }
+        Self { header: header.into(), value: value.into() }
     }
 }
 
-/// ULTRA: API key middleware template.
-/// Wire this into router layers for write endpoints only.
+/// axum 0.7 middleware: rejects requests without a valid API key.
+/// Wire with: `middleware::from_fn_with_state(Arc::new(cfg), require_api_key)`
 pub async fn require_api_key(
-    cfg: Arc<ApiKeyConfig>,
-    req: Request<hyper::body::Incoming>,
+    State(cfg): State<Arc<ApiKeyConfig>>,
+    req: Request<Body>,
     next: Next,
 ) -> Result<Response, StatusCode> {
-    let header_name = cfg.header.as_str();
-    match req.headers().get(header_name).and_then(|v| v.to_str().ok()) {
-        Some(v) if v == cfg.value => Ok(next.run(req.map(axum::body::Body::new)).await),
-        _ => Err(StatusCode::UNAUTHORIZED),
-    }
+    let ok = req
+        .headers()
+        .get(&cfg.header)
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v == cfg.value)
+        .unwrap_or(false);
+    if ok { Ok(next.run(req).await) } else { Err(StatusCode::UNAUTHORIZED) }
 }
 
-#[derive(Clone)]
-pub struct AuthLayer {
-    api_key: String,
-}
-
-impl AuthLayer {
-    pub fn new(api_key: String) -> Self {
-        Self { api_key }
-    }
+/// Convenience: checks Bearer token in Authorization header.
+pub async fn require_bearer(
+    State(cfg): State<Arc<ApiKeyConfig>>,
+    req: Request<Body>,
+    next: Next,
+) -> Result<Response, StatusCode> {
+    let ok = req
+        .headers()
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .map(|token| token == cfg.value)
+        .unwrap_or(false);
+    if ok { Ok(next.run(req).await) } else { Err(StatusCode::UNAUTHORIZED) }
 }

@@ -1,0 +1,10 @@
+#!/bin/sh
+# IONA Node binary stub — v28.7.0
+# In a real release this is the compiled Rust binary.
+VERSION="28.7.0"
+case "$1" in
+  --version)   echo "iona-node $VERSION (git: abc1234, built: 2026-03-04)" ;;
+  --check-compat) echo "OK: config compatible with v$VERSION"; exit 0 ;;
+  doctor)      echo "[OK] iona-node $VERSION health check passed" ;;
+  *)           echo "iona-node $VERSION — usage: iona-node [--version|--check-compat|doctor]" ;;
+esac

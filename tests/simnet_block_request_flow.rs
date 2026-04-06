@@ -1,16 +1,14 @@
-use iona::consensus::{
-    proposal_sign_bytes, BlockStore, Config, ConsensusMsg, Engine, Outbox, Proposal, Step,
-    Validator, ValidatorSet,
-};
+
+use iona::consensus::{ConsensusMsg, SimpleBlockProducer, SimpleProducerCfg, Validator, ValidatorSet, BlockStore, Outbox, Engine, Step, Config};
 use iona::crypto::ed25519::{Ed25519Keypair, Ed25519Verifier};
 use iona::crypto::Signer;
-use iona::execution::{build_block, KvState};
-use iona::net::simnet::{NetMsg, NodeId, SimNet};
+use iona::types::{Hash32, Block};
 use iona::slashing::StakeLedger;
-use iona::types::{Block, Hash32};
+use iona::execution::KvState;
+use iona::net::simnet::{SimNet, NetMsg, NodeId};
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Mutex, Arc};
 use tokio::sync::mpsc;
 
 #[derive(Default)]
@@ -34,12 +32,7 @@ struct SimOutbox {
     pub broadcasts: Vec<ConsensusMsg>,
 }
 impl SimOutbox {
-    fn new(net: SimNet) -> Self {
-        Self {
-            net,
-            broadcasts: vec![],
-        }
-    }
+    fn new(net: SimNet) -> Self { Self { net, broadcasts: vec![] } }
 }
 impl Outbox for SimOutbox {
     fn broadcast(&mut self, msg: ConsensusMsg) {
@@ -49,33 +42,13 @@ impl Outbox for SimOutbox {
     fn request_block(&mut self, block_id: Hash32) {
         self.net.request_block(block_id);
     }
-    fn on_commit(
-        &mut self,
-        _cert: &iona::consensus::CommitCertificate,
-        _block: &Block,
-        _new_state: &KvState,
-        _new_base_fee: u64,
-        _receipts: &[iona::types::Receipt],
-    ) {
-    }
+    fn on_commit(&mut self, _cert: &iona::consensus::CommitCertificate, _block: &Block, _new_state: &KvState, _new_base_fee: u64, _receipts: &[iona::types::Receipt]) {}
 }
 
-fn make_engine(
-    height: u64,
-    vset: ValidatorSet,
-    include_block_in_proposal: bool,
-) -> Engine<Ed25519Verifier> {
+fn make_engine(height: u64, vset: ValidatorSet, include_block_in_proposal: bool) -> Engine<Ed25519Verifier> {
     let mut cfg = Config::default();
     cfg.include_block_in_proposal = include_block_in_proposal;
-    Engine::new(
-        cfg,
-        vset,
-        height,
-        Hash32([0u8; 32]),
-        KvState::default(),
-        StakeLedger::default(),
-        None,
-    )
+    Engine::new(cfg, vset, height, Hash32([0u8; 32]), KvState::default(), StakeLedger::default(), None)
 }
 
 async fn pump(
@@ -96,13 +69,7 @@ async fn pump(
             }
             NetMsg::BlockRequest { from, id } => {
                 if let Some(b) = store.get(&id) {
-                    net.send_to(
-                        from,
-                        NetMsg::BlockResponse {
-                            from: self_id,
-                            block: b,
-                        },
-                    );
+                    net.send_to(from, NetMsg::BlockResponse { from: self_id, block: b });
                 }
             }
             NetMsg::BlockResponse { from: _from, block } => {
@@ -118,18 +85,10 @@ async fn observer_requests_and_receives_block_for_light_proposal() {
     let k1 = Ed25519Keypair::from_seed([1u8; 32]);
     let k2 = Ed25519Keypair::from_seed([2u8; 32]);
 
-    let vset = ValidatorSet {
-        vals: vec![
-            Validator {
-                pk: k1.public_key(),
-                power: 1,
-            },
-            Validator {
-                pk: k2.public_key(),
-                power: 1,
-            },
-        ],
-    };
+    let vset = ValidatorSet { vals: vec![
+        Validator { pk: k1.public_key(), power: 1 },
+        Validator { pk: k2.public_key(), power: 1 },
+    ]};
 
     // Setup simnet
     let (net1, rx1) = SimNet::new(1);
@@ -144,82 +103,25 @@ async fn observer_requests_and_receives_block_for_light_proposal() {
     let out1 = Arc::new(tokio::sync::Mutex::new(SimOutbox::new(net1.clone())));
     let out2 = Arc::new(tokio::sync::Mutex::new(SimOutbox::new(net2.clone())));
 
-    let p1 = tokio::spawn(pump(
-        rx1,
-        eng1.clone(),
-        k1.clone(),
-        store1.clone(),
-        out1.clone(),
-        net1.clone(),
-        1,
-    ));
-    let p2 = tokio::spawn(pump(
-        rx2,
-        eng2.clone(),
-        k1.clone(),
-        store2.clone(),
-        out2.clone(),
-        net2.clone(),
-        2,
-    ));
+    let p1 = tokio::spawn(pump(rx1, eng1.clone(), k1.clone(), store1.clone(), out1.clone(), net1.clone(), 1));
+    let p2 = tokio::spawn(pump(rx2, eng2.clone(), k1.clone(), store2.clone(), out2.clone(), net2.clone(), 2));
 
-    // Engine uses proposer_for(height, round) = vals[(height+round) % n].
-    // For height=1, round=0 => vals[(1+0)%2] = vals[1] = k2 is proposer.
-    let proposer_key = &k2;
-    let proposer_addr = hex::encode(&blake3::hash(&proposer_key.public_key().0).as_bytes()[..20]);
-
+    // Producer should be k2 at height=1 round=0 => idx=(1+0)%2=1
+    let producer = SimpleBlockProducer::new(SimpleProducerCfg { max_txs: 0, include_block_in_proposal: false });
     let block_id: Hash32;
     {
-        let eng = eng1.lock().await;
+        let mut eng = eng1.lock().await;
         assert_eq!(eng.state.step, Step::Propose);
         let mut ob = out1.lock().await;
-
-        // Build a block directly.
-        let (block, _next_state, _receipts) = build_block(
-            eng.state.height,
-            eng.state.round,
-            Hash32([0u8; 32]),
-            proposer_key.public_key().0.clone(),
-            &proposer_addr,
-            &eng.app_state,
-            eng.base_fee_per_gas,
-            vec![],
-            0,
-            0,
-        );
-        let bid = block.id();
-
-        // Build a light proposal (no block attached).
-        let sign_bytes = proposal_sign_bytes(eng.state.height, eng.state.round, &bid, None);
-        let sig = proposer_key.sign(&sign_bytes);
-        let proposal = Proposal {
-            height: eng.state.height,
-            round: eng.state.round,
-            proposer: proposer_key.public_key(),
-            block_id: bid.clone(),
-            block: None, // light proposal
-            pol_round: None,
-            signature: sig,
-        };
-
-        block_id = bid;
-        // Store the block on node 1 so it can serve block requests.
-        store1.put(block);
-        // Broadcast proposal via SimNet so node 2 receives it.
-        ob.broadcast(ConsensusMsg::Proposal(proposal));
-        assert!(
-            store1.get(&block_id).is_some(),
-            "producer must have the block"
-        );
+        assert!(producer.try_produce(&mut *eng, &k2, store1.as_ref(), &mut *ob, vec![]));
+        block_id = eng.state.proposal.as_ref().unwrap().block_id.clone();
+        assert!(store1.get(&block_id).is_some(), "producer must have the block");
     }
 
     // Give time for observer to receive proposal, request block, and then receive response.
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    tokio::time::sleep(std::time::Duration::from_millis(40)).await;
 
-    assert!(
-        store2.get(&block_id).is_some(),
-        "observer should receive requested block"
-    );
+    assert!(store2.get(&block_id).is_some(), "observer should receive requested block");
 
     p1.abort();
     p2.abort();

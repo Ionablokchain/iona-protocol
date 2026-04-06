@@ -1,0 +1,62 @@
+{
+  "chain_id": "iona-testnet-1",
+  "chain_name": "IONA Testnet v1",
+  "start_height": 0,
+  "start_timestamp": "2024-01-01T00:00:00Z",
+  "validators": [
+    {
+      "pubkey": "0x72A1C0D1B3E4F5C6D7E8F9A0B1C2D3E4F5A6B7C8D9E0F1A2B3C4D5E6F7A8B9",
+      "power": 1000000,
+      "address": "iona1q9m5lsruqrsx4lqm9j8xqu8rza5hfqz7e8r6c5"
+    },
+    {
+      "pubkey": "0xA1B2C3D4E5F6A7B8C9D0E1F2A3B4C5D6E7F8A9B0C1D2E3F4A5B6C7D8E9F0A1",
+      "power": 1000000,
+      "address": "iona1q9m5lsruqrsx4lqm9j8xqu8rza5hfqz7e9s7d6"
+    },
+    {
+      "pubkey": "0xB2C3D4E5F6A7B8C9D0E1F2A3B4C5D6E7F8A9B0C1D2E3F4A5B6C7D8E9F0A1B2",
+      "power": 1000000,
+      "address": "iona1q9m5lsruqrsx4lqm9j8xqu8rza5hfqz7e0t8e7"
+    },
+    {
+      "pubkey": "0xC3D4E5F6A7B8C9D0E1F2A3B4C5D6E7F8A9B0C1D2E3F4A5B6C7D8E9F0A1B2C3",
+      "power": 1000000,
+      "address": "iona1q9m5lsruqrsx4lqm9j8xqu8rza5hfqz7e1u9f8"
+    }
+  ],
+  "chain_params": {
+    "block_time_ms": 1000,
+    "max_block_gas": 10000000,
+    "min_gas_price": 1,
+    "gas_adjustment": 1.0,
+    "max_validators": 100
+  },
+  "initial_balances": [
+    {
+      "address": "iona1q9m5lsruqrsx4lqm9j8xqu8rza5hfqz7e8r6c5",
+      "amount": "10000000000000000000"
+    },
+    {
+      "address": "iona1q9m5lsruqrsx4lqm9j8xqu8rza5hfqz7e9s7d6",
+      "amount": "10000000000000000000"
+    },
+    {
+      "address": "iona1q9m5lsruqrsx4lqm9j8xqu8rza5hfqz7e0t8e7",
+      "amount": "10000000000000000000"
+    },
+    {
+      "address": "iona1q9m5lsruqrsx4lqm9j8xqu8rza5hfqz7e1u9f8",
+      "amount": "10000000000000000000"
+    },
+    {
+      "address": "iona1faucet0000000000000000000000000000000u3",
+      "amount": "1000000000000000000000"
+    }
+  ],
+  "security_params": {
+    "rbac_enabled": true,
+    "audit_logging_enabled": true,
+    "max_audit_log_size_mb": 1024
+  }
+}

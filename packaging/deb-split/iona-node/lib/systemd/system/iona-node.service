@@ -1,0 +1,54 @@
+[Unit]
+Description=IONA Blockchain Node - Byzantine Fault Tolerant Consensus
+Documentation=https://github.com/iona/iona
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=iona
+Group=iona
+
+# Execution
+ExecStartPre=/usr/local/bin/iona-node --check-compat --config /etc/iona/config.toml
+ExecStart=/usr/local/bin/iona-node --config /etc/iona/config.toml --data /var/lib/iona --profile prod
+ExecReload=/bin/kill -HUP $MAINPID
+
+# Restart policy
+Restart=on-failure
+RestartSec=5
+StartLimitInterval=600
+StartLimitBurst=10
+
+# Resource limits
+LimitNOFILE=65536
+LimitNPROC=65536
+MemoryLimit=2G
+
+# Security hardening
+NoNewPrivileges=true
+MemoryDenyWriteExecute=true
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+LockPersonality=yes
+ProtectClock=yes
+ProtectHostname=yes
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=iona-node
+
+# Working directory and umask
+WorkingDirectory=/var/lib/iona
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

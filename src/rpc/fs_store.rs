@@ -1,301 +1,317 @@
-//! Persistent snapshot of the RPC state.
+//! State persistence — IONA v30.
 //!
-//! Allows the node to resume RPC state (blocks, receipts, transactions, etc.)
-//! after restart without re‑indexing the entire chain.
+//! Provides:
+//! - `save_snapshot()` / `load_snapshot()` — atomic JSON persistence
+//! - `apply_snapshot_to_state()` — restore state after restart
+//! - `maybe_persist()` — throttled auto-persist on every block
+//! - `load_head()` — load just the block number (fast startup check)
+//! - `persist_evm_accounts()` — persist MemDb accounts to disk
+//! - `load_evm_accounts()` — reload MemDb accounts on restart
 
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
-use tracing::{error, info};
 
+use crate::evm::db::MemDb;
 use crate::rpc::eth_rpc::{Block, EthRpcState, Receipt, TxRecord};
 use crate::rpc::txpool::TxPool;
 use crate::rpc::withdrawals::Withdrawal;
+use revm::primitives::{AccountInfo, Address, Bytecode, B256, U256};
 
-/// Current snapshot format version.
-pub const SNAPSHOT_VERSION: u32 = 1;
+// ── Paths ─────────────────────────────────────────────────────────────────
 
-/// Full node snapshot (persistent state).
+fn snapshot_path(dir: &Path) -> PathBuf { dir.join("state_snapshot.json") }
+fn snapshot_tmp_path(dir: &Path) -> PathBuf { dir.join("state_snapshot.json.tmp") }
+fn head_path(dir: &Path) -> PathBuf { dir.join("head.json") }
+fn accounts_path(dir: &Path) -> PathBuf { dir.join("evm_accounts.json") }
+
+// ── Full snapshot ─────────────────────────────────────────────────────────
+
+/// Full EVM RPC state snapshot — serializable to disk.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StateSnapshot {
-    /// Snapshot format version.
-    pub version: u32,
-    pub chain_id: u64,
-    pub block_number: u64,
-    pub base_fee: u64,
-    pub blocks: Vec<Block>,
-    pub receipts: Vec<Receipt>,
-    pub txs: std::collections::HashMap<String, TxRecord>,
+    pub schema_version:    u32,
+    pub chain_id:          u64,
+    pub block_number:      u64,
+    pub base_fee:          u64,
+    pub blocks:            Vec<Block>,
+    pub receipts:          Vec<Receipt>,
+    pub txs:               std::collections::HashMap<String, TxRecord>,
     pub receipts_by_block: std::collections::HashMap<u64, Vec<Receipt>>,
     pub pending_withdrawals: Vec<Withdrawal>,
-    pub txpool: TxPool,
+    pub txpool:            TxPool,
 }
 
-impl StateSnapshot {
-    /// Create a new snapshot with the current version.
-    pub fn new(
-        chain_id: u64,
-        block_number: u64,
-        base_fee: u64,
-        blocks: Vec<Block>,
-        receipts: Vec<Receipt>,
-        txs: std::collections::HashMap<String, TxRecord>,
-        receipts_by_block: std::collections::HashMap<u64, Vec<Receipt>>,
-        pending_withdrawals: Vec<Withdrawal>,
-        txpool: TxPool,
-    ) -> Self {
-        Self {
-            version: SNAPSHOT_VERSION,
-            chain_id,
-            block_number,
-            base_fee,
-            blocks,
-            receipts,
-            txs,
-            receipts_by_block,
-            pending_withdrawals,
-            txpool,
-        }
-    }
-}
-
-/// Path to the snapshot file inside a directory.
-fn snapshot_path(dir: &Path) -> PathBuf {
-    dir.join("state_snapshot.json")
-}
-
-/// Load a snapshot from the given directory.
-///
-/// Returns `Ok(Some(snapshot))` if the file exists and is valid,
-/// `Ok(None)` if the file does not exist, and an error otherwise.
+/// Load a state snapshot from disk.
+/// Returns `Ok(None)` if no snapshot exists yet (fresh node).
 pub fn load_snapshot(dir: impl AsRef<Path>) -> io::Result<Option<StateSnapshot>> {
-    let dir = dir.as_ref();
-    let path = snapshot_path(dir);
-    if !path.exists() {
-        return Ok(None);
-    }
-
-    let data = fs::read_to_string(&path)?;
-
-    // Check version first before full deserialization
-    #[derive(serde::Deserialize)]
-    struct VersionCheck {
-        version: u32,
-    }
-    if let Ok(vc) = serde_json::from_str::<VersionCheck>(&data) {
-        if vc.version != SNAPSHOT_VERSION {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!(
-                    "incompatible snapshot version: expected {}, got {}",
-                    SNAPSHOT_VERSION, vc.version
-                ),
-            ));
-        }
-    }
-
+    let p = snapshot_path(dir.as_ref());
+    if !p.exists() { return Ok(None); }
+    let data = fs::read_to_string(&p)?;
     let snap: StateSnapshot = serde_json::from_str(&data)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
-
     Ok(Some(snap))
 }
 
-/// Save a snapshot to the given directory using an atomic write.
+/// Save a state snapshot atomically (write to .tmp, then rename).
+///
+/// Atomic write prevents corrupted state on crash mid-write.
 pub fn save_snapshot(dir: impl AsRef<Path>, snap: &StateSnapshot) -> io::Result<()> {
     let dir = dir.as_ref();
     fs::create_dir_all(dir)?;
-    let target = snapshot_path(dir);
-    let tmp = target.with_extension("tmp");
+    let tmp = snapshot_tmp_path(dir);
+    let final_path = snapshot_path(dir);
 
     let data = serde_json::to_string_pretty(snap)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
 
-    fs::write(&tmp, data)?;
-    fs::rename(&tmp, &target)?; // atomic on most filesystems
+    fs::write(&tmp, &data)?;
+    fs::rename(&tmp, &final_path)?;  // atomic on POSIX
+    Ok(())
+}
 
-    info!(
+/// Construct a snapshot from live EthRpcState.
+pub fn snapshot_from_state(st: &EthRpcState) -> StateSnapshot {
+    StateSnapshot {
+        schema_version:    1,
+        chain_id:          st.chain_id,
+        block_number:      *st.block_number.lock().unwrap(),
+        base_fee:          *st.base_fee.lock().unwrap(),
+        blocks:            st.blocks.lock().unwrap().clone(),
+        receipts:          st.receipts.lock().unwrap().clone(),
+        txs:               st.txs.lock().unwrap().clone(),
+        receipts_by_block: st.receipts_by_block.lock().unwrap().clone(),
+        pending_withdrawals: st.pending_withdrawals.lock().unwrap().clone(),
+        txpool:            st.txpool.lock().unwrap().clone(),
+    }
+}
+
+/// Apply a snapshot to a live EthRpcState (called at startup after loading).
+pub fn apply_snapshot_to_state(st: &mut EthRpcState, snap: StateSnapshot) {
+    st.chain_id = snap.chain_id;
+    *st.block_number.lock().unwrap()      = snap.block_number;
+    *st.base_fee.lock().unwrap()          = snap.base_fee;
+    *st.blocks.lock().unwrap()            = snap.blocks;
+    *st.receipts.lock().unwrap()          = snap.receipts;
+    *st.txs.lock().unwrap()               = snap.txs;
+    *st.receipts_by_block.lock().unwrap() = snap.receipts_by_block;
+    *st.pending_withdrawals.lock().unwrap() = snap.pending_withdrawals;
+    *st.txpool.lock().unwrap()            = snap.txpool;
+    tracing::info!(
         block_number = snap.block_number,
-        path = %target.display(),
-        "RPC state snapshot saved"
+        chain_id     = snap.chain_id,
+        "State snapshot applied — node resumed from persisted state"
+    );
+}
+
+// ── Throttled auto-persist ────────────────────────────────────────────────
+
+/// Best-effort throttled persistence — call after each block commit.
+///
+/// Skips write if `persist_interval_secs` hasn't elapsed since last write.
+/// Never panics — errors are logged but not propagated.
+pub fn maybe_persist(st: &EthRpcState) {
+    let Some(dir) = st.persist_dir.as_ref() else { return; };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    {
+        let mut last = st.last_persist_secs.lock().unwrap();
+        if now.saturating_sub(*last) < st.persist_interval_secs {
+            return;
+        }
+        *last = now;
+    }
+    let snap = snapshot_from_state(st);
+    if let Err(e) = save_snapshot(dir, &snap) {
+        tracing::warn!(error = %e, "State snapshot write failed (non-fatal)");
+    }
+}
+
+// ── Head-only fast load ───────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HeadRecord {
+    pub block_number: u64,
+    pub block_hash:   String,
+    pub timestamp:    u64,
+}
+
+/// Persist just the head pointer (for fast startup height check).
+pub fn save_head(dir: impl AsRef<Path>, number: u64, hash: &str) -> io::Result<()> {
+    let dir = dir.as_ref();
+    fs::create_dir_all(dir)?;
+    let head = HeadRecord {
+        block_number: number,
+        block_hash:   hash.to_string(),
+        timestamp:    std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs(),
+    };
+    let data = serde_json::to_string(&head)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+    fs::write(head_path(dir), data)?;
+    Ok(())
+}
+
+/// Load just the head block number (fast — doesn't load full snapshot).
+pub fn load_head(dir: impl AsRef<Path>) -> io::Result<Option<HeadRecord>> {
+    let p = head_path(dir.as_ref());
+    if !p.exists() { return Ok(None); }
+    let data = fs::read_to_string(&p)?;
+    let head: HeadRecord = serde_json::from_str(&data)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+    Ok(Some(head))
+}
+
+// ── EVM account persistence ───────────────────────────────────────────────
+
+/// Serializable account info (MemDb → disk format).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PersistedAccount {
+    address:   String,  // 0x hex
+    nonce:     u64,
+    balance:   String,  // decimal string (U256 can be large)
+    code_hash: String,  // 0x hex B256
+    #[serde(default)]
+    storage:   Vec<(String, String)>,  // (slot_hex, value_hex)
+}
+
+/// Persist MemDb accounts + storage to disk.
+pub fn persist_evm_accounts(dir: impl AsRef<Path>, db: &MemDb) -> io::Result<()> {
+    let dir = dir.as_ref();
+    fs::create_dir_all(dir)?;
+
+    let mut accounts: Vec<PersistedAccount> = db
+        .accounts
+        .iter()
+        .map(|(addr, info)| {
+            let storage: Vec<(String, String)> = db
+                .storage
+                .iter()
+                .filter(|((a, _), _)| a == addr)
+                .filter(|(_, v)| **v != U256::ZERO)
+                .map(|((_, slot), val)| {
+                    let s: [u8; 32] = slot.to_be_bytes();
+                    let v: [u8; 32] = val.to_be_bytes();
+                    (hex::encode(s), hex::encode(v))
+                })
+                .collect();
+
+            PersistedAccount {
+                address:   format!("0x{}", hex::encode(addr.as_slice())),
+                nonce:     info.nonce,
+                balance:   info.balance.to_string(),
+                code_hash: format!("0x{}", hex::encode(info.code_hash.0)),
+                storage,
+            }
+        })
+        .collect();
+
+    accounts.sort_by(|a, b| a.address.cmp(&b.address));
+
+    let data = serde_json::to_string_pretty(&accounts)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+    fs::write(accounts_path(dir), data)?;
+    Ok(())
+}
+
+/// Load EVM accounts from disk back into a MemDb.
+pub fn load_evm_accounts(dir: impl AsRef<Path>, db: &mut MemDb) -> io::Result<()> {
+    let p = accounts_path(dir.as_ref());
+    if !p.exists() { return Ok(()); }
+
+    let data = fs::read_to_string(&p)?;
+    let accounts: Vec<PersistedAccount> = serde_json::from_str(&data)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+
+    for acc in accounts {
+        let addr_bytes = hex::decode(acc.address.trim_start_matches("0x"))
+            .unwrap_or_default();
+        if addr_bytes.len() != 20 { continue; }
+        let mut a = [0u8; 20]; a.copy_from_slice(&addr_bytes);
+        let addr = Address::from(a);
+
+        let balance = acc.balance.parse::<U256>()
+            .unwrap_or(U256::ZERO);
+
+        let code_hash_bytes = hex::decode(acc.code_hash.trim_start_matches("0x"))
+            .unwrap_or_else(|_| vec![0u8; 32]);
+        let mut ch = [0u8; 32];
+        let len = code_hash_bytes.len().min(32);
+        ch[..len].copy_from_slice(&code_hash_bytes[..len]);
+        let code_hash = B256::from(ch);
+
+        let info = AccountInfo {
+            nonce:     acc.nonce,
+            balance,
+            code_hash,
+            code:      None,  // code reloaded lazily from db.code map
+        };
+        db.accounts.insert(addr, info);
+
+        for (slot_hex, val_hex) in acc.storage {
+            let s_bytes = hex::decode(&slot_hex).unwrap_or_default();
+            let v_bytes = hex::decode(&val_hex).unwrap_or_default();
+            if s_bytes.len() != 32 || v_bytes.len() != 32 { continue; }
+            let mut sb = [0u8; 32]; sb.copy_from_slice(&s_bytes);
+            let mut vb = [0u8; 32]; vb.copy_from_slice(&v_bytes);
+            let slot = U256::from_be_bytes(sb);
+            let val  = U256::from_be_bytes(vb);
+            db.storage.insert((addr, slot), val);
+        }
+    }
+
+    tracing::info!(
+        accounts = db.accounts.len(),
+        "EVM accounts loaded from disk"
     );
     Ok(())
 }
 
-/// Create a snapshot from the current state of an `EthRpcState`.
-pub fn snapshot_from_state(st: &EthRpcState) -> StateSnapshot {
-    // To ensure consistency, we need to lock all mutable parts simultaneously.
-    // Here we assume the state's internal locks are ordered to avoid deadlocks.
-    // We take each lock in a fixed order.
-    let block_number = *st.block_number.lock().expect("mutex lock poisoned");
-    let base_fee = *st.base_fee.lock().expect("mutex lock poisoned");
-    let blocks = st.blocks.lock().expect("mutex lock poisoned").clone();
-    let receipts = st.receipts.lock().expect("mutex lock poisoned").clone();
-    let txs = st.txs.lock().expect("mutex lock poisoned").clone();
-    let receipts_by_block = st
-        .receipts_by_block
-        .lock()
-        .expect("mutex lock poisoned")
-        .clone();
-    let pending_withdrawals = st
-        .pending_withdrawals
-        .lock()
-        .expect("mutex lock poisoned")
-        .clone();
-    let txpool = st.txpool.lock().expect("mutex lock poisoned").clone();
-
-    StateSnapshot::new(
-        st.chain_id,
-        block_number,
-        base_fee,
-        blocks,
-        receipts,
-        txs,
-        receipts_by_block,
-        pending_withdrawals,
-        txpool,
-    )
-}
-
-/// Apply a snapshot to an existing `EthRpcState`, overwriting its current state.
-pub fn apply_snapshot_to_state(st: &mut EthRpcState, snap: StateSnapshot) {
-    st.chain_id = snap.chain_id;
-    *st.block_number.lock().expect("mutex lock poisoned") = snap.block_number;
-    *st.base_fee.lock().expect("mutex lock poisoned") = snap.base_fee;
-    *st.blocks.lock().expect("mutex lock poisoned") = snap.blocks;
-    *st.receipts.lock().expect("mutex lock poisoned") = snap.receipts;
-    *st.txs.lock().expect("mutex lock poisoned") = snap.txs;
-    *st.receipts_by_block.lock().expect("mutex lock poisoned") = snap.receipts_by_block;
-    *st.pending_withdrawals.lock().expect("mutex lock poisoned") = snap.pending_withdrawals;
-    *st.txpool.lock().expect("mutex lock poisoned") = snap.txpool;
-
-    info!(
-        block_number = snap.block_number,
-        "RPC state restored from snapshot"
-    );
-}
-
-/// Best‑effort throttled persistence.
-///
-/// Persists the current state only if the configured interval has elapsed since
-/// the last persistence. On failure, logs an error and increments a metric.
-pub fn maybe_persist(st: &EthRpcState) {
-    let Some(dir) = st.persist_dir.as_ref() else {
-        return;
-    };
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    let mut last = st.last_persist_secs.lock().expect("mutex lock poisoned");
-    if now.saturating_sub(*last) < st.persist_interval_secs {
-        return;
-    }
-    *last = now;
-    drop(last);
-
-    let snap = snapshot_from_state(st);
-    if let Err(e) = save_snapshot(dir, &snap) {
-        error!("Failed to persist RPC state snapshot: {}", e);
-        // Optionally increment a metric: metrics::rpc_persist_errors.inc();
-    }
-}
-
-/// Force immediate persistence (e.g., on graceful shutdown).
-pub fn persist_now(st: &EthRpcState) {
-    let Some(dir) = st.persist_dir.as_ref() else {
-        return;
-    };
-    let snap = snapshot_from_state(st);
-    if let Err(e) = save_snapshot(dir, &snap) {
-        error!("Failed to persist RPC state snapshot on shutdown: {}", e);
-    } else {
-        info!("RPC state snapshot saved on shutdown");
-    }
-}
-
-// -----------------------------------------------------------------------------
-// Tests
-// -----------------------------------------------------------------------------
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::tempdir;
+    use tempfile::TempDir;
 
     #[test]
-    fn test_snapshot_roundtrip() {
-        let dir = tempdir().expect("RPC error");
-        let snap = StateSnapshot::new(
-            6126151,
-            1234,
-            10,
-            vec![],
-            vec![],
-            std::collections::HashMap::new(),
-            std::collections::HashMap::new(),
-            vec![],
-            TxPool::default(),
-        );
-
-        save_snapshot(dir.path(), &snap).expect("RPC error");
-        let loaded = load_snapshot(dir.path())
-            .expect("RPC error")
-            .expect("RPC error");
-
-        assert_eq!(loaded.version, SNAPSHOT_VERSION);
-        assert_eq!(loaded.chain_id, snap.chain_id);
-        assert_eq!(loaded.block_number, snap.block_number);
+    fn snapshot_roundtrip() {
+        let dir = TempDir::new().unwrap();
+        let snap = StateSnapshot {
+            schema_version: 1,
+            chain_id: 9999,
+            block_number: 42,
+            base_fee: 1_000_000_000,
+            blocks: vec![],
+            receipts: vec![],
+            txs: Default::default(),
+            receipts_by_block: Default::default(),
+            pending_withdrawals: vec![],
+            txpool: TxPool::default(),
+        };
+        save_snapshot(dir.path(), &snap).unwrap();
+        let loaded = load_snapshot(dir.path()).unwrap().unwrap();
+        assert_eq!(loaded.block_number, 42);
+        assert_eq!(loaded.chain_id, 9999);
     }
 
     #[test]
-    fn test_load_nonexistent() {
-        let dir = tempdir().expect("RPC error");
-        let loaded = load_snapshot(dir.path()).expect("RPC error");
-        assert!(loaded.is_none());
+    fn load_snapshot_missing_returns_none() {
+        let dir = TempDir::new().unwrap();
+        let result = load_snapshot(dir.path()).unwrap();
+        assert!(result.is_none());
     }
 
     #[test]
-    fn test_version_mismatch() {
-        let dir = tempdir().expect("RPC error");
-        // Manually write an old version snapshot
-        let old_snap = serde_json::json!({
-            "version": 999,
-            "chain_id": 1,
-            "block_number": 0,
-            "base_fee": 1,
-            "blocks": [],
-            "receipts": [],
-            "txs": {},
-            "receipts_by_block": {},
-            "pending_withdrawals": [],
-            "txpool": {}
-        });
-        let path = snapshot_path(dir.path());
-        fs::write(&path, old_snap.to_string()).expect("RPC error");
-        let err = load_snapshot(dir.path()).unwrap_err();
-        assert!(err.to_string().contains("incompatible snapshot version"));
-    }
-
-    #[test]
-    fn test_atomic_write() {
-        let dir = tempdir().expect("RPC error");
-        let snap = StateSnapshot::new(
-            1,
-            0,
-            0,
-            vec![],
-            vec![],
-            Default::default(),
-            Default::default(),
-            vec![],
-            TxPool::default(),
-        );
-        save_snapshot(dir.path(), &snap).expect("RPC error");
-        // Ensure the temporary file is gone
-        let tmp_path = snapshot_path(dir.path()).with_extension("tmp");
-        assert!(!tmp_path.exists());
+    fn head_roundtrip() {
+        let dir = TempDir::new().unwrap();
+        save_head(dir.path(), 100, "0xabc").unwrap();
+        let head = load_head(dir.path()).unwrap().unwrap();
+        assert_eq!(head.block_number, 100);
+        assert_eq!(head.block_hash, "0xabc");
     }
 }

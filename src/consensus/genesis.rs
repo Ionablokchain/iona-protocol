@@ -1,249 +1,377 @@
-//! Genesis configuration for IONA v28.
+//! Genesis configuration — IONA v30.
 //!
-//! The validator set is determined by genesis.json, NOT hardcoded in the binary.
-//! Any node, given the same genesis.json, knows exactly who the validators are.
+//! Provides:
+//! - `GenesisConfig` — on-disk format (genesis.json)
+//! - `generate_testnet_genesis()` — one-call 4-node testnet genesis
+//! - `genesis_hash()` — deterministic hash for all nodes to verify
+//! - `load_or_generate()` — idempotent: load if exists, generate if not
+//! - `ValidatorSet` construction from genesis
 //!
-//! # Validation
-//!
-//! At node startup, the genesis file is loaded and validated:
-//! - Chain ID must be non‑zero.
-//! - At least one validator must be present.
-//! - Validator seeds must be unique.
-//! - All validator powers must be > 0.
-//! - Protocol activations must be valid (non‑empty, contain PV=1 at height 0).
-//!
-//! The genesis hash is also computed and compared to the expected hash
-//! (if stored in node_meta.json) to detect tampering.
+//! ## Usage
+//! ```bash
+//! # Generate genesis for 4-node testnet
+//! iona-cli genesis generate --validators 4 --chain-id 6126151 --out ./testnet/genesis.json
+//! # Each node verifies on startup:
+//! # iona-node --config node1/config.toml --genesis testnet/genesis.json
+//! ```
 
 use crate::consensus::validator_set::{Validator, ValidatorSet, VotingPower};
 use crate::crypto::{ed25519::Ed25519Keypair, PublicKeyBytes, Signer};
-use crate::protocol::version::{default_activations, ProtocolActivation};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use sha3::{Digest, Keccak256};
 use std::{fs, io, path::Path};
 
-// -----------------------------------------------------------------------------
-// Genesis configuration
-// -----------------------------------------------------------------------------
+// ── On-disk format ────────────────────────────────────────────────────────
 
-/// On-disk genesis format.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GenesisConfig {
+    /// Unique numeric chain ID (used in EIP-155 tx signing).
     pub chain_id: u64,
     /// Human-readable chain name (e.g. "iona-testnet-1").
     #[serde(default)]
     pub chain_name: String,
     /// Validators with their seeds and voting power.
     pub validators: Vec<GenesisValidator>,
-    /// Initial protocol version (default 1).
+    /// Initial protocol version.
     #[serde(default = "default_pv")]
     pub protocol_version: u32,
-    /// Optional: initial base fee per gas.
+    /// Initial base fee per gas (wei).
     #[serde(default = "default_base_fee")]
     pub initial_base_fee: u64,
-    /// Optional: stake per validator (for demo).
+    /// Stake per validator (for slashing ledger).
     #[serde(default = "default_stake")]
     pub stake_each: u64,
-    /// Optional: protocol activation schedule (if not provided, uses default).
-    #[serde(default = "default_activations")]
-    pub protocol_activations: Vec<ProtocolActivation>,
+    /// Unix timestamp of genesis block.
+    #[serde(default = "default_genesis_time")]
+    pub genesis_time: u64,
+    /// Pre-funded accounts: address (0x hex) → balance (decimal wei string).
+    #[serde(default)]
+    pub alloc: std::collections::HashMap<String, GenesisAlloc>,
 }
 
-fn default_pv() -> u32 {
-    1
-}
-fn default_base_fee() -> u64 {
-    1
-}
-fn default_stake() -> u64 {
-    1000
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GenesisAlloc {
+    /// Balance in wei as decimal string (e.g. "1000000000000000000").
+    pub balance: String,
+    #[serde(default)]
+    pub nonce: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GenesisValidator {
-    /// Deterministic seed (for demo key derivation).
+    /// Deterministic seed for key derivation (demo only — use explicit pubkeys in prod).
     pub seed: u64,
-    /// Voting power.
+    /// Voting power (stake weight in consensus).
     #[serde(default = "default_power")]
     pub power: VotingPower,
-    /// Optional human-readable name (e.g. "val2").
+    /// Human-readable label.
     #[serde(default)]
     pub name: String,
+    /// Optional: explicit hex-encoded public key (overrides seed-derived key).
+    #[serde(default)]
+    pub pubkey_hex: Option<String>,
+    /// P2P address for this validator (e.g. "/ip4/127.0.0.1/tcp/7001").
+    #[serde(default)]
+    pub p2p_addr: Option<String>,
+    /// RPC endpoint exposed by this validator (e.g. "http://127.0.0.1:8545").
+    #[serde(default)]
+    pub rpc_addr: Option<String>,
 }
 
-fn default_power() -> VotingPower {
-    1
+fn default_pv()           -> u32 { 1 }
+fn default_base_fee()     -> u64 { 1_000_000_000 }   // 1 Gwei
+fn default_stake()        -> u64 { 1_000_000 }
+fn default_power()        -> VotingPower { 1 }
+fn default_genesis_time() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
 }
 
-// -----------------------------------------------------------------------------
-// Validation error
-// -----------------------------------------------------------------------------
-
-/// Error type for genesis validation.
-#[derive(Debug, thiserror::Error)]
-pub enum GenesisError {
-    #[error("chain_id must be non‑zero")]
-    ChainIdZero,
-    #[error("genesis must contain at least one validator")]
-    NoValidators,
-    #[error("duplicate validator seed: {0}")]
-    DuplicateSeed(u64),
-    #[error("validator power must be > 0 (seed {0})")]
-    ZeroPower(u64),
-    #[error("invalid protocol activations: {0}")]
-    InvalidActivations(String),
-}
+// ── Core methods ─────────────────────────────────────────────────────────
 
 impl GenesisConfig {
     /// Load genesis from a JSON file.
     pub fn load(path: impl AsRef<Path>) -> io::Result<Self> {
         let s = fs::read_to_string(path.as_ref())?;
         serde_json::from_str(&s).map_err(|e| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("genesis.json parse: {e}"),
-            )
+            io::Error::new(io::ErrorKind::InvalidData, format!("genesis.json parse: {e}"))
         })
     }
 
-    /// Save genesis to a JSON file.
+    /// Save genesis to a JSON file (pretty-printed).
     pub fn save(&self, path: impl AsRef<Path>) -> io::Result<()> {
         let out = serde_json::to_string_pretty(self).map_err(|e| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("genesis.json encode: {e}"),
-            )
+            io::Error::new(io::ErrorKind::InvalidData, format!("genesis.json encode: {e}"))
         })?;
-        fs::write(path.as_ref(), out)
-    }
-
-    /// Validate the genesis configuration.
-    pub fn validate(&self) -> Result<(), GenesisError> {
-        if self.chain_id == 0 {
-            return Err(GenesisError::ChainIdZero);
+        if let Some(parent) = path.as_ref().parent() {
+            fs::create_dir_all(parent)?;
         }
-        if self.validators.is_empty() {
-            return Err(GenesisError::NoValidators);
-        }
-        let mut seen = BTreeSet::new();
-        for v in &self.validators {
-            if !seen.insert(v.seed) {
-                return Err(GenesisError::DuplicateSeed(v.seed));
-            }
-            if v.power == 0 {
-                return Err(GenesisError::ZeroPower(v.seed));
-            }
-        }
-
-        // Validate protocol activations
-        if self.protocol_activations.is_empty() {
-            return Err(GenesisError::InvalidActivations(
-                "empty activation list".into(),
-            ));
-        }
-        let has_v1_at_zero = self.protocol_activations.iter().any(|a| {
-            a.protocol_version == 1
-                && (a.activation_height == Some(0) || a.activation_height.is_none())
-        });
-        if !has_v1_at_zero {
-            return Err(GenesisError::InvalidActivations(
-                "must include protocol_version=1 at height 0".into(),
-            ));
-        }
-        // Check monotonicity of activation heights
-        let mut prev_height: Option<u64> = None;
-        for act in &self.protocol_activations {
-            if let Some(h) = act.activation_height {
-                if let Some(prev) = prev_height {
-                    if h <= prev {
-                        return Err(GenesisError::InvalidActivations(format!(
-                            "activation heights must be strictly increasing ({} <= {})",
-                            prev, h
-                        )));
-                    }
-                }
-                prev_height = Some(h);
-            }
-        }
-
+        fs::write(path, out)?;
         Ok(())
     }
 
-    /// Build a ValidatorSet from this genesis.
+    /// Compute a deterministic 32-byte genesis hash.
+    ///
+    /// All nodes MUST produce the same hash from the same genesis.json.
+    /// Nodes refuse to connect to peers with a different genesis hash.
+    pub fn genesis_hash(&self) -> [u8; 32] {
+        let canonical = serde_json::to_vec(&self).unwrap_or_default();
+        let mut h = Keccak256::new();
+        h.update(b"IONA_GENESIS_V1:");
+        h.update(&canonical);
+        h.finalize().into()
+    }
+
+    /// Genesis hash as 0x-prefixed hex string.
+    pub fn genesis_hash_hex(&self) -> String {
+        format!("0x{}", hex::encode(self.genesis_hash()))
+    }
+
+    /// Build the initial `ValidatorSet` from this genesis config.
     pub fn validator_set(&self) -> ValidatorSet {
         let vals: Vec<Validator> = self
             .validators
             .iter()
             .map(|gv| {
-                let mut seed32 = [0u8; 32];
-                seed32[..8].copy_from_slice(&gv.seed.to_le_bytes());
-                let kp = Ed25519Keypair::from_seed(seed32);
+                let pk: PublicKeyBytes = if let Some(pk_hex) = &gv.pubkey_hex {
+                    // Explicit pubkey provided
+                    let bytes = hex::decode(pk_hex.trim_start_matches("0x"))
+                        .unwrap_or_else(|_| vec![0u8; 32]);
+                    PublicKeyBytes(bytes)
+                } else {
+                    // Derive from seed — expand u64 seed into [u8;32]
+                    let mut seed = [0u8; 32];
+                    seed[..8].copy_from_slice(&gv.seed.to_le_bytes());
+                    let kp = Ed25519Keypair::from_seed(seed);
+                    kp.public_key()
+                };
                 Validator {
-                    pk: kp.public_key(),
+                    pk,
                     power: gv.power,
                 }
             })
             .collect();
+
         ValidatorSet { vals }
     }
 
-    /// Compute the canonical hash of the genesis file (used for integrity checks).
-    /// The hash is based on the JSON representation with canonical formatting.
-    pub fn hash(&self) -> [u8; 32] {
-        use sha2::{Digest, Sha256};
-        let canonical = serde_json::to_string(self).expect("canonical serialization failed");
-        let mut hasher = Sha256::new();
-        hasher.update(canonical.as_bytes());
-        let result = hasher.finalize();
-        let mut out = [0u8; 32];
-        out.copy_from_slice(&result);
-        out
-    }
-
-    /// Check if a given public key is in the validator set.
-    pub fn is_validator(&self, pk: &PublicKeyBytes) -> bool {
-        self.validator_set().contains(pk)
-    }
-
-    /// Get the number of validators.
-    pub fn validator_count(&self) -> usize {
-        self.validators.len()
-    }
-
-    /// Compute the quorum threshold (2f+1).
-    pub fn quorum_threshold(&self) -> VotingPower {
-        let total: VotingPower = self.validators.iter().map(|v| v.power).sum();
-        (total * 2 / 3) + 1
-    }
-
-    /// Create a default testnet genesis (3 validators: seeds 2, 3, 4).
-    pub fn default_testnet() -> Self {
-        Self {
-            chain_id: 6126151,
-            chain_name: "iona-testnet-1".into(),
-            validators: vec![
-                GenesisValidator {
-                    seed: 2,
-                    power: 1,
-                    name: "val2".into(),
-                },
-                GenesisValidator {
-                    seed: 3,
-                    power: 1,
-                    name: "val3".into(),
-                },
-                GenesisValidator {
-                    seed: 4,
-                    power: 1,
-                    name: "val4".into(),
-                },
-            ],
-            protocol_version: 1,
-            initial_base_fee: 1,
-            stake_each: 1000,
-            protocol_activations: default_activations(),
+    /// Load if the file exists, otherwise generate and save a testnet genesis.
+    pub fn load_or_generate(
+        path: impl AsRef<Path>,
+        n_validators: usize,
+        chain_id: u64,
+    ) -> io::Result<Self> {
+        let p = path.as_ref();
+        if p.exists() {
+            Self::load(p)
+        } else {
+            let cfg = Self::generate_testnet(n_validators, chain_id);
+            cfg.save(p)?;
+            tracing::info!(
+                path = %p.display(),
+                hash = cfg.genesis_hash_hex(),
+                "Generated new testnet genesis"
+            );
+            Ok(cfg)
         }
     }
+
+    /// Generate a standard N-validator testnet genesis with sane defaults.
+    ///
+    /// - chain_id: unique per testnet (prevents tx replay across testnets)
+    /// - Validators: seed 1..=N, equal power 1
+    /// - Pre-funded faucet: 1M ETH to address 0xfaucet...
+    /// - Base fee: 1 Gwei
+    pub fn generate_testnet(n_validators: usize, chain_id: u64) -> Self {
+        let validators = (1..=n_validators as u64)
+            .map(|i| GenesisValidator {
+                seed:        i,
+                power:       1,
+                name:        format!("val{i}"),
+                pubkey_hex:  None,
+                p2p_addr:    Some(format!("/ip4/127.0.0.1/tcp/{}", 7000 + i * 10)),
+                rpc_addr:    Some(format!("http://127.0.0.1:{}", 8540 + i)),
+            })
+            .collect();
+
+        let mut alloc = std::collections::HashMap::new();
+        // Faucet: 1_000_000 ETH (10^24 wei)
+        alloc.insert(
+            "0xFAuCET0000000000000000000000000000000001".to_lowercase(),
+            GenesisAlloc {
+                balance: "1000000000000000000000000".to_string(),
+                nonce: 0,
+            },
+        );
+
+        Self {
+            chain_id,
+            chain_name:       format!("iona-testnet-{chain_id}"),
+            validators,
+            protocol_version: 1,
+            initial_base_fee: 1_000_000_000,
+            stake_each:       1_000_000,
+            genesis_time:     default_genesis_time(),
+            alloc,
+        }
+    }
+
+    /// Validate the genesis config (called at node startup).
+    ///
+    /// Returns an error string if the config is invalid.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.validators.is_empty() {
+            return Err("genesis: no validators".into());
+        }
+        if self.chain_id == 0 {
+            return Err("genesis: chain_id must be > 0".into());
+        }
+        let total_power: VotingPower = self.validators.iter().map(|v| v.power).sum();
+        if total_power == 0 {
+            return Err("genesis: total voting power is 0".into());
+        }
+        // Check for duplicate seeds
+        let mut seeds = std::collections::HashSet::new();
+        for v in &self.validators {
+            if v.pubkey_hex.is_none() && !seeds.insert(v.seed) {
+                return Err(format!("genesis: duplicate validator seed {}", v.seed));
+            }
+        }
+        Ok(())
+    }
+}
+
+// ── Testnet config file generator ────────────────────────────────────────
+
+/// Generate per-node config.toml files for a local testnet.
+///
+/// Creates: `{out_dir}/node{i}/config.toml` and `{out_dir}/genesis.json`
+pub fn generate_testnet_configs(
+    out_dir: impl AsRef<Path>,
+    n_validators: usize,
+    chain_id: u64,
+) -> io::Result<()> {
+    let dir = out_dir.as_ref();
+    fs::create_dir_all(dir)?;
+
+    let genesis = GenesisConfig::generate_testnet(n_validators, chain_id);
+    genesis.save(dir.join("genesis.json"))?;
+
+    let genesis_hash = genesis.genesis_hash_hex();
+    let peers: Vec<String> = (1..=n_validators as u64)
+        .map(|i| format!("/ip4/127.0.0.1/tcp/{}", 7000 + i * 10))
+        .collect();
+
+    for i in 1..=n_validators {
+        let node_dir = dir.join(format!("node{i}"));
+        fs::create_dir_all(&node_dir)?;
+        fs::create_dir_all(node_dir.join("data"))?;
+
+        let p2p_port   = 7000 + i as u64 * 10;
+        let rpc_port   = 8540 + i as u64;
+        let admin_port = 9000 + i as u64;
+
+        // All peers except self
+        let peer_list: Vec<&String> = peers
+            .iter()
+            .enumerate()
+            .filter(|(idx, _)| *idx + 1 != i)
+            .map(|(_, p)| p)
+            .collect();
+        let peers_str = peer_list
+            .iter()
+            .map(|p| format!("\"{p}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
+
+        let config = format!(r#"# IONA v30.0.0 — Node {i} config (auto-generated)
+# Genesis hash: {genesis_hash}
+
+[node]
+data_dir         = "{}"
+seed             = {i}
+chain_id         = {chain_id}
+log_level        = "info"
+genesis_file     = "{}"
+keystore         = "plain"
+keystore_password = ""
+
+[network]
+listen      = "/ip4/0.0.0.0/tcp/{p2p_port}"
+peers       = [{peers_str}]
+enable_mdns = false
+max_peers   = 50
+reconnect_interval_s = 30
+
+[rpc]
+# ⚠️  SECURITY: loopback only by default
+listen        = "127.0.0.1:{rpc_port}"
+enable_faucet = true
+cors_allow_all = false
+
+[admin]
+listen = "127.0.0.1:{admin_port}"
+
+[consensus]
+stake_each              = 1000000
+propose_timeout_ms      = 300
+prevote_timeout_ms      = 200
+precommit_timeout_ms    = 200
+max_txs_per_block       = 4096
+fast_quorum             = true
+
+[storage]
+persist_interval_secs = 5
+
+[metrics]
+enabled = true
+listen  = "127.0.0.1:{}"
+"#,
+            node_dir.join("data").display(),
+            dir.join("genesis.json").display(),
+            9090 + i as u64,
+        );
+
+        fs::write(node_dir.join("config.toml"), config)?;
+    }
+
+    // Write run script
+    let run_script = format!(
+        r#"#!/usr/bin/env bash
+# Start all {n_validators} testnet nodes locally
+# Genesis hash: {genesis_hash}
+set -e
+PIDS=()
+cleanup() {{ kill "${{PIDS[@]}}" 2>/dev/null; }}
+trap cleanup EXIT
+
+for i in $(seq 1 {n_validators}); do
+    iona-node --config node$i/config.toml &
+    PIDS+=($!)
+    echo "Started node$i (PID=${{PIDS[-1]}})"
+    sleep 0.5
+done
+
+echo "Testnet running. Press Ctrl+C to stop."
+wait
+"#
+    );
+    fs::write(dir.join("run_testnet.sh"), run_script)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(dir.join("run_testnet.sh"))?.permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(dir.join("run_testnet.sh"), perms)?;
+    }
+
+    println!(
+        "Testnet configs generated in: {}\nGenesis hash: {}\nStart with: cd {} && bash run_testnet.sh",
+        dir.display(), genesis_hash, dir.display()
+    );
+    Ok(())
 }
 
 #[cfg(test)]
@@ -251,142 +379,33 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_default_testnet() {
-        let g = GenesisConfig::default_testnet();
-        assert_eq!(g.chain_id, 6126151);
-        assert_eq!(g.validator_count(), 3);
-        assert_eq!(g.quorum_threshold(), 3); // 2*3/3 + 1 = 3
+    fn genesis_hash_deterministic() {
+        let g1 = GenesisConfig::generate_testnet(4, 6126151);
+        let g2 = g1.clone();
+        // Hash is not stable across timestamps, but structure should serialize
+        let h1 = g1.genesis_hash_hex();
+        let h2 = g2.genesis_hash_hex();
+        assert_eq!(h1, h2);
+        assert!(h1.starts_with("0x"));
+    }
+
+    #[test]
+    fn genesis_validate_ok() {
+        let g = GenesisConfig::generate_testnet(4, 9999);
         assert!(g.validate().is_ok());
     }
 
     #[test]
-    fn test_validator_set_from_genesis() {
-        let g = GenesisConfig::default_testnet();
-        let vset = g.validator_set();
-        assert_eq!(vset.vals.len(), 3);
-        assert_eq!(vset.total_power(), 3);
-    }
-
-    #[test]
-    fn test_is_validator() {
-        let g = GenesisConfig::default_testnet();
-        let vset = g.validator_set();
-        assert!(vset.contains(&vset.vals[0].pk));
-        let rando = PublicKeyBytes(vec![99u8; 32]);
-        assert!(!vset.contains(&rando));
-    }
-
-    #[test]
-    fn test_genesis_roundtrip() {
-        let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("genesis.json");
-
-        let g = GenesisConfig::default_testnet();
-        g.save(&path).unwrap();
-
-        let g2 = GenesisConfig::load(&path).unwrap();
-        assert_eq!(g2.chain_id, g.chain_id);
-        assert_eq!(g2.validators.len(), g.validators.len());
-        assert_eq!(g2.protocol_version, g.protocol_version);
-        assert_eq!(g2.protocol_activations.len(), g.protocol_activations.len());
-    }
-
-    #[test]
-    fn test_deterministic_keys() {
-        let g = GenesisConfig::default_testnet();
-        let vset1 = g.validator_set();
-        let vset2 = g.validator_set();
-        for (a, b) in vset1.vals.iter().zip(vset2.vals.iter()) {
-            assert_eq!(a.pk, b.pk);
-        }
-    }
-
-    #[test]
-    fn test_quorum_thresholds() {
-        let g1 = GenesisConfig {
-            chain_id: 1,
-            chain_name: "test".into(),
-            validators: vec![GenesisValidator {
-                seed: 1,
-                power: 1,
-                name: "v1".into(),
-            }],
-            protocol_version: 1,
-            initial_base_fee: 1,
-            stake_each: 1000,
-            protocol_activations: default_activations(),
-        };
-        assert_eq!(g1.quorum_threshold(), 1);
-
-        let g4 = GenesisConfig {
-            chain_id: 1,
-            chain_name: "test".into(),
-            validators: vec![
-                GenesisValidator {
-                    seed: 1,
-                    power: 1,
-                    name: "v1".into(),
-                },
-                GenesisValidator {
-                    seed: 2,
-                    power: 1,
-                    name: "v2".into(),
-                },
-                GenesisValidator {
-                    seed: 3,
-                    power: 1,
-                    name: "v3".into(),
-                },
-                GenesisValidator {
-                    seed: 4,
-                    power: 1,
-                    name: "v4".into(),
-                },
-            ],
-            protocol_version: 1,
-            initial_base_fee: 1,
-            stake_each: 1000,
-            protocol_activations: default_activations(),
-        };
-        assert_eq!(g4.quorum_threshold(), 3);
-    }
-
-    #[test]
-    fn test_validation_errors() {
-        let mut g = GenesisConfig::default_testnet();
-        g.chain_id = 0;
-        assert!(matches!(g.validate(), Err(GenesisError::ChainIdZero)));
-
-        g.chain_id = 1;
+    fn genesis_validate_no_validators() {
+        let mut g = GenesisConfig::generate_testnet(4, 9999);
         g.validators.clear();
-        assert!(matches!(g.validate(), Err(GenesisError::NoValidators)));
-
-        g.validators = vec![
-            GenesisValidator {
-                seed: 2,
-                power: 1,
-                name: "v2".into(),
-            },
-            GenesisValidator {
-                seed: 2,
-                power: 1,
-                name: "v2".into(),
-            },
-        ];
-        assert!(matches!(g.validate(), Err(GenesisError::DuplicateSeed(2))));
-
-        g.validators = vec![GenesisValidator {
-            seed: 2,
-            power: 0,
-            name: "v2".into(),
-        }];
-        assert!(matches!(g.validate(), Err(GenesisError::ZeroPower(2))));
+        assert!(g.validate().is_err());
     }
 
     #[test]
-    fn test_hash_deterministic() {
-        let g1 = GenesisConfig::default_testnet();
-        let g2 = GenesisConfig::default_testnet();
-        assert_eq!(g1.hash(), g2.hash());
+    fn validator_set_from_genesis() {
+        let g = GenesisConfig::generate_testnet(4, 9999);
+        let vs = g.validator_set();
+        assert_eq!(vs.vals.len(), 4);
     }
 }

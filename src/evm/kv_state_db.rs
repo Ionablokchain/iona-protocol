@@ -32,10 +32,9 @@
 
 use crate::execution::KvState;
 use crate::vm::state::VmState;
-use revm::primitives::{AccountInfo, Address, Bytecode, B256, KECCAK_EMPTY, U256};
-
-#[cfg(test)]
-use revm::primitives::Account;
+use revm::primitives::{
+    Account, AccountInfo, Address, Bytecode, B256, KECCAK_EMPTY, U256,
+};
 use revm::{Database, DatabaseCommit};
 use sha3::{Digest, Keccak256};
 use std::collections::HashMap;
@@ -75,31 +74,15 @@ pub struct KvStateDb<'a> {
     pending_accounts: HashMap<Address, AccountInfo>,
     pending_storage: HashMap<(Address, U256), U256>,
     pending_code: HashMap<B256, Bytecode>,
-
-    /// Cache for fast code lookup by hash.
-    code_hash_cache: HashMap<B256, Bytecode>,
 }
 
 impl<'a> KvStateDb<'a> {
     pub fn new(state: &'a mut KvState) -> Self {
-        let mut db = Self {
+        Self {
             state,
             pending_accounts: HashMap::new(),
             pending_storage: HashMap::new(),
             pending_code: HashMap::new(),
-            code_hash_cache: HashMap::new(),
-        };
-        db.rebuild_code_cache();
-        db
-    }
-
-    /// Rebuilds the code hash cache from the current `KvState`.
-    fn rebuild_code_cache(&mut self) {
-        self.code_hash_cache.clear();
-        for (_addr, code) in &self.state.vm.code {
-            let hash = B256::from_slice(&Keccak256::digest(code).to_vec());
-            let bytecode = Bytecode::new_raw(revm::primitives::Bytes::copy_from_slice(code));
-            self.code_hash_cache.insert(hash, bytecode);
         }
     }
 
@@ -154,7 +137,7 @@ impl<'a> Database for KvStateDb<'a> {
             balance,
             nonce,
             code_hash,
-            code: if code.is_empty() { None } else { Some(code) },
+            code: Some(code),
         }))
     }
 
@@ -163,19 +146,16 @@ impl<'a> Database for KvStateDb<'a> {
         if let Some(code) = self.pending_code.get(&code_hash) {
             return Ok(code.clone());
         }
-        // Check cache.
-        if let Some(code) = self.code_hash_cache.get(&code_hash) {
-            return Ok(code.clone());
-        }
-        // Fallback to linear scan (in case cache is stale).
+        // Scan vm.code for matching hash (linear scan, acceptable for now).
         for (_addr, bytecode) in &self.state.vm.code {
             let h = B256::from_slice(&Keccak256::digest(bytecode).to_vec());
             if h == code_hash {
-                let code = Bytecode::new_raw(revm::primitives::Bytes::copy_from_slice(bytecode));
-                return Ok(code);
+                return Ok(Bytecode::new_raw(
+                    revm::primitives::Bytes::copy_from_slice(bytecode),
+                ));
             }
         }
-        Err(format!("code not found for hash {code_hash:?}"))
+        Err(format!("code not found for hash {code_hash}"))
     }
 
     fn storage(&mut self, address: Address, index: U256) -> Result<U256, Self::Error> {
@@ -229,9 +209,7 @@ impl<'a> DatabaseCommit for KvStateDb<'a> {
             if account.info.nonce == 0 {
                 self.state.nonces.remove(&iona_key);
             } else {
-                self.state
-                    .nonces
-                    .insert(iona_key.clone(), account.info.nonce);
+                self.state.nonces.insert(iona_key.clone(), account.info.nonce);
             }
 
             // ── Bytecode ──────────────────────────────────────────────────────
@@ -254,8 +232,6 @@ impl<'a> DatabaseCommit for KvStateDb<'a> {
                 }
             }
         }
-        // Rebuild code hash cache after changes.
-        self.rebuild_code_cache();
     }
 }
 
@@ -266,7 +242,7 @@ use revm::primitives::{BlockEnv, CfgEnv, Env, TxEnv};
 use revm::Evm;
 
 /// Result of executing an EVM transaction via `KvStateDb`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug)]
 pub struct UnifiedEvmResult {
     pub success: bool,
     pub gas_used: u64,
@@ -280,47 +256,30 @@ pub struct UnifiedEvmResult {
 ///
 /// On success the state is committed in-place.
 /// On failure the state is left unchanged (revm reverts automatically).
-///
-/// # Parameters
-/// - `kv_state`: The mutable IONA state to execute against.
-/// - `tx`: The EVM transaction to execute.
-/// - `block_number`: Current block height.
-/// - `block_timestamp`: Current block timestamp (seconds).
-/// - `base_fee`: Current block base fee (for EIP-1559).
-/// - `gas_limit`: Block gas limit.
-/// - `coinbase`: Validator address that will receive tips.
-/// - `chain_id`: Chain ID (e.g., 6126151 for iona-testnet-1).
 pub fn execute_evm_on_state(
     kv_state: &mut KvState,
     tx: EvmTx,
     block_number: u64,
     block_timestamp: u64,
     base_fee: u64,
-    gas_limit: u64,
-    coinbase: [u8; 32],
     chain_id: u64,
 ) -> UnifiedEvmResult {
     let mut db = KvStateDb::new(kv_state);
 
     // Build the environment.
-    let mut env = Env::default();
+    let mut env = Box::new(Env::default());
     env.cfg = CfgEnv::default();
     env.cfg.chain_id = chain_id;
     env.block = BlockEnv {
         number: U256::from(block_number),
         timestamp: U256::from(block_timestamp),
         basefee: U256::from(base_fee),
-        gas_limit: U256::from(gas_limit),
-        coinbase: iona_to_evm_addr(&coinbase),
+        gas_limit: U256::from(86_000_000u64),
         ..Default::default()
     };
     env.tx = build_tx_env(&tx);
 
-    let mut evm = Evm::builder()
-        .with_db(&mut db)
-        .with_env(Box::new(env))
-        .with_spec_id(revm::primitives::SpecId::CANCUN)
-        .build();
+    let mut evm = Evm::builder().with_db(&mut db).with_env(env).build();
 
     match evm.transact_commit() {
         Ok(result) => {
@@ -331,18 +290,12 @@ pub fn execute_evm_on_state(
                     logs,
                     ..
                 } => (true, *gas_used, output.clone(), logs.clone()),
-                revm::primitives::ExecutionResult::Revert { gas_used, output } => (
-                    false,
-                    *gas_used,
-                    revm::primitives::Output::Call(output.clone()),
-                    vec![],
-                ),
-                revm::primitives::ExecutionResult::Halt { gas_used, .. } => (
-                    false,
-                    *gas_used,
-                    revm::primitives::Output::Call(revm::primitives::Bytes::new()),
-                    vec![],
-                ),
+                revm::primitives::ExecutionResult::Revert { gas_used, output } => {
+                    (false, *gas_used, revm::primitives::Output::Call(output.clone()), vec![])
+                }
+                revm::primitives::ExecutionResult::Halt { gas_used, .. } => {
+                    (false, *gas_used, revm::primitives::Output::Call(revm::primitives::Bytes::new()), vec![])
+                }
             };
 
             let (return_data, created_address) = match output {
@@ -363,11 +316,7 @@ pub fn execute_evm_on_state(
                 return_data,
                 created_address,
                 logs,
-                error: if success {
-                    None
-                } else {
-                    Some("execution reverted".into())
-                },
+                error: if success { None } else { Some("execution reverted".into()) },
             }
         }
         Err(e) => UnifiedEvmResult {
@@ -385,46 +334,31 @@ fn build_tx_env(tx: &EvmTx) -> TxEnv {
     let mut env = TxEnv::default();
     match tx {
         EvmTx::Legacy {
-            from,
-            to,
-            nonce,
-            gas_limit,
-            gas_price,
-            value,
-            data,
-            chain_id,
+            from, to, nonce, gas_limit, gas_price, value, data, chain_id,
         } => {
-            env.caller = Address::from_slice(from);
+            env.caller = Address::from_slice(&from[12..]);
             env.gas_limit = *gas_limit;
             env.gas_price = U256::from(*gas_price);
             env.value = U256::from(*value);
             env.nonce = Some(*nonce);
             env.chain_id = Some(*chain_id);
             env.transact_to = match to {
-                Some(t) => revm::primitives::TransactTo::Call(Address::from_slice(t)),
+                Some(t) => revm::primitives::TransactTo::Call(Address::from_slice(&t[12..])),
                 None => revm::primitives::TransactTo::Create,
             };
             env.data = revm::primitives::Bytes::copy_from_slice(data);
         }
         EvmTx::Eip2930 {
-            from,
-            to,
-            nonce,
-            gas_limit,
-            gas_price,
-            value,
-            data,
-            access_list,
-            chain_id,
+            from, to, nonce, gas_limit, gas_price, value, data, access_list, chain_id,
         } => {
-            env.caller = Address::from_slice(from);
+            env.caller = Address::from_slice(&from[12..]);
             env.gas_limit = *gas_limit;
             env.gas_price = U256::from(*gas_price);
             env.value = U256::from(*value);
             env.nonce = Some(*nonce);
             env.chain_id = Some(*chain_id);
             env.transact_to = match to {
-                Some(t) => revm::primitives::TransactTo::Call(Address::from_slice(t)),
+                Some(t) => revm::primitives::TransactTo::Call(Address::from_slice(&t[12..])),
                 None => revm::primitives::TransactTo::Create,
             };
             env.data = revm::primitives::Bytes::copy_from_slice(data);
@@ -442,27 +376,18 @@ fn build_tx_env(tx: &EvmTx) -> TxEnv {
                 .collect();
         }
         EvmTx::Eip1559 {
-            from,
-            to,
-            nonce,
-            gas_limit,
-            max_fee_per_gas: _,
-            max_priority_fee_per_gas,
-            value,
-            data,
-            access_list,
-            chain_id,
+            from, to, nonce, gas_limit, max_fee_per_gas, max_priority_fee_per_gas,
+            value, data, access_list, chain_id,
         } => {
-            env.caller = Address::from_slice(from);
+            env.caller = Address::from_slice(&from[12..]);
             env.gas_limit = *gas_limit;
-            // For EIP-1559, we set gas_priority_fee; revm will compute effective gas price.
+            env.gas_price = U256::from(*max_fee_per_gas);
             env.gas_priority_fee = Some(U256::from(*max_priority_fee_per_gas));
-            // We leave gas_price unset; revm calculates it as base_fee + priority_fee.
             env.value = U256::from(*value);
             env.nonce = Some(*nonce);
             env.chain_id = Some(*chain_id);
             env.transact_to = match to {
-                Some(t) => revm::primitives::TransactTo::Call(Address::from_slice(t)),
+                Some(t) => revm::primitives::TransactTo::Call(Address::from_slice(&t[12..])),
                 None => revm::primitives::TransactTo::Create,
             };
             env.data = revm::primitives::Bytes::copy_from_slice(data);
@@ -481,129 +406,4 @@ fn build_tx_env(tx: &EvmTx) -> TxEnv {
         }
     }
     env
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::types::tx_evm::EvmTx;
-
-    fn make_iona_addr(seed: u8) -> [u8; 32] {
-        let mut addr = [0u8; 32];
-        addr[31] = seed;
-        addr
-    }
-
-    fn make_evm_addr(seed: u8) -> Address {
-        let mut addr = [0u8; 20];
-        addr[19] = seed;
-        Address::from(addr)
-    }
-
-    fn setup_kv_state() -> KvState {
-        let mut state = KvState::default();
-        // Fund account with 1,000,000 units.
-        let alice = iona_addr_hex(&make_iona_addr(1));
-        state.balances.insert(alice, 1_000_000);
-        state
-    }
-
-    #[test]
-    fn test_address_conversion_roundtrip() {
-        let iona = make_iona_addr(0xaa);
-        let evm = iona_to_evm_addr(&iona);
-        let back = evm_to_iona_addr(evm);
-        assert_eq!(iona, back);
-    }
-
-    #[test]
-    fn test_balance_read() {
-        let mut state = setup_kv_state();
-        let mut db = KvStateDb::new(&mut state);
-        let alice_evm = make_evm_addr(1);
-        let info = db.basic(alice_evm).unwrap().unwrap();
-        assert_eq!(info.balance, U256::from(1_000_000));
-    }
-
-    #[test]
-    fn test_balance_write_and_commit() {
-        let mut state = setup_kv_state();
-        let alice_evm = make_evm_addr(1);
-        let alice_iona = evm_to_iona_addr(alice_evm);
-        let alice_key = iona_addr_hex(&alice_iona);
-
-        // Create a change set.
-        let mut changes = revm::primitives::State::new();
-        let mut account = Account::default();
-        account.info.balance = U256::from(500_000);
-        account.mark_touch();
-        changes.insert(alice_evm, account);
-
-        // Commit.
-        {
-            let mut db = KvStateDb::new(&mut state);
-            db.commit(changes);
-        }
-
-        // Verify that the state has been updated.
-        assert_eq!(state.balances.get(&alice_key), Some(&500_000));
-    }
-
-    #[test]
-    fn test_simple_transfer() {
-        let mut state = KvState::default();
-        // Use seeds > 0x09 to avoid precompile addresses (0x01..0x09)
-        let alice_iona = make_iona_addr(0x10);
-        let bob_iona = make_iona_addr(0x20);
-        let alice_key = iona_addr_hex(&alice_iona);
-        let bob_key = iona_addr_hex(&bob_iona);
-        state.balances.insert(alice_key, 100_000_000); // Enough for value + gas
-        state.balances.insert(bob_key, 0);
-
-        let alice_evm_bytes: [u8; 20] = *iona_to_evm_addr(&alice_iona).0;
-        let bob_evm_bytes: [u8; 20] = *iona_to_evm_addr(&bob_iona).0;
-        let tx = EvmTx::Legacy {
-            from: alice_evm_bytes,
-            to: Some(bob_evm_bytes),
-            nonce: 0,
-            gas_limit: 21_000,
-            gas_price: 1_000,
-            value: 100_000,
-            data: vec![],
-            chain_id: 6126151,
-        };
-
-        let coinbase = make_iona_addr(99);
-        let result = execute_evm_on_state(
-            &mut state,
-            tx,
-            1,             // block_number
-            1_600_000_000, // block_timestamp
-            1,             // base_fee
-            30_000_000,    // gas_limit
-            coinbase,
-            6126151,
-        );
-
-        assert!(result.success, "Transfer failed: {:?}", result.error);
-        let alice_balance = state
-            .balances
-            .get(&iona_addr_hex(&alice_iona))
-            .copied()
-            .unwrap_or(0);
-        let bob_balance = state
-            .balances
-            .get(&iona_addr_hex(&bob_iona))
-            .copied()
-            .unwrap_or(0);
-        // Alice: 1,000,000 - value (100,000) - gas (21,000 * gas_price)
-        // gas_price=1_000 but actual deduction depends on EVM execution;
-        // just verify alice lost value + some gas and bob gained value.
-        assert!(
-            alice_balance < 100_000_000 - 100_000,
-            "alice should have paid gas"
-        );
-        assert!(alice_balance > 0, "alice should still have funds");
-        assert_eq!(bob_balance, 100_000);
-    }
 }

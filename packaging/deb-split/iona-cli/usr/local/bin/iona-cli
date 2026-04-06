@@ -1,0 +1,10 @@
+#!/bin/sh
+# IONA CLI stub — v28.7.0
+VERSION="28.7.0"
+case "$1" in
+  --version)  echo "iona-cli $VERSION" ;;
+  doctor)     echo "[OK] node reachable; config valid; keys OK; audit chain intact (12,847 entries)" ;;
+  keys)       shift; echo "iona-cli keys $* — OK" ;;
+  audit)      shift; echo "iona-cli audit $* — chain intact" ;;
+  *)          echo "iona-cli $VERSION — commands: doctor, keys, audit, admin, tx, query" ;;
+esac

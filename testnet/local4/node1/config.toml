@@ -1,0 +1,43 @@
+# IONA v30.0.0 — Node 1 config
+# Chain: iona-testnet-local4 (chain_id=6126151)
+
+[node]
+data_dir          = "/home/claude/iona_v30/testnet/local4/node1/data"
+seed              = 1
+chain_id          = 6126151
+log_level         = "info"
+genesis_file      = "/home/claude/iona_v30/testnet/local4/genesis.json"
+keystore          = "plain"
+keystore_password = ""
+
+[network]
+listen               = "/ip4/0.0.0.0/tcp/7010"
+peers                = ["/ip4/127.0.0.1/tcp/7020", "/ip4/127.0.0.1/tcp/7030", "/ip4/127.0.0.1/tcp/7040"]
+enable_mdns          = false
+max_peers            = 50
+reconnect_interval_s = 30
+
+[rpc]
+# SECURITY: loopback only by default
+listen        = "127.0.0.1:8541"
+enable_faucet = true
+cors_allow_all = false
+
+[admin]
+listen = "127.0.0.1:9001"
+
+[consensus]
+stake_each           = 1000000
+propose_timeout_ms   = 300
+prevote_timeout_ms   = 200
+precommit_timeout_ms = 200
+max_txs_per_block    = 4096
+fast_quorum          = true
+
+[storage]
+persist_dir           = "/home/claude/iona_v30/testnet/local4/node1/data"
+persist_interval_secs = 5
+
+[metrics]
+enabled = true
+listen  = "127.0.0.1:9091"

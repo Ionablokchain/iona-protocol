@@ -1,0 +1,69 @@
+[Unit]
+# IONA Node Template Service Unit
+# Instantiate as: iona-node@validator1.service, iona-node@validator2.service, etc.
+# This allows running multiple validator instances on the same machine.
+Description=IONA v28 Blockchain Validator Node %i
+Documentation=https://docs.iona.io/validator-setup
+After=network-online.target
+Wants=network-online.target
+BindsTo=iona-node-setup@%i.service
+StartLimitIntervalSec=500
+StartLimitBurst=5
+
+[Service]
+Type=exec
+User=iona
+Group=iona
+WorkingDirectory=/opt/iona/%i
+
+# Load instance-specific environment variables
+EnvironmentFile=-/etc/iona/%i/iona.env
+
+# Pre-start validation for this instance
+ExecStartPre=/usr/local/bin/iona-node --check-compat --config /etc/iona/%i/config.toml
+
+# Start the validator with instance-specific configuration
+ExecStart=/usr/local/bin/iona-node --config /etc/iona/%i/config.toml --profile prod
+
+# Reload signal
+ExecReload=/bin/kill -HUP $MAINPID
+
+# Restart policy
+Restart=on-failure
+RestartSec=10s
+
+# Timeout settings
+TimeoutStartSec=120s
+TimeoutStopSec=60s
+
+# Kill behavior
+KillMode=mixed
+KillSignal=SIGTERM
+
+# Resource limits
+LimitNOFILE=65536
+LimitNPROC=4096
+
+# SECURITY HARDENING DIRECTIVES
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/opt/iona/%i/data /var/log/iona
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+MemoryDenyWriteExecute=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+SystemCallFilter=@system-service
+
+# Logging configuration
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=iona-node-%i
+
+[Install]
+WantedBy=multi-user.target

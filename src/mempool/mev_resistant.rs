@@ -23,10 +23,9 @@
 //! 5. **Anti-Backrunning Delay**: A configurable delay window prevents validators
 //!    from inserting their own transactions immediately after seeing a large trade.
 
-use crate::types::{hash_bytes, Hash32, Height, Tx};
+use crate::types::{Hash32, Height, Tx, hash_bytes};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, VecDeque};
-use tracing::{debug, warn};
 
 // ── Configuration ───────────────────────────────────────────────────────
 
@@ -50,10 +49,6 @@ pub struct MevConfig {
     pub backrun_delay_blocks: u64,
     /// Enable proposer-blind block building.
     pub enable_proposer_blindness: bool,
-    /// Maximum number of revealed transactions to keep (older ones are dropped).
-    pub max_revealed_ttl_blocks: u64,
-    /// Enable gas price sorting after fair ordering (may reintroduce some MEV).
-    pub enable_priority_sorting: bool,
 }
 
 impl Default for MevConfig {
@@ -67,8 +62,6 @@ impl Default for MevConfig {
             max_pending_commits: 100_000,
             backrun_delay_blocks: 1,
             enable_proposer_blindness: true,
-            max_revealed_ttl_blocks: 100,
-            enable_priority_sorting: false,
         }
     }
 }
@@ -95,7 +88,7 @@ pub struct TxCommit {
 pub struct TxReveal {
     /// The commit hash this reveal corresponds to.
     pub commit_hash: Hash32,
-    /// The salt used in the commit (must be provided by the client).
+    /// The salt used in the commit.
     pub commit_salt: Vec<u8>,
     /// The actual transaction.
     pub tx: Tx,
@@ -104,111 +97,56 @@ pub struct TxReveal {
 /// Status of a commit-reveal pair.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CommitStatus {
+    /// Commit received, waiting for reveal.
     Pending,
+    /// Reveal received and verified.
     Revealed,
+    /// Commit expired (TTL exceeded).
     Expired,
+    /// Commit included in a block.
     Included,
 }
 
-// ── Nonce Manager ───────────────────────────────────────────────────────
-
-/// Manages nonce ordering per sender to prevent out‑of‑order inclusions.
-#[derive(Clone, Debug, Default)]
-pub struct NonceManager {
-    next_nonce: HashMap<String, u64>,
-    pending: BTreeMap<(String, u64), Tx>,
-}
-
-impl NonceManager {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Adds a revealed transaction. Returns true if it is ready to be included
-    /// (i.e., its nonce is exactly the next expected). Otherwise, it is queued.
-    pub fn add_revealed_tx(&mut self, tx: Tx) -> bool {
-        let sender = tx.from.clone();
-        let nonce = tx.nonce;
-        let expected = self.next_nonce.get(&sender).copied().unwrap_or(0);
-
-        if nonce < expected {
-            debug!(
-                "ignoring stale transaction from {} with nonce {} (expected {})",
-                sender, nonce, expected
-            );
-            return false;
-        }
-        if nonce > expected {
-            self.pending.insert((sender.clone(), nonce), tx);
-            debug!(
-                "queued out-of-order transaction from {} (nonce {}, expected {})",
-                sender, nonce, expected
-            );
-            return false;
-        }
-        // correct nonce
-        self.next_nonce.insert(sender.clone(), expected + 1);
-        debug!("accepted transaction from {} with nonce {}", sender, nonce);
-        self.flush_pending(&sender);
-        true
-    }
-
-    fn flush_pending(&mut self, sender: &str) {
-        let mut expected = self.next_nonce.get(sender).copied().unwrap_or(0);
-        loop {
-            if let Some(_tx) = self.pending.remove(&(sender.to_string(), expected)) {
-                self.next_nonce.insert(sender.to_string(), expected + 1);
-                expected += 1;
-                debug!(
-                    "flushed pending transaction from {} (nonce {})",
-                    sender,
-                    expected - 1
-                );
-            } else {
-                break;
-            }
-        }
-    }
-
-    /// Reset the expected nonce for a sender after a new block is applied.
-    /// This is called when we know the current on‑chain nonce for the sender.
-    pub fn set_expected_nonce(&mut self, sender: &str, new_expected: u64) {
-        self.next_nonce.insert(sender.to_string(), new_expected);
-        // remove any pending transactions with nonce < new_expected (they are invalid)
-        self.pending
-            .retain(|(s, n), _| s != sender || *n >= new_expected);
-        self.flush_pending(sender);
-    }
-}
-
-// ── Threshold Encryption (simplified) ────────────────────────────────────
+// ── Threshold Encryption ────────────────────────────────────────────────
 
 /// Simulated threshold encryption envelope.
 /// In production, this would use a threshold encryption scheme (e.g., BLS threshold).
+/// For now, we use a symmetric key derived from the validator set + block hash,
+/// which provides the same ordering guarantees.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct EncryptedEnvelope {
+    /// Encrypted transaction bytes.
     pub ciphertext: Vec<u8>,
+    /// Nonce/IV for decryption.
     pub nonce: [u8; 12],
+    /// Epoch identifier (validators that can decrypt).
     pub epoch: u64,
+    /// Sender address (visible for nonce ordering).
     pub sender: String,
+    /// Sender's nonce (visible for ordering, not content).
     pub sender_nonce: u64,
 }
 
 /// Encrypt a transaction for threshold-encrypted mempool.
-pub fn encrypt_tx_envelope(tx: &Tx, epoch_secret: &[u8; 32], epoch: u64) -> EncryptedEnvelope {
-    use aes_gcm::aead::Aead;
+/// Uses AES-256-GCM with a key derived from the epoch secret.
+pub fn encrypt_tx_envelope(
+    tx: &Tx,
+    epoch_secret: &[u8; 32],
+    epoch: u64,
+) -> EncryptedEnvelope {
     use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
+    use aes_gcm::aead::Aead;
 
     let plaintext = serde_json::to_vec(tx).unwrap_or_default();
+
+    // Derive per-tx nonce from tx hash
     let tx_hash = crate::types::tx_hash(tx);
     let mut nonce_bytes = [0u8; 12];
     nonce_bytes.copy_from_slice(&tx_hash.0[..12]);
 
     let cipher = Aes256Gcm::new_from_slice(epoch_secret).expect("valid key size");
     let nonce = Nonce::from_slice(&nonce_bytes);
-    let ciphertext = cipher
-        .encrypt(nonce, plaintext.as_ref())
-        .unwrap_or_default();
+    let ciphertext = cipher.encrypt(nonce, plaintext.as_ref()).unwrap_or_default();
 
     EncryptedEnvelope {
         ciphertext,
@@ -220,9 +158,12 @@ pub fn encrypt_tx_envelope(tx: &Tx, epoch_secret: &[u8; 32], epoch: u64) -> Encr
 }
 
 /// Decrypt a transaction from a threshold-encrypted envelope.
-pub fn decrypt_tx_envelope(envelope: &EncryptedEnvelope, epoch_secret: &[u8; 32]) -> Option<Tx> {
-    use aes_gcm::aead::Aead;
+pub fn decrypt_tx_envelope(
+    envelope: &EncryptedEnvelope,
+    epoch_secret: &[u8; 32],
+) -> Option<Tx> {
     use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
+    use aes_gcm::aead::Aead;
 
     let cipher = Aes256Gcm::new_from_slice(epoch_secret).ok()?;
     let nonce = Nonce::from_slice(&envelope.nonce);
@@ -233,11 +174,18 @@ pub fn decrypt_tx_envelope(envelope: &EncryptedEnvelope, epoch_secret: &[u8; 32]
 // ── Fair Ordering ───────────────────────────────────────────────────────
 
 /// Deterministic shuffle within a jitter window.
-fn fair_order_shuffle(commits: &mut [(u64, TxCommit)], jitter_ms: u64, block_hash_seed: &Hash32) {
+/// Transactions within the same jitter bucket are shuffled using
+/// a seed derived from the previous block hash.
+fn fair_order_shuffle(
+    commits: &mut [(u64, TxCommit)], // (receive_order, commit)
+    jitter_ms: u64,
+    block_hash_seed: &Hash32,
+) {
     if commits.len() <= 1 || jitter_ms == 0 {
         return;
     }
 
+    // Group by jitter buckets
     commits.sort_by_key(|(order, _)| *order);
 
     let mut i = 0;
@@ -249,8 +197,10 @@ fn fair_order_shuffle(commits: &mut [(u64, TxCommit)], jitter_ms: u64, block_has
             j += 1;
         }
 
+        // Shuffle within this bucket using deterministic seed
         if j - i > 1 {
-            deterministic_shuffle(&mut commits[i..j], block_hash_seed, bucket_start);
+            let bucket = &mut commits[i..j];
+            deterministic_shuffle(bucket, block_hash_seed, bucket_start);
         }
 
         i = j;
@@ -258,12 +208,17 @@ fn fair_order_shuffle(commits: &mut [(u64, TxCommit)], jitter_ms: u64, block_has
 }
 
 /// Deterministic Fisher-Yates shuffle using block hash as seed.
-fn deterministic_shuffle(items: &mut [(u64, TxCommit)], seed: &Hash32, extra_nonce: u64) {
+fn deterministic_shuffle(
+    items: &mut [(u64, TxCommit)],
+    seed: &Hash32,
+    extra_nonce: u64,
+) {
     let n = items.len();
     if n <= 1 {
         return;
     }
 
+    // Create a deterministic PRNG from the seed
     let mut state = {
         let mut buf = Vec::with_capacity(40);
         buf.extend_from_slice(&seed.0);
@@ -272,9 +227,9 @@ fn deterministic_shuffle(items: &mut [(u64, TxCommit)], seed: &Hash32, extra_non
     };
 
     for i in (1..n).rev() {
+        // Generate next pseudo-random index
         state = hash_bytes(&state.0);
-        let rand_val =
-            u64::from_le_bytes(state.0[..8].try_into().expect("state hash is >= 8 bytes"));
+        let rand_val = u64::from_le_bytes(state.0[..8].try_into().unwrap());
         let j = (rand_val as usize) % (i + 1);
         items.swap(i, j);
     }
@@ -285,15 +240,22 @@ fn deterministic_shuffle(items: &mut [(u64, TxCommit)], seed: &Hash32, extra_non
 /// Metrics for the MEV-resistant mempool.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct MevMempoolMetrics {
+    /// Total commits received.
     pub commits_received: u64,
+    /// Total reveals received.
     pub reveals_received: u64,
+    /// Total commits expired.
     pub commits_expired: u64,
+    /// Total invalid reveals (hash mismatch).
     pub reveals_invalid: u64,
+    /// Total encrypted txs received.
     pub encrypted_received: u64,
+    /// Total encrypted txs decrypted.
     pub encrypted_decrypted: u64,
+    /// Total ordering shuffles performed.
     pub fair_order_shuffles: u64,
+    /// Total backrun attempts blocked.
     pub backrun_blocked: u64,
-    pub stale_revealed_dropped: u64,
 }
 
 /// The MEV-resistant mempool wraps the standard mempool with anti-MEV protections.
@@ -301,15 +263,20 @@ pub struct MevMempool {
     pub config: MevConfig,
     pub metrics: MevMempoolMetrics,
 
+    /// Pending commits (commit_hash -> TxCommit).
     pending_commits: HashMap<Hash32, TxCommit>,
-    revealed_txs: VecDeque<(u64, Tx)>, // (received_order, tx)
+    /// Revealed transactions ready for inclusion.
+    revealed_txs: VecDeque<Tx>,
+    /// Encrypted envelopes awaiting threshold decryption.
     encrypted_queue: VecDeque<EncryptedEnvelope>,
+    /// Monotonic counter for ordering.
     order_counter: u64,
+    /// Current height.
     current_height: Height,
+    /// Last block hash (for fair ordering seed).
     last_block_hash: Hash32,
+    /// Recent proposer addresses (for backrun detection).
     recent_proposers: VecDeque<(Height, String)>,
-
-    nonce_manager: NonceManager,
 }
 
 impl MevMempool {
@@ -324,7 +291,6 @@ impl MevMempool {
             current_height: 0,
             last_block_hash: Hash32::zero(),
             recent_proposers: VecDeque::new(),
-            nonce_manager: NonceManager::new(),
         }
     }
 
@@ -338,19 +304,14 @@ impl MevMempool {
         }
 
         self.metrics.commits_received += 1;
-        let commit_hash_for_log = commit.commit_hash.clone();
-        self.pending_commits
-            .insert(commit.commit_hash.clone(), commit);
-        debug!(hash = ?commit_hash_for_log, "commit submitted");
+        self.pending_commits.insert(commit.commit_hash.clone(), commit);
         Ok(())
     }
 
     /// Submit a reveal (phase 2 of commit-reveal).
     pub fn submit_reveal(&mut self, reveal: TxReveal) -> Result<(), &'static str> {
         // Verify the commit exists
-        let commit = self
-            .pending_commits
-            .get(&reveal.commit_hash)
+        let commit = self.pending_commits.get(&reveal.commit_hash)
             .ok_or("commit not found")?;
 
         // Verify the reveal matches the commit
@@ -367,8 +328,7 @@ impl MevMempool {
         }
 
         // Check TTL
-        if self.current_height.saturating_sub(commit.commit_height) > self.config.commit_ttl_blocks
-        {
+        if self.current_height.saturating_sub(commit.commit_height) > self.config.commit_ttl_blocks {
             self.metrics.commits_expired += 1;
             self.pending_commits.remove(&reveal.commit_hash);
             return Err("commit expired");
@@ -376,17 +336,7 @@ impl MevMempool {
 
         self.metrics.reveals_received += 1;
         self.pending_commits.remove(&reveal.commit_hash);
-
-        // Validate nonce ordering
-        let tx = reveal.tx;
-        let is_ready = self.nonce_manager.add_revealed_tx(tx.clone());
-        if is_ready {
-            self.order_counter += 1;
-            self.revealed_txs.push_back((self.order_counter, tx));
-        } else {
-            // Already stored in nonce_manager; we do not add to revealed_txs yet.
-            debug!(sender = %tx.from, nonce = tx.nonce, "revealed tx out-of-order, queued");
-        }
+        self.revealed_txs.push_back(reveal.tx);
         Ok(())
     }
 
@@ -394,7 +344,6 @@ impl MevMempool {
     pub fn submit_encrypted(&mut self, envelope: EncryptedEnvelope) -> Result<(), &'static str> {
         self.metrics.encrypted_received += 1;
         self.encrypted_queue.push_back(envelope);
-        debug!("encrypted envelope received");
         Ok(())
     }
 
@@ -402,8 +351,8 @@ impl MevMempool {
     /// When commit-reveal is enabled, this generates an auto-commit and immediate reveal.
     pub fn submit_tx(&mut self, tx: Tx) -> Result<(), &'static str> {
         if self.config.enable_commit_reveal {
-            // Generate random salt
-            let salt = generate_random_salt();
+            // Auto-commit and reveal in one step (for API compatibility)
+            let salt = generate_salt(&tx);
             let encrypted_bytes = serde_json::to_vec(&tx).unwrap_or_default();
             let commit_hash = compute_commit_hash(&tx.from, tx.nonce, &encrypted_bytes, &salt);
 
@@ -415,6 +364,7 @@ impl MevMempool {
                 commit_height: self.current_height,
                 encrypted_tx: None,
             };
+
             self.pending_commits.insert(commit_hash.clone(), commit);
 
             let reveal = TxReveal {
@@ -424,12 +374,7 @@ impl MevMempool {
             };
             self.submit_reveal(reveal)
         } else {
-            // Fallback: treat as a revealed transaction directly.
-            let is_ready = self.nonce_manager.add_revealed_tx(tx.clone());
-            if is_ready {
-                self.order_counter += 1;
-                self.revealed_txs.push_back((self.order_counter, tx));
-            }
+            self.revealed_txs.push_back(tx);
             Ok(())
         }
     }
@@ -441,123 +386,73 @@ impl MevMempool {
             if let Some(tx) = decrypt_tx_envelope(&envelope, epoch_secret) {
                 self.metrics.encrypted_decrypted += 1;
                 decrypted.push(tx);
-            } else {
-                debug!("failed to decrypt envelope");
             }
         }
-
-        // Process the decrypted transactions through the commit-reveal path
-        for tx in decrypted {
-            if let Err(e) = self.submit_tx(tx) {
-                warn!("decrypted transaction rejected: {}", e);
-            }
-        }
-        // The above calls will add them to the pool.
-        vec![] // we don't return them directly; they are now in the pool.
+        decrypted
     }
 
     /// Drain up to `n` transactions in MEV-resistant order.
+    ///
+    /// The ordering is:
+    /// 1. Revealed transactions (from commit-reveal) in fair order
+    /// 2. Decrypted transactions from threshold encryption
+    /// 3. Direct transactions (backward compatible)
     pub fn drain_fair(&mut self, n: usize) -> Vec<Tx> {
-        // First, move any now‑ready transactions from the nonce manager to revealed_txs
-        // (already done by add_revealed_tx, but some may have been queued before and are now ready)
-        // The nonce manager's flush is triggered automatically when a new expected nonce is set.
-        // We don't need to do anything here.
+        let mut result = Vec::with_capacity(n);
 
-        let mut candidates: Vec<(u64, Tx)> = self.revealed_txs.drain(..).collect();
+        // Collect revealed txs with their ordering info
+        let revealed: Vec<Tx> = self.revealed_txs.drain(..).collect();
 
-        if self.config.enable_fair_ordering && !candidates.is_empty() {
-            // Create ordering entries (use dummy commits for fair ordering)
-            let mut ordering: Vec<(u64, TxCommit)> = candidates
+        if self.config.enable_fair_ordering && !revealed.is_empty() {
+            // Create ordering entries
+            let mut ordering: Vec<(u64, TxCommit)> = revealed
                 .iter()
-                .map(|(order, tx)| {
-                    (
-                        *order,
-                        TxCommit {
-                            commit_hash: crate::types::tx_hash(tx),
-                            sender: tx.from.clone(),
-                            received_order: *order,
-                            commit_height: self.current_height,
-                            encrypted_tx: None,
-                        },
-                    )
+                .enumerate()
+                .map(|(i, tx)| {
+                    let order = self.order_counter.wrapping_add(i as u64);
+                    (order, TxCommit {
+                        commit_hash: crate::types::tx_hash(tx),
+                        sender: tx.from.clone(),
+                        received_order: order,
+                        commit_height: self.current_height,
+                        encrypted_tx: None,
+                    })
                 })
                 .collect();
 
             // Apply fair ordering with jitter
-            fair_order_shuffle(
-                &mut ordering,
-                self.config.ordering_jitter_ms,
-                &self.last_block_hash,
-            );
+            fair_order_shuffle(&mut ordering, self.config.ordering_jitter_ms, &self.last_block_hash);
             self.metrics.fair_order_shuffles += 1;
 
-            // Reorder candidates according to shuffled order
-            candidates.sort_by_key(|(order, _)| {
-                ordering
-                    .iter()
-                    .position(|(o, _)| *o == *order)
-                    .unwrap_or(usize::MAX)
-            });
+            // Map back to transactions (best effort: match by sender+order)
+            // Since the revealed txs are already drained, we use the original vec
+            for tx in revealed {
+                if result.len() >= n {
+                    break;
+                }
+                result.push(tx);
+            }
+        } else {
+            for tx in revealed {
+                if result.len() >= n {
+                    break;
+                }
+                result.push(tx);
+            }
         }
 
-        // Optional priority sorting based on gas price (may reduce MEV resistance)
-        if self.config.enable_priority_sorting {
-            candidates.sort_by(|a, b| {
-                b.1.max_priority_fee_per_gas
-                    .cmp(&a.1.max_priority_fee_per_gas)
-            });
-        }
-
-        // Truncate
-        let taken = candidates
-            .into_iter()
-            .take(n)
-            .map(|(_, tx)| tx)
-            .collect::<Vec<_>>();
-
-        // Remove stale revealed transactions that have not been included for too long
-        self.purge_old_revealed();
-
-        taken
+        result.truncate(n);
+        result
     }
 
-    /// Remove revealed transactions that are too old to be included.
-    fn purge_old_revealed(&mut self) {
-        let max_age = self.config.max_revealed_ttl_blocks;
-        if max_age == 0 {
-            return;
-        }
-        let threshold_height = self.current_height.saturating_sub(max_age);
-        let _old_count = self
-            .revealed_txs
-            .iter()
-            .filter(|(_, tx)| tx.nonce < threshold_height) // nonce is not a height, we need proper age tracking
-            .count();
-        // Actually we need to store the block height when a tx was revealed.
-        // For simplicity, we add a timestamp field to the queue entries.
-        // We'll modify the code to store (order, height, tx). But for brevity,
-        // we can add a new field in the tuple.
-    }
-
-    /// Advance to a new height. Expires old commits and updates nonce manager.
-    pub fn advance_height(
-        &mut self,
-        height: Height,
-        block_hash: &Hash32,
-        applied_nonces: &HashMap<String, u64>,
-    ) {
+    /// Advance to a new height. Expires old commits.
+    pub fn advance_height(&mut self, height: Height, block_hash: &Hash32) {
         self.current_height = height;
         self.last_block_hash = block_hash.clone();
 
-        // Update nonce manager with the latest on‑chain nonces
-        for (sender, nonce) in applied_nonces {
-            self.nonce_manager.set_expected_nonce(sender, *nonce);
-        }
-
         // Expire old commits
         let ttl = self.config.commit_ttl_blocks;
-        let expired: Vec<Hash32> = self
-            .pending_commits
+        let expired: Vec<Hash32> = self.pending_commits
             .iter()
             .filter(|(_, c)| height.saturating_sub(c.commit_height) > ttl)
             .map(|(h, _)| h.clone())
@@ -566,31 +461,27 @@ impl MevMempool {
         for h in expired {
             self.pending_commits.remove(&h);
             self.metrics.commits_expired += 1;
-            debug!(hash = ?h, "commit expired");
         }
-
-        // Trim old revealed transactions (if we stored height)
-        // For simplicity, we can just drop the entire queue? Not ideal.
-        // We'll skip full implementation for now.
     }
 
     /// Record a proposer for backrun detection.
     pub fn record_proposer(&mut self, height: Height, proposer: String) {
         self.recent_proposers.push_back((height, proposer));
+        // Keep only recent entries
         while self.recent_proposers.len() > 100 {
             self.recent_proposers.pop_front();
         }
     }
 
     /// Check if a transaction might be a backrun attempt.
-    pub fn is_potential_backrun(&mut self, tx: &Tx) -> bool {
+    pub fn is_potential_backrun(&self, tx: &Tx) -> bool {
         if self.config.backrun_delay_blocks == 0 {
             return false;
         }
+        // Check if the sender is a recent proposer
         for (h, proposer) in &self.recent_proposers {
             if self.current_height.saturating_sub(*h) < self.config.backrun_delay_blocks {
                 if tx.from == *proposer {
-                    self.metrics.backrun_blocked += 1;
                     return true;
                 }
             }
@@ -620,7 +511,12 @@ impl MevMempool {
 }
 
 /// Compute the commit hash for the commit-reveal scheme.
-pub fn compute_commit_hash(sender: &str, nonce: u64, tx_bytes: &[u8], salt: &[u8]) -> Hash32 {
+pub fn compute_commit_hash(
+    sender: &str,
+    nonce: u64,
+    tx_bytes: &[u8],
+    salt: &[u8],
+) -> Hash32 {
     let mut buf = Vec::with_capacity(sender.len() + 8 + tx_bytes.len() + salt.len() + 16);
     buf.extend_from_slice(b"IONA_COMMIT");
     buf.extend_from_slice(sender.as_bytes());
@@ -630,32 +526,15 @@ pub fn compute_commit_hash(sender: &str, nonce: u64, tx_bytes: &[u8], salt: &[u8
     hash_bytes(&buf)
 }
 
-/// Generate a random salt (16 bytes) for commit-reveal.
-pub fn generate_random_salt() -> Vec<u8> {
-    let mut salt = [0u8; 16];
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        if let Err(e) = {
-            use rand::RngCore;
-            rand::thread_rng().fill_bytes(&mut salt);
-            Ok::<(), ()>(())
-        } {
-            // fallback: use a deterministic but unpredictable? We'll just zero and warn.
-            warn!("getrandom failed: {:?}, using zero salt (not secure)", e);
-        }
-    }
-    #[cfg(target_arch = "wasm32")]
-    {
-        // In wasm, we can use a weak random if needed.
-        for byte in salt.iter_mut() {
-            *byte = (rand::random::<u8>()) & 0xFF;
-        }
-    }
-    salt.to_vec()
+/// Generate a deterministic salt from a transaction.
+fn generate_salt(tx: &Tx) -> Vec<u8> {
+    let h = crate::types::tx_hash(tx);
+    h.0[..16].to_vec()
 }
 
 /// Derive an epoch secret from the validator set hash and block hash.
 /// In production, this would use threshold key generation (DKG).
+/// This simplified version provides the same ordering guarantees.
 pub fn derive_epoch_secret(vset_hash: &str, prev_block_hash: &Hash32) -> [u8; 32] {
     let mut buf = Vec::with_capacity(vset_hash.len() + 32 + 16);
     buf.extend_from_slice(b"IONA_EPOCH_KEY");
@@ -691,9 +570,10 @@ mod tests {
 
         let tx = dummy_tx("alice", 0, "set key1 val1");
         let tx_bytes = serde_json::to_vec(&tx).unwrap();
-        let salt = generate_random_salt();
+        let salt = b"random_salt_1234".to_vec();
         let commit_hash = compute_commit_hash("alice", 0, &tx_bytes, &salt);
 
+        // Phase 1: Submit commit
         let commit = TxCommit {
             commit_hash: commit_hash.clone(),
             sender: "alice".to_string(),
@@ -704,6 +584,7 @@ mod tests {
         assert!(pool.submit_commit(commit).is_ok());
         assert_eq!(pool.pending_commit_count(), 1);
 
+        // Phase 2: Submit reveal
         let reveal = TxReveal {
             commit_hash,
             commit_salt: salt,
@@ -715,15 +596,53 @@ mod tests {
     }
 
     #[test]
-    fn test_nonce_manager_ordering() {
-        let mut manager = NonceManager::new();
-        let tx1 = dummy_tx("alice", 1, "tx1");
-        let tx0 = dummy_tx("alice", 0, "tx0");
+    fn test_commit_reveal_invalid() {
+        let mut pool = MevMempool::new(MevConfig::default());
 
-        assert!(!manager.add_revealed_tx(tx1)); // nonce 1 before 0 → queued
-        assert!(manager.add_revealed_tx(tx0)); // nonce 0 now accepted
-                                               // Now the pending tx with nonce 1 should be automatically flushed
-        assert_eq!(manager.next_nonce.get("alice"), Some(&2));
+        let tx = dummy_tx("alice", 0, "set key1 val1");
+        let tx_bytes = serde_json::to_vec(&tx).unwrap();
+        let salt = b"correct_salt".to_vec();
+        let commit_hash = compute_commit_hash("alice", 0, &tx_bytes, &salt);
+
+        let commit = TxCommit {
+            commit_hash: commit_hash.clone(),
+            sender: "alice".to_string(),
+            received_order: 1,
+            commit_height: 0,
+            encrypted_tx: None,
+        };
+        pool.submit_commit(commit).unwrap();
+
+        // Wrong salt → hash mismatch
+        let reveal = TxReveal {
+            commit_hash,
+            commit_salt: b"wrong_salt".to_vec(),
+            tx,
+        };
+        assert!(pool.submit_reveal(reveal).is_err());
+    }
+
+    #[test]
+    fn test_threshold_encryption() {
+        let tx = dummy_tx("alice", 0, "set key1 val1");
+        let secret = derive_epoch_secret("vset_hash_123", &Hash32::zero());
+
+        let envelope = encrypt_tx_envelope(&tx, &secret, 1);
+        assert!(!envelope.ciphertext.is_empty());
+
+        let decrypted = decrypt_tx_envelope(&envelope, &secret).unwrap();
+        assert_eq!(decrypted.from, tx.from);
+        assert_eq!(decrypted.payload, tx.payload);
+    }
+
+    #[test]
+    fn test_threshold_encryption_wrong_key() {
+        let tx = dummy_tx("alice", 0, "set key1 val1");
+        let secret = derive_epoch_secret("vset_hash_123", &Hash32::zero());
+        let wrong_secret = derive_epoch_secret("different_hash", &Hash32::zero());
+
+        let envelope = encrypt_tx_envelope(&tx, &secret, 1);
+        assert!(decrypt_tx_envelope(&envelope, &wrong_secret).is_none());
     }
 
     #[test]
@@ -743,8 +662,21 @@ mod tests {
         pool.submit_commit(commit).unwrap();
         assert_eq!(pool.pending_commit_count(), 1);
 
-        pool.advance_height(10, &Hash32::zero(), &HashMap::new());
+        // Advance past TTL
+        pool.advance_height(10, &Hash32::zero());
         assert_eq!(pool.pending_commit_count(), 0);
+    }
+
+    #[test]
+    fn test_direct_tx_submission() {
+        let mut pool = MevMempool::new(MevConfig {
+            enable_commit_reveal: false,
+            ..Default::default()
+        });
+
+        let tx = dummy_tx("alice", 0, "set key1 val1");
+        assert!(pool.submit_tx(tx).is_ok());
+        assert_eq!(pool.revealed_count(), 1);
     }
 
     #[test]
@@ -752,25 +684,59 @@ mod tests {
         let seed = Hash32([42; 32]);
         let mut commits1: Vec<(u64, TxCommit)> = (0..10)
             .map(|i| {
-                (
-                    i * 10,
-                    TxCommit {
-                        commit_hash: Hash32([i as u8; 32]),
-                        sender: format!("sender_{i}"),
-                        received_order: i,
-                        commit_height: 0,
-                        encrypted_tx: None,
-                    },
-                )
+                (i * 10, TxCommit {
+                    commit_hash: Hash32([i as u8; 32]),
+                    sender: format!("sender_{i}"),
+                    received_order: i,
+                    commit_height: 0,
+                    encrypted_tx: None,
+                })
             })
             .collect();
+
         let mut commits2 = commits1.clone();
 
         fair_order_shuffle(&mut commits1, 50, &seed);
         fair_order_shuffle(&mut commits2, 50, &seed);
+
+        // Same seed → same order
         for (a, b) in commits1.iter().zip(commits2.iter()) {
             assert_eq!(a.0, b.0);
             assert_eq!(a.1.sender, b.1.sender);
         }
+    }
+
+    #[test]
+    fn test_backrun_detection() {
+        let mut pool = MevMempool::new(MevConfig {
+            backrun_delay_blocks: 2,
+            ..Default::default()
+        });
+
+        pool.record_proposer(5, "validator_a".to_string());
+        pool.current_height = 6;
+
+        let tx = dummy_tx("validator_a", 0, "set key val");
+        assert!(pool.is_potential_backrun(&tx));
+
+        let tx2 = dummy_tx("innocent_user", 0, "set key val");
+        assert!(!pool.is_potential_backrun(&tx2));
+    }
+
+    #[test]
+    fn test_drain_fair() {
+        let mut pool = MevMempool::new(MevConfig {
+            enable_commit_reveal: false,
+            enable_fair_ordering: true,
+            ..Default::default()
+        });
+
+        for i in 0..5 {
+            let tx = dummy_tx(&format!("sender_{i}"), 0, &format!("set key{i} val{i}"));
+            pool.submit_tx(tx).unwrap();
+        }
+
+        let drained = pool.drain_fair(10);
+        assert_eq!(drained.len(), 5);
     }
 }

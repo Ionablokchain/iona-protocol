@@ -11,12 +11,7 @@
 //! This makes consensus debugging possible without guessing.
 
 use crate::types::{Hash32, Height};
-use std::collections::{BTreeMap, VecDeque};
-
-/// Return a short 8-byte hex prefix for logs.
-fn short_hash(hash: &Hash32) -> String {
-    format!("0x{}", hex::encode(&hash.0[..8]))
-}
+use std::collections::BTreeMap;
 
 /// A single consensus trace event.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -74,93 +69,33 @@ pub enum ConsensusEvent {
 impl std::fmt::Display for ConsensusEvent {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::NewHeight { height } => {
-                write!(f, "[CONSENSUS] NEW_HEIGHT height={height}")
+            Self::NewHeight { height } =>
+                write!(f, "[CONSENSUS] NEW_HEIGHT height={height}"),
+            Self::NewRound { height, round } =>
+                write!(f, "[CONSENSUS] NEW_ROUND height={height} round={round}"),
+            Self::Proposal { height, round, proposer, block_hash, tx_count } =>
+                write!(f, "[CONSENSUS] PROPOSAL height={height} round={round} proposer={proposer} hash=0x{} txs={tx_count}",
+                    hex::encode(&block_hash.0[..8])),
+            Self::Prevote { height, round, validator, block_hash } => {
+                let vote = block_hash.as_ref()
+                    .map(|h| format!("0x{}", hex::encode(&h.0[..8])))
+                    .unwrap_or_else(|| "NIL".into());
+                write!(f, "[CONSENSUS] PREVOTE height={height} round={round} validator={validator} vote={vote}")
             }
-            Self::NewRound { height, round } => {
-                write!(f, "[CONSENSUS] NEW_ROUND height={height} round={round}")
+            Self::Precommit { height, round, validator, block_hash } => {
+                let vote = block_hash.as_ref()
+                    .map(|h| format!("0x{}", hex::encode(&h.0[..8])))
+                    .unwrap_or_else(|| "NIL".into());
+                write!(f, "[CONSENSUS] PRECOMMIT height={height} round={round} validator={validator} vote={vote}")
             }
-            Self::Proposal {
-                height,
-                round,
-                proposer,
-                block_hash,
-                tx_count,
-            } => {
-                write!(
-                    f,
-                    "[CONSENSUS] PROPOSAL height={height} round={round} proposer={proposer} hash={} txs={tx_count}",
-                    short_hash(block_hash),
-                )
-            }
-            Self::Prevote {
-                height,
-                round,
-                validator,
-                block_hash,
-            } => {
-                let vote = block_hash
-                    .as_ref()
-                    .map(short_hash)
-                    .unwrap_or_else(|| "NIL".to_string());
-
-                write!(
-                    f,
-                    "[CONSENSUS] PREVOTE height={height} round={round} validator={validator} vote={vote}"
-                )
-            }
-            Self::Precommit {
-                height,
-                round,
-                validator,
-                block_hash,
-            } => {
-                let vote = block_hash
-                    .as_ref()
-                    .map(short_hash)
-                    .unwrap_or_else(|| "NIL".to_string());
-
-                write!(
-                    f,
-                    "[CONSENSUS] PRECOMMIT height={height} round={round} validator={validator} vote={vote}"
-                )
-            }
-            Self::Commit {
-                height,
-                round,
-                block_hash,
-                state_root,
-                tx_count,
-                gas_used,
-            } => {
-                write!(
-                    f,
-                    "[CONSENSUS] COMMIT height={height} round={round} hash={} root={} txs={tx_count} gas={gas_used}",
-                    short_hash(block_hash),
-                    short_hash(state_root),
-                )
-            }
-            Self::Timeout {
-                height,
-                round,
-                phase,
-            } => {
-                write!(
-                    f,
-                    "[CONSENSUS] TIMEOUT height={height} round={round} phase={phase}"
-                )
-            }
-            Self::RoundSkip {
-                height,
-                from_round,
-                to_round,
-                reason,
-            } => {
-                write!(
-                    f,
-                    "[CONSENSUS] ROUND_SKIP height={height} from={from_round} to={to_round} reason={reason}"
-                )
-            }
+            Self::Commit { height, round, block_hash, state_root, tx_count, gas_used } =>
+                write!(f, "[CONSENSUS] COMMIT height={height} round={round} hash=0x{} root=0x{} txs={tx_count} gas={gas_used}",
+                    hex::encode(&block_hash.0[..8]),
+                    hex::encode(&state_root.0[..8])),
+            Self::Timeout { height, round, phase } =>
+                write!(f, "[CONSENSUS] TIMEOUT height={height} round={round} phase={phase}"),
+            Self::RoundSkip { height, from_round, to_round, reason } =>
+                write!(f, "[CONSENSUS] ROUND_SKIP height={height} from={from_round} to={to_round} reason={reason}"),
         }
     }
 }
@@ -178,9 +113,9 @@ impl std::fmt::Display for ConsensusEvent {
 /// [CONSENSUS] PRECOMMIT height=100 round=0 validator=val3 vote=0xabcd...
 /// [CONSENSUS] COMMIT height=100 round=0 hash=0xabcd... root=0x1234... txs=5 gas=21000
 /// ```
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct ConsensusTracer {
-    events: VecDeque<ConsensusEvent>,
+    events: Vec<ConsensusEvent>,
     max_events: usize,
     enabled: bool,
 }
@@ -189,35 +124,22 @@ impl ConsensusTracer {
     /// Create a new tracer.
     pub fn new(enabled: bool, max_events: usize) -> Self {
         Self {
-            events: VecDeque::with_capacity(max_events.min(1024)),
+            events: Vec::new(),
             max_events,
             enabled,
         }
     }
 
     /// Record a consensus event.
-    ///
-    /// Uses ring-buffer semantics: once full, oldest events are evicted.
     pub fn record(&mut self, event: ConsensusEvent) {
-        if !self.enabled || self.max_events == 0 {
+        if !self.enabled {
             return;
         }
-
-        if self.events.len() == self.max_events {
-            self.events.pop_front();
+        // Ring buffer: drop oldest if at capacity.
+        if self.events.len() >= self.max_events {
+            self.events.remove(0);
         }
-
-        self.events.push_back(event);
-    }
-
-    /// Enable tracing.
-    pub fn enable(&mut self) {
-        self.enabled = true;
-    }
-
-    /// Disable tracing.
-    pub fn disable(&mut self) {
-        self.enabled = false;
+        self.events.push(event);
     }
 
     /// Record a new height event.
@@ -235,14 +157,14 @@ impl ConsensusTracer {
         &mut self,
         height: Height,
         round: u32,
-        proposer: impl Into<String>,
+        proposer: &str,
         block_hash: Hash32,
         tx_count: usize,
     ) {
         self.record(ConsensusEvent::Proposal {
             height,
             round,
-            proposer: proposer.into(),
+            proposer: proposer.to_string(),
             block_hash,
             tx_count,
         });
@@ -253,13 +175,13 @@ impl ConsensusTracer {
         &mut self,
         height: Height,
         round: u32,
-        validator: impl Into<String>,
+        validator: &str,
         block_hash: Option<Hash32>,
     ) {
         self.record(ConsensusEvent::Prevote {
             height,
             round,
-            validator: validator.into(),
+            validator: validator.to_string(),
             block_hash,
         });
     }
@@ -269,13 +191,13 @@ impl ConsensusTracer {
         &mut self,
         height: Height,
         round: u32,
-        validator: impl Into<String>,
+        validator: &str,
         block_hash: Option<Hash32>,
     ) {
         self.record(ConsensusEvent::Precommit {
             height,
             round,
-            validator: validator.into(),
+            validator: validator.to_string(),
             block_hash,
         });
     }
@@ -301,107 +223,53 @@ impl ConsensusTracer {
     }
 
     /// Record a timeout event.
-    pub fn trace_timeout(&mut self, height: Height, round: u32, phase: impl Into<String>) {
+    pub fn trace_timeout(&mut self, height: Height, round: u32, phase: &str) {
         self.record(ConsensusEvent::Timeout {
             height,
             round,
-            phase: phase.into(),
+            phase: phase.to_string(),
         });
     }
 
     /// Record a round skip.
-    pub fn trace_round_skip(
-        &mut self,
-        height: Height,
-        from: u32,
-        to: u32,
-        reason: impl Into<String>,
-    ) {
+    pub fn trace_round_skip(&mut self, height: Height, from: u32, to: u32, reason: &str) {
         self.record(ConsensusEvent::RoundSkip {
             height,
             from_round: from,
             to_round: to,
-            reason: reason.into(),
+            reason: reason.to_string(),
         });
     }
 
-    /// Number of currently retained events.
-    pub fn len(&self) -> usize {
-        self.events.len()
-    }
-
-    /// Check if empty.
-    pub fn is_empty(&self) -> bool {
-        self.events.is_empty()
-    }
-
-    /// Get all recorded events as references.
-    pub fn events(&self) -> Vec<&ConsensusEvent> {
-        self.events.iter().collect()
-    }
-
-    /// Iterate all recorded events.
-    pub fn iter(&self) -> impl Iterator<Item = &ConsensusEvent> {
-        self.events.iter()
+    /// Get all recorded events.
+    pub fn events(&self) -> &[ConsensusEvent] {
+        &self.events
     }
 
     /// Get events for a specific height.
     pub fn events_at_height(&self, height: Height) -> Vec<&ConsensusEvent> {
-        self.events
-            .iter()
-            .filter(|e| event_height(e) == Some(height))
-            .collect()
+        self.events.iter().filter(|e| event_height(e) == Some(height)).collect()
     }
 
     /// Get the latest commit event.
     pub fn latest_commit(&self) -> Option<&ConsensusEvent> {
-        self.events
-            .iter()
-            .rev()
-            .find(|e| matches!(e, ConsensusEvent::Commit { .. }))
+        self.events.iter().rev().find(|e| matches!(e, ConsensusEvent::Commit { .. }))
     }
 
     /// Get stats for a height range.
     pub fn stats(&self, from: Height, to: Height) -> ConsensusStats {
-        let relevant: Vec<&ConsensusEvent> = self
-            .events
-            .iter()
+        let relevant: Vec<&ConsensusEvent> = self.events.iter()
             .filter(|e| {
-                event_height(e)
-                    .map(|h| h >= from && h <= to)
-                    .unwrap_or(false)
+                event_height(e).map(|h| h >= from && h <= to).unwrap_or(false)
             })
             .collect();
 
-        let proposals = relevant
-            .iter()
-            .filter(|e| matches!(e, ConsensusEvent::Proposal { .. }))
-            .count();
-
-        let prevotes = relevant
-            .iter()
-            .filter(|e| matches!(e, ConsensusEvent::Prevote { .. }))
-            .count();
-
-        let precommits = relevant
-            .iter()
-            .filter(|e| matches!(e, ConsensusEvent::Precommit { .. }))
-            .count();
-
-        let commits = relevant
-            .iter()
-            .filter(|e| matches!(e, ConsensusEvent::Commit { .. }))
-            .count();
-
-        let timeouts = relevant
-            .iter()
-            .filter(|e| matches!(e, ConsensusEvent::Timeout { .. }))
-            .count();
-
-        let round_skips = relevant
-            .iter()
-            .filter(|e| matches!(e, ConsensusEvent::RoundSkip { .. }))
-            .count();
+        let proposals = relevant.iter().filter(|e| matches!(e, ConsensusEvent::Proposal { .. })).count();
+        let prevotes = relevant.iter().filter(|e| matches!(e, ConsensusEvent::Prevote { .. })).count();
+        let precommits = relevant.iter().filter(|e| matches!(e, ConsensusEvent::Precommit { .. })).count();
+        let commits = relevant.iter().filter(|e| matches!(e, ConsensusEvent::Commit { .. })).count();
+        let timeouts = relevant.iter().filter(|e| matches!(e, ConsensusEvent::Timeout { .. })).count();
+        let round_skips = relevant.iter().filter(|e| matches!(e, ConsensusEvent::RoundSkip { .. })).count();
 
         ConsensusStats {
             from,
@@ -415,7 +283,7 @@ impl ConsensusTracer {
         }
     }
 
-    /// Clear all retained events.
+    /// Clear all events.
     pub fn clear(&mut self) {
         self.events.clear();
     }
@@ -441,7 +309,7 @@ fn event_height(event: &ConsensusEvent) -> Option<Height> {
 }
 
 /// Aggregated consensus statistics.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct ConsensusStats {
     pub from: Height,
     pub to: Height,
@@ -458,21 +326,15 @@ impl std::fmt::Display for ConsensusStats {
         write!(
             f,
             "Consensus Stats [{}..{}]: proposals={} prevotes={} precommits={} commits={} timeouts={} round_skips={}",
-            self.from,
-            self.to,
-            self.proposals,
-            self.prevotes,
-            self.precommits,
-            self.commits,
-            self.timeouts,
-            self.round_skips,
+            self.from, self.to, self.proposals, self.prevotes, self.precommits,
+            self.commits, self.timeouts, self.round_skips,
         )
     }
 }
 
 /// STEP 5 extension: State root log entry.
 /// Per-block state root logging: `height=100 root=0xabc...`
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct StateRootLogEntry {
     pub height: Height,
     pub state_root: Hash32,
@@ -481,17 +343,12 @@ pub struct StateRootLogEntry {
 
 impl std::fmt::Display for StateRootLogEntry {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "height={} root=0x{}",
-            self.height,
-            hex::encode(self.state_root.0)
-        )
+        write!(f, "height={} root=0x{}", self.height, hex::encode(self.state_root.0))
     }
 }
 
 /// State root logger: maintains a log of (height, state_root) for every committed block.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct StateRootLog {
     entries: BTreeMap<Height, StateRootLogEntry>,
     enabled: bool,
@@ -505,28 +362,16 @@ impl StateRootLog {
         }
     }
 
-    pub fn enable(&mut self) {
-        self.enabled = true;
-    }
-
-    pub fn disable(&mut self) {
-        self.enabled = false;
-    }
-
     /// Log a state root for a committed block.
     pub fn log(&mut self, height: Height, state_root: Hash32, timestamp: u64) {
         if !self.enabled {
             return;
         }
-
-        self.entries.insert(
+        self.entries.insert(height, StateRootLogEntry {
             height,
-            StateRootLogEntry {
-                height,
-                state_root,
-                timestamp,
-            },
-        );
+            state_root,
+            timestamp,
+        });
     }
 
     /// Get the state root at a specific height.
@@ -534,17 +379,9 @@ impl StateRootLog {
         self.entries.get(&height)
     }
 
-    /// Get all entries.
-    pub fn entries(&self) -> impl Iterator<Item = &StateRootLogEntry> {
-        self.entries.values()
-    }
-
     /// Get all entries as a BTreeMap of height -> Hash32 (for cross-node comparison).
     pub fn roots(&self) -> BTreeMap<Height, Hash32> {
-        self.entries
-            .iter()
-            .map(|(&h, e)| (h, e.state_root.clone()))
-            .collect()
+        self.entries.iter().map(|(&h, e)| (h, e.state_root.clone())).collect()
     }
 
     /// Get the latest logged height.
@@ -562,25 +399,12 @@ impl StateRootLog {
         self.entries.is_empty()
     }
 
-    /// Check if enabled.
-    pub fn is_enabled(&self) -> bool {
-        self.enabled
-    }
-
-    /// Clear all entries.
-    pub fn clear(&mut self) {
-        self.entries.clear();
-    }
-
     /// Export log as text (for `iona compare` tool).
     pub fn export_text(&self) -> String {
         let mut out = String::new();
-
         for entry in self.entries.values() {
-            out.push_str(&entry.to_string());
-            out.push('\n');
+            out.push_str(&format!("{entry}\n"));
         }
-
         out
     }
 }
@@ -604,23 +428,14 @@ mod tests {
         tracer.trace_precommit(100, 0, "val3", Some(Hash32([0xAB; 32])));
         tracer.trace_commit(100, 0, Hash32([0xAB; 32]), Hash32([0xCD; 32]), 5, 21000);
 
-        assert_eq!(tracer.len(), 8);
+        assert_eq!(tracer.events().len(), 8);
     }
 
     #[test]
     fn test_tracer_disabled() {
         let mut tracer = ConsensusTracer::new(false, 100);
         tracer.trace_new_height(1);
-        assert!(tracer.is_empty());
-    }
-
-    #[test]
-    fn test_tracer_zero_capacity_is_safe() {
-        let mut tracer = ConsensusTracer::new(true, 0);
-        tracer.trace_new_height(1);
-        tracer.trace_commit(1, 0, Hash32([1; 32]), Hash32([2; 32]), 0, 0);
-
-        assert!(tracer.is_empty());
+        assert!(tracer.events().is_empty());
     }
 
     #[test]
@@ -631,9 +446,8 @@ mod tests {
         tracer.trace_new_height(3);
         tracer.trace_new_height(4); // Should evict height=1.
 
-        let events = tracer.events();
-        assert_eq!(events.len(), 3);
-        assert_eq!(*events[0], ConsensusEvent::NewHeight { height: 2 });
+        assert_eq!(tracer.events().len(), 3);
+        assert_eq!(tracer.events()[0], ConsensusEvent::NewHeight { height: 2 });
     }
 
     #[test]
@@ -695,7 +509,6 @@ mod tests {
             timeouts: 2,
             round_skips: 1,
         };
-
         let s = format!("{stats}");
         assert!(s.contains("proposals=100"));
         assert!(s.contains("commits=100"));
@@ -705,52 +518,30 @@ mod tests {
     fn test_event_display() {
         let events = vec![
             ConsensusEvent::NewHeight { height: 42 },
-            ConsensusEvent::NewRound {
-                height: 42,
-                round: 1,
-            },
+            ConsensusEvent::NewRound { height: 42, round: 1 },
             ConsensusEvent::Proposal {
-                height: 42,
-                round: 0,
-                proposer: "val2".into(),
-                block_hash: Hash32([0xAB; 32]),
-                tx_count: 5,
+                height: 42, round: 0, proposer: "val2".into(),
+                block_hash: Hash32([0xAB; 32]), tx_count: 5,
             },
             ConsensusEvent::Prevote {
-                height: 42,
-                round: 0,
-                validator: "val2".into(),
+                height: 42, round: 0, validator: "val2".into(),
                 block_hash: Some(Hash32([0xAB; 32])),
             },
             ConsensusEvent::Prevote {
-                height: 42,
-                round: 0,
-                validator: "val3".into(),
-                block_hash: None,
+                height: 42, round: 0, validator: "val3".into(),
+                block_hash: None, // NIL vote
             },
             ConsensusEvent::Precommit {
-                height: 42,
-                round: 0,
-                validator: "val2".into(),
+                height: 42, round: 0, validator: "val2".into(),
                 block_hash: Some(Hash32([0xAB; 32])),
             },
             ConsensusEvent::Commit {
-                height: 42,
-                round: 0,
-                block_hash: Hash32([0xAB; 32]),
-                state_root: Hash32([0xCD; 32]),
-                tx_count: 5,
-                gas_used: 21000,
+                height: 42, round: 0, block_hash: Hash32([0xAB; 32]),
+                state_root: Hash32([0xCD; 32]), tx_count: 5, gas_used: 21000,
             },
-            ConsensusEvent::Timeout {
-                height: 42,
-                round: 0,
-                phase: "propose".into(),
-            },
+            ConsensusEvent::Timeout { height: 42, round: 0, phase: "propose".into() },
             ConsensusEvent::RoundSkip {
-                height: 42,
-                from_round: 0,
-                to_round: 2,
+                height: 42, from_round: 0, to_round: 2,
                 reason: "timeout + no proposal".into(),
             },
         ];
@@ -765,9 +556,9 @@ mod tests {
     fn test_tracer_clear() {
         let mut tracer = ConsensusTracer::new(true, 100);
         tracer.trace_new_height(1);
-        assert_eq!(tracer.len(), 1);
+        assert_eq!(tracer.events().len(), 1);
         tracer.clear();
-        assert!(tracer.is_empty());
+        assert!(tracer.events().is_empty());
     }
 
     #[test]
@@ -776,25 +567,11 @@ mod tests {
         tracer.trace_timeout(1, 0, "propose");
         tracer.trace_round_skip(1, 0, 1, "proposal timeout");
 
-        let events = tracer.events();
-        assert_eq!(events.len(), 2);
-
-        match events[0] {
+        assert_eq!(tracer.events().len(), 2);
+        match &tracer.events()[0] {
             ConsensusEvent::Timeout { phase, .. } => assert_eq!(phase, "propose"),
             _ => panic!("expected Timeout"),
         }
-    }
-
-    #[test]
-    fn test_enable_disable_tracer() {
-        let mut tracer = ConsensusTracer::new(true, 10);
-        tracer.disable();
-        tracer.trace_new_height(1);
-        assert!(tracer.is_empty());
-
-        tracer.enable();
-        tracer.trace_new_height(2);
-        assert_eq!(tracer.len(), 1);
     }
 
     #[test]
@@ -851,7 +628,6 @@ mod tests {
             state_root: Hash32([0xAB; 32]),
             timestamp: 1000,
         };
-
         let s = format!("{entry}");
         assert!(s.contains("height=42"));
         assert!(s.contains("root=0x"));
@@ -865,26 +641,7 @@ mod tests {
             validator: "val2".into(),
             block_hash: None,
         };
-
         let s = format!("{event}");
         assert!(s.contains("NIL"));
-    }
-
-    #[test]
-    fn test_state_root_log_clear_and_toggle() {
-        let mut log = StateRootLog::new(true);
-        log.log(1, Hash32([1; 32]), 111);
-        assert_eq!(log.len(), 1);
-
-        log.clear();
-        assert!(log.is_empty());
-
-        log.disable();
-        log.log(2, Hash32([2; 32]), 222);
-        assert!(log.is_empty());
-
-        log.enable();
-        log.log(3, Hash32([3; 32]), 333);
-        assert_eq!(log.len(), 1);
     }
 }

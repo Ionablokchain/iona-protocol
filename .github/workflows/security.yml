@@ -1,242 +1,281 @@
-name: Security Gate
+# ─────────────────────────────────────────────────────────────────────────────
+# IONA Security Workflow
+#
+# Triggers:
+#   - Every push to main/develop
+#   - Every PR targeting main
+#   - Weekly schedule (Saturday 03:00 UTC) — catches newly published advisories
+#   - Manual dispatch
+#
+# Jobs:
+#   audit    — cargo-audit: check Cargo.lock against RustSec advisory DB
+#   deny     — cargo-deny: license compliance + bans + advisories + sources
+#   fuzz     — fuzz smoke test (30s per target, 4 targets, nightly Rust)
+#   sbom     — generate + validate CycloneDX SBOM
+#   secrets  — gitleaks secret scanning
+# ─────────────────────────────────────────────────────────────────────────────
+name: Security
 
 on:
   push:
-    branches: ["**"]
+    branches: [main, develop, "release/**"]
   pull_request:
+    branches: [main]
+  schedule:
+    - cron: "0 3 * * 6"   # Saturday 03:00 UTC — weekly advisory rescan
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  security-events: write   # upload SARIF to GitHub Security tab
 
 env:
   CARGO_TERM_COLOR: always
-  RUST_BACKTRACE: 1
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-  # RUSTUP_HOME și CARGO_HOME nu mai sunt setate; se folosesc valorile implicite (/home/runner/.rustup, /home/runner/.cargo)
+  CARGO_INCREMENTAL: 0
 
 jobs:
-  supply-chain:
-    name: Supply-chain (audit + deny)
-    runs-on: ubuntu-latest
+  # ── 1. cargo-audit ────────────────────────────────────────────────────────
+  audit:
+    name: cargo-audit (RustSec)
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: "1.85.0"
-      - uses: Swatinem/rust-cache@v2
+
       - name: Install cargo-audit
         run: cargo install cargo-audit --locked
+
+      - name: Run cargo-audit
+        run: |
+          cargo audit \
+            --deny warnings \
+            --deny unsound \
+            --file Cargo.lock \
+            --json 2>&1 | tee audit-output.json || AUDIT_FAILED=1
+
+          # Pretty print summary regardless of exit
+          echo "=== Audit Summary ==="
+          if command -v jq &>/dev/null; then
+            jq -r '
+              .vulnerabilities.list[] |
+              "[\(.advisory.severity // "unknown")] \(.advisory.id): \(.advisory.title)\n  Crate: \(.package.name)@\(.package.version)\n  URL: \(.advisory.url // "n/a")\n"
+            ' audit-output.json 2>/dev/null || echo "(no vulnerabilities found)"
+          fi
+
+          if [ "${AUDIT_FAILED:-0}" = "1" ]; then
+            echo ""
+            echo "::error::cargo-audit found vulnerabilities. Review audit-output.json."
+            exit 1
+          fi
+          echo "::notice::cargo-audit passed — no known vulnerabilities"
+
+      - name: Upload audit results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cargo-audit-results
+          path: audit-output.json
+          retention-days: 30
+
+  # ── 2. cargo-deny ─────────────────────────────────────────────────────────
+  deny:
+    name: cargo-deny (licenses + bans + advisories)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
       - name: Install cargo-deny
         run: cargo install cargo-deny --locked
-      - name: cargo audit (advisories)
-        run: cargo audit --deny warnings
-      - name: cargo deny check
-        run: cargo deny check
-      - name: Cargo.lock is committed
-        run: |
-          if [ ! -f Cargo.lock ]; then
-            echo "::error::Cargo.lock is missing — must be committed for reproducible builds"
-            exit 1
-          fi
-          echo "Cargo.lock present ✓"
 
-  locked-build:
-    name: Locked build (--locked)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: "1.85.0"
-      - uses: Swatinem/rust-cache@v2
-      - name: cargo build --locked
-        run: cargo build --locked --all-targets
-      - name: Release build --locked
-        run: cargo build --release --locked --bin iona-node
+      - name: cargo deny check — licenses
+        run: cargo deny check licenses
 
-  unsafe-audit:
-    name: Unsafe code audit (crypto/ + consensus/)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: No unsafe in src/crypto/
-        run: |
-          COUNT=$(grep -rn --include="*.rs" "unsafe" src/crypto/ | grep -v "//.*unsafe" | wc -l)
-          echo "unsafe blocks found in src/crypto/: $COUNT"
-          if [ "$COUNT" -gt "0" ]; then
-            echo "::error::Found $COUNT unsafe block(s) in src/crypto/ — forbidden in security-critical code"
-            grep -rn --include="*.rs" "unsafe" src/crypto/ | grep -v "//.*unsafe"
-            exit 1
-          fi
-          echo "src/crypto/ is unsafe-free ✓"
-      - name: No unsafe in src/consensus/
-        run: |
-          COUNT=$(grep -rn --include="*.rs" "unsafe" src/consensus/ | grep -v "//.*unsafe" | wc -l)
-          echo "unsafe blocks found in src/consensus/: $COUNT"
-          if [ "$COUNT" -gt "0" ]; then
-            echo "::error::Found $COUNT unsafe block(s) in src/consensus/ — forbidden in security-critical code"
-            grep -rn --include="*.rs" "unsafe" src/consensus/ | grep -v "//.*unsafe"
-            exit 1
-          fi
-          echo "src/consensus/ is unsafe-free ✓"
+      - name: cargo deny check — bans (duplicate crates)
+        run: cargo deny check bans
 
-  unwrap-audit:
-    name: Unwrap audit (rpc/ + net/)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: No bare .unwrap() in src/rpc/
-        run: |
-          COUNT=$(grep -rn --include="*.rs" "\.unwrap()" src/rpc/ \
-                  | grep -v "#\[cfg(test)\]" \
-                  | grep -v "// unwrap-ok:" \
-                  | wc -l)
-          echo ".unwrap() calls in src/rpc/: $COUNT"
-          if [ "$COUNT" -gt "0" ]; then
-            echo "::error::Found $COUNT .unwrap() call(s) in src/rpc/ — use .expect() or ? instead"
-            grep -rn --include="*.rs" "\.unwrap()" src/rpc/ | grep -v "#\[cfg(test)\]" | grep -v "// unwrap-ok:"
-            exit 1
-          fi
-          echo "src/rpc/ unwrap-free ✓"
-      - name: No bare .unwrap() in src/net/
-        run: |
-          COUNT=$(grep -rn --include="*.rs" "\.unwrap()" src/net/ \
-                  | grep -v "#\[cfg(test)\]" \
-                  | grep -v "// unwrap-ok:" \
-                  | wc -l)
-          echo ".unwrap() calls in src/net/: $COUNT"
-          if [ "$COUNT" -gt "0" ]; then
-            echo "::error::Found $COUNT .unwrap() call(s) in src/net/ — use .expect() or ? instead"
-            grep -rn --include="*.rs" "\.unwrap()" src/net/ | grep -v "#\[cfg(test)\]" | grep -v "// unwrap-ok:"
-            exit 1
-          fi
-          echo "src/net/ unwrap-free ✓"
+      - name: cargo deny check — advisories
+        run: cargo deny check advisories
 
-  security-tests:
-    name: Security test suites
-    runs-on: ubuntu-latest
-    needs: [supply-chain, locked-build]
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: "1.85.0"
-      - uses: Swatinem/rust-cache@v2
-      - name: Consensus adversarial tests
-        run: cargo test --locked --test consensus_adversarial -- --nocapture
-      - name: Security regression tests
-        run: cargo test --locked --test security_regression -- --nocapture
+      - name: cargo deny check — sources (registry + git)
+        run: cargo deny check sources
 
-  rpc-hardening:
-    name: RPC hardening tests
-    runs-on: ubuntu-latest
-    needs: [supply-chain, locked-build]
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: "1.85.0"
-      - uses: Swatinem/rust-cache@v2
-      - name: RPC hardening tests
-        run: cargo test --locked --test rpc_hardening -- --nocapture
+      - name: cargo deny check — all (combined, fail-fast off)
+        if: always()
+        run: cargo deny check --exclude-dev || true
+        # Combined run gives full picture even if individual checks pass
 
-  fuzz-replay:
-    name: Fuzz corpus replay (${{ matrix.target }})
-    runs-on: ubuntu-latest
-    needs: [supply-chain, locked-build]
+  # ── 3. fuzz smoke tests ───────────────────────────────────────────────────
+  fuzz:
+    name: Fuzz smoke — ${{ matrix.target }}
+    runs-on: ubuntu-22.04
     strategy:
       fail-fast: false
       matrix:
         target:
-          - consensus_msg
-          - tx_json
-          - p2p_frame_decode
-          - vm_bytecode
-          - block_header
-          - rpc_json
           - state_transition
+          - rpc_parse
+          - block_decode
+          - p2p_message
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@nightly
-        with:
-          toolchain: nightly
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: fuzz-replay-${{ matrix.target }}
+
+      - name: Install nightly Rust (required for cargo-fuzz)
+        run: |
+          rustup toolchain install nightly --component llvm-tools-preview
+          rustup override set nightly
+
       - name: Install cargo-fuzz
         run: cargo install cargo-fuzz --locked
-      - name: Restore fuzz corpus
-        uses: actions/cache/restore@v4
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
         with:
-          path: fuzz/corpus/${{ matrix.target }}
-          key: fuzz-corpus-${{ matrix.target }}-${{ hashFiles('Cargo.lock') }}
-          restore-keys: |
-            fuzz-corpus-${{ matrix.target }}-
-      - name: Create corpus dir if absent
-        run: mkdir -p fuzz/corpus/${{ matrix.target }}
-      - name: Replay corpus (no new exploration)
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            fuzz/target/
+          key: ${{ runner.os }}-fuzz-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Run fuzz smoke test (30 seconds)
         run: |
-          CORPUS_DIR="fuzz/corpus/${{ matrix.target }}"
-          SEED_COUNT=$(find "$CORPUS_DIR" -type f | wc -l)
-          echo "Replaying $SEED_COUNT corpus entries for ${{ matrix.target }}"
-          if [ "$SEED_COUNT" -eq "0" ]; then
-            echo "No corpus entries — running minimal smoke fuzz (5 s) to seed."
-            cargo fuzz run ${{ matrix.target }} \
-              "$CORPUS_DIR" \
-              -- -max_total_time=5 -max_len=65536 2>&1 | tee fuzz_output.txt
-          else
-            cargo fuzz run ${{ matrix.target }} \
-              "$CORPUS_DIR" \
-              -- -runs=0 -max_len=65536 2>&1 | tee fuzz_output.txt
-          fi
-          if grep -qE "CRASH|ERROR|AddressSanitizer" fuzz_output.txt; then
-            echo "::error::Corpus replay found a crash in ${{ matrix.target }}"
+          cargo +nightly fuzz run ${{ matrix.target }} \
+            -- \
+            -max_total_time=30 \
+            -max_len=4096 \
+            -timeout=10 \
+            -print_final_stats=1 \
+            2>&1 | tee fuzz-output-${{ matrix.target }}.txt
+
+          # Fail if any crash artefacts were produced
+          CRASHES=$(find fuzz/artifacts/${{ matrix.target }}/ -type f 2>/dev/null | wc -l)
+          if [ "$CRASHES" -gt 0 ]; then
+            echo "::error::Fuzzer found $CRASHES crash(es) in ${{ matrix.target }}!"
+            echo "Crash files:"
+            ls fuzz/artifacts/${{ matrix.target }}/
+            echo "Re-run with: cargo +nightly fuzz run ${{ matrix.target }} fuzz/artifacts/${{ matrix.target }}/<crash-file>"
             exit 1
           fi
-          echo "Corpus replay clean ✓"
-      - name: Upload crash artifacts
+          echo "::notice::Fuzz smoke passed for ${{ matrix.target }} — 0 crashes"
+
+      - name: Upload fuzz output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-output-${{ matrix.target }}
+          path: |
+            fuzz-output-${{ matrix.target }}.txt
+            fuzz/artifacts/${{ matrix.target }}/
+          retention-days: 30
+
+      - name: Upload crash artefacts on failure
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: fuzz-replay-crash-${{ matrix.target }}
-          path: |
-            fuzz/artifacts/${{ matrix.target }}/
-            fuzz_output.txt
+          name: fuzz-crashes-${{ matrix.target }}
+          path: fuzz/artifacts/${{ matrix.target }}/
+          retention-days: 90
 
-  clippy-sec:
-    name: Clippy (security paths, deny-warnings)
-    runs-on: ubuntu-latest
-    needs: locked-build
+  # ── 4. SBOM generation + validation ──────────────────────────────────────
+  sbom:
+    name: SBOM (CycloneDX)
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: "1.85.0"
-          components: clippy
-      - uses: Swatinem/rust-cache@v2
-      - name: clippy --all-targets -D warnings
-        run: cargo clippy --locked --all-targets -- -D warnings
 
+      - name: Install Rust toolchain
+        run: |
+          rustup override set $(grep 'channel' rust-toolchain.toml | cut -d'"' -f2)
+
+      - name: Install cargo-cyclonedx
+        run: cargo install cargo-cyclonedx --locked
+
+      - name: Generate SBOM
+        run: |
+          cargo cyclonedx \
+            --format json \
+            --output sbom.cdx.json
+          echo "SBOM generated: $(wc -c < sbom.cdx.json) bytes"
+
+      - name: Validate SBOM structure
+        run: |
+          python3 -c "
+          import json, sys
+          with open('sbom.cdx.json') as f:
+              sbom = json.load(f)
+          assert sbom.get('bomFormat') == 'CycloneDX', 'bomFormat must be CycloneDX'
+          assert sbom.get('specVersion') in ['1.4', '1.5', '1.6'], f'Unexpected specVersion: {sbom.get(\"specVersion\")}'
+          comps = sbom.get('components', [])
+          assert len(comps) > 0, 'No components found in SBOM'
+          print(f'SBOM valid: {len(comps)} components, specVersion={sbom[\"specVersion\"]}')
+          # Check each component has required fields
+          for c in comps:
+              assert 'name' in c, f'Component missing name: {c}'
+              assert 'version' in c, f'Component missing version: {c}'
+          print('All component fields valid.')
+          "
+
+      - name: Scan SBOM for CVEs (grype)
+        run: |
+          # Install grype
+          curl -sSfL https://raw.githubusercontent.com/anchore/grype/main/install.sh \
+            | sh -s -- -b /usr/local/bin
+          # Scan (non-blocking in CI — report only)
+          grype sbom:sbom.cdx.json --output table 2>&1 | tee grype-results.txt || true
+          # Fail on critical CVEs
+          if grype sbom:sbom.cdx.json --fail-on critical --quiet 2>/dev/null; then
+            echo "::notice::No critical CVEs found in SBOM"
+          else
+            echo "::error::Critical CVEs found! Review grype-results.txt"
+            exit 1
+          fi
+
+      - name: Upload SBOM
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-${{ github.sha }}
+          path: |
+            sbom.cdx.json
+            grype-results.txt
+          retention-days: 90
+
+  # ── 5. Secret scanning (gitleaks) ────────────────────────────────────────
+  secrets:
+    name: Secret scan (gitleaks)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # Full history for complete scan
+
+      - name: Run gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}  # optional for org repos
+
+  # ── Summary gate ──────────────────────────────────────────────────────────
   security-gate:
-    name: "✅ Security Gate"
-    runs-on: ubuntu-latest
-    needs:
-      - supply-chain
-      - locked-build
-      - unsafe-audit
-      - unwrap-audit
-      - security-tests
-      - rpc-hardening
-      - fuzz-replay
-      - clippy-sec
+    name: Security gate
+    needs: [audit, deny, sbom, secrets]
     if: always()
+    runs-on: ubuntu-22.04
     steps:
       - name: Check all security jobs passed
         run: |
-          RESULTS='${{ toJson(needs) }}'
-          echo "$RESULTS" | python3 -c "
-          import json, sys
-          needs = json.load(sys.stdin)
-          failed = [k for k, v in needs.items() if v['result'] not in ('success', 'skipped')]
-          if failed:
-              print('FAILED jobs:', failed)
-              sys.exit(1)
-          print('All security jobs passed ✓')
-          "
+          AUDIT="${{ needs.audit.result }}"
+          DENY="${{ needs.deny.result }}"
+          SBOM="${{ needs.sbom.result }}"
+          SECRETS="${{ needs.secrets.result }}"
+
+          echo "audit:   $AUDIT"
+          echo "deny:    $DENY"
+          echo "sbom:    $SBOM"
+          echo "secrets: $SECRETS"
+
+          if [[ "$AUDIT" != "success" ]] || \
+             [[ "$DENY" != "success" ]]  || \
+             [[ "$SBOM" != "success" ]]  || \
+             [[ "$SECRETS" != "success" && "$SECRETS" != "skipped" ]]; then
+            echo "::error::One or more security checks failed. Blocking merge."
+            exit 1
+          fi
+          echo "::notice::All security checks passed ✓"

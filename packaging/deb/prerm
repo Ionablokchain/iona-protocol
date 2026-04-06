@@ -1,0 +1,37 @@
+#!/bin/bash
+set -e
+
+# Pre-removal script for iona-node
+
+case "$1" in
+  remove|deconfigure)
+    # Stop the service before removal
+    if command -v systemctl >/dev/null; then
+      echo "Stopping iona-node service..."
+      systemctl stop iona-node.service 2>/dev/null || true
+      systemctl disable iona-node.service 2>/dev/null || true
+    fi
+    
+    echo ""
+    echo "=========================================="
+    echo "IONA node service stopped"
+    echo "=========================================="
+    echo ""
+    echo "WARNING: Chain data is preserved at /var/lib/iona"
+    echo "To completely remove IONA including chain data, run:"
+    echo "  sudo rm -rf /var/lib/iona"
+    echo "  sudo rm -rf /etc/iona"
+    echo ""
+    ;;
+    
+  upgrade|downgrade)
+    # During upgrade, systemd will handle service restart via systemd unit
+    # We only need to reload the daemon
+    if command -v systemctl >/dev/null; then
+      echo "Reloading systemd daemon for upgrade..."
+      systemctl daemon-reload || true
+    fi
+    ;;
+esac
+
+exit 0

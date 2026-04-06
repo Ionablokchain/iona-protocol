@@ -1,0 +1,94 @@
+[Unit]
+# IONA Node Validator Service Unit
+# This service manages the IONA blockchain validator node process.
+# The validator maintains blockchain consensus and proposes/signs blocks.
+Description=IONA v28 Blockchain Validator Node
+Documentation=https://docs.iona.io/validator-setup
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=500
+StartLimitBurst=5
+
+[Service]
+Type=exec
+User=iona
+Group=iona
+WorkingDirectory=/opt/iona
+
+# Load environment variables if present (TLS certs, secrets, etc.)
+EnvironmentFile=-/etc/iona/iona.env
+
+# Pre-start validation: check binary compatibility and config syntax
+ExecStartPre=/usr/local/bin/iona-node --check-compat --config /etc/iona/config.toml
+
+# Start the validator with production profile for optimized performance
+ExecStart=/usr/local/bin/iona-node --config /etc/iona/config.toml --profile prod
+
+# Reload signal: gracefully reload configuration without restart
+ExecReload=/bin/kill -HUP $MAINPID
+
+# Restart policy: automatically restart on abnormal termination
+Restart=on-failure
+RestartSec=10s
+
+# Timeout settings
+TimeoutStartSec=120s
+TimeoutStopSec=60s
+
+# Kill behavior: use mixed mode for graceful shutdown
+KillMode=mixed
+KillSignal=SIGTERM
+
+# Resource limits
+LimitNOFILE=65536
+LimitNPROC=4096
+
+# SECURITY HARDENING DIRECTIVES
+# ==============================
+# NoNewPrivileges: prevent process from gaining new privileges via setuid/setgid
+NoNewPrivileges=yes
+
+# PrivateTmp: private /tmp and /var/tmp namespaces (blocks tmpfs attacks)
+PrivateTmp=yes
+
+# PrivateDevices: private /dev namespace (prevents access to hardware devices)
+PrivateDevices=yes
+
+# ProtectSystem: filesystem read-only except for specified paths
+# "strict" mode provides maximum hardening
+ProtectSystem=strict
+
+# ProtectHome: hide /root, /home from service
+ProtectHome=yes
+
+# ReadWritePaths: explicitly allow writes only to data and log directories
+ReadWritePaths=/opt/iona/data /var/log/iona
+
+# Protect kernel subsystems from modification
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+
+# Prevent setuid/setgid bits from being used
+RestrictSUIDSGID=yes
+
+# Deny executable memory mapping (prevents JIT attacks, but blocks WASM JIT)
+# Comment out if dynamic code execution is needed
+MemoryDenyWriteExecute=yes
+
+# Prevent realtime scheduling
+RestrictRealtime=yes
+
+# Restrict namespace creation
+RestrictNamespaces=yes
+
+# Restrict to default system service syscalls
+SystemCallFilter=@system-service
+
+# Logging configuration
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=iona-node
+
+[Install]
+WantedBy=multi-user.target

@@ -1,27 +1,13 @@
-//! IONA Remote Signer — mTLS + allowlist + audit log
+//! IONA Remote Signer (mTLS + allowlist + audit log)
 //!
-//! Provides a secure signing service with:
-//! - mTLS (client certificate required)
-//! - Allowlist by client certificate SHA‑256 fingerprint (hex)
-//! - Append‑only audit log (JSON lines) with *real* client fingerprint per request
+//! Endpoints (JSON):
+//! - GET  /pubkey  -> { "pubkey_base64": "..." }
+//! - POST /sign    -> { "msg_base64": "..." }  -> { "sig_base64": "..." }
 //!
-//! Endpoints:
-//! - `GET /pubkey`  → `{ "pubkey_base64": "..." }`
-//! - `POST /sign`   → `{ "msg_base64": "..." }` → `{ "sig_base64": "..." }`
-//!
-//! # Usage
-//!
-//! ```bash
-//! cargo run --bin iona-remote-signer -- \
-//!     --listen 0.0.0.0:9100 \
-//!     --key-path ./data/remote_signer_key.bin \
-//!     --tls-cert-pem ./deploy/tls/server.crt.pem \
-//!     --tls-key-pem ./deploy/tls/server.key.pem \
-//!     --client-ca-pem ./deploy/tls/ca.crt.pem \
-//!     --allowlist ./deploy/tls/allowlist.txt \
-//!     --audit-log ./data/remote_signer_audit.jsonl
-//! ```
-type RustlsConnectInfo = std::net::SocketAddr;
+//! Security features (mega++):
+//! - mTLS enforced (client cert required)
+//! - Allowlist by client certificate SHA-256 fingerprint (hex)
+//! - Append-only audit log (JSON lines) with *real* client fingerprint per request
 
 use axum::{
     extract::{ConnectInfo, State},
@@ -31,91 +17,25 @@ use axum::{
     Json, Router,
 };
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
-use clap::Parser;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
     collections::HashSet,
     net::SocketAddr,
-    path::{Path, PathBuf},
+    path::Path,
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
-use tokio::signal;
-use tracing::{error, info, warn};
 
-use axum_server::tls_rustls::RustlsConfig;
+use axum_server::tls_rustls::{RustlsConfig, RustlsConnectInfo};
 use rustls::{
     pki_types::CertificateDer,
-    server::danger::{ClientCertVerified, ClientCertVerifier},
+    server::{ClientCertVerified, ClientCertVerifier},
     RootCertStore,
 };
 
-use iona::crypto::ed25519::Ed25519Signer;
-// Stubs for missing functions
-fn read_signing_key_or_generate(path: &str) -> anyhow::Result<ed25519_dalek::SigningKey> {
-    use std::io::Read;
-    if let Ok(mut f) = std::fs::File::open(path) {
-        let mut buf = Vec::new();
-        f.read_to_end(&mut buf).ok();
-        if buf.len() >= 32 {
-            let mut seed = [0u8; 32];
-            seed.copy_from_slice(&buf[..32]);
-            return Ok(ed25519_dalek::SigningKey::from_bytes(&seed));
-        }
-    }
-    let seed = [0u8; 32];
-    Ok(ed25519_dalek::SigningKey::from_bytes(&seed))
-}
-fn sign_bytes(key: &Ed25519Signer, msg: &[u8]) -> Vec<u8> {
-    use iona::crypto::Signer;
-    key.sign(msg).0
-}
-
-// -----------------------------------------------------------------------------
-// Command-line arguments
-// -----------------------------------------------------------------------------
-
-#[derive(Parser, Debug)]
-#[command(name = "iona-remote-signer", about = "mTLS‑enforced remote signer")]
-struct Args {
-    /// Listen address, e.g., 0.0.0.0:9100
-    #[arg(long, default_value = "0.0.0.0:9100")]
-    listen: String,
-
-    /// Path to the Ed25519 signing key (32 bytes). If missing, one is generated.
-    #[arg(long, default_value = "./data/remote_signer_key.bin")]
-    key_path: PathBuf,
-
-    /// Server TLS certificate PEM file.
-    #[arg(long, default_value = "./deploy/tls/server.crt.pem")]
-    tls_cert_pem: PathBuf,
-
-    /// Server TLS private key PEM file.
-    #[arg(long, default_value = "./deploy/tls/server.key.pem")]
-    tls_key_pem: PathBuf,
-
-    /// Client CA certificate PEM file (required for mTLS).
-    #[arg(long, default_value = "./deploy/tls/ca.crt.pem")]
-    client_ca_pem: PathBuf,
-
-    /// Allowlist file (one SHA‑256 fingerprint hex per line). Lines starting with `#` are ignored.
-    #[arg(long, default_value = "./deploy/tls/allowlist.txt")]
-    allowlist: PathBuf,
-
-    /// Audit log path (JSONL). If the directory does not exist, it is created.
-    #[arg(long, default_value = "./data/remote_signer_audit.jsonl")]
-    audit_log: PathBuf,
-
-    /// Log level (trace, debug, info, warn, error). Default is info.
-    #[arg(long, default_value = "info")]
-    log_level: String,
-}
-
-// -----------------------------------------------------------------------------
-// Application state
-// -----------------------------------------------------------------------------
+use iona::crypto::ed25519::{read_signing_key_or_generate, sign_bytes};
 
 #[derive(Clone)]
 struct AppState {
@@ -123,10 +43,6 @@ struct AppState {
     signing_key: Arc<ed25519_dalek::SigningKey>,
     audit: Arc<Mutex<std::fs::File>>,
 }
-
-// -----------------------------------------------------------------------------
-// Request / response structures
-// -----------------------------------------------------------------------------
 
 #[derive(Debug, Deserialize)]
 struct SignReq {
@@ -143,10 +59,6 @@ struct SignResp {
     sig_base64: String,
 }
 
-// -----------------------------------------------------------------------------
-// Audit log entry
-// -----------------------------------------------------------------------------
-
 #[derive(Debug, Serialize)]
 struct AuditLine {
     ts_unix_s: u64,
@@ -157,30 +69,23 @@ struct AuditLine {
     reason: String,
 }
 
-// -----------------------------------------------------------------------------
-// Custom client certificate verifier with allowlist
-// -----------------------------------------------------------------------------
-
-/// A client certificate verifier that first delegates to a WebPKI verifier
-/// and then enforces an allowlist based on the certificate's SHA‑256 fingerprint.
-#[derive(Debug)]
+/// Custom verifier that delegates to WebPKI and then enforces an allowlist.
 struct AllowlistClientVerifier {
     inner: Arc<dyn ClientCertVerifier>,
     allow: Arc<HashSet<String>>,
 }
 
 impl AllowlistClientVerifier {
-    /// Compute the SHA‑256 fingerprint of a certificate as a hex string.
     fn fingerprint_hex(cert: &CertificateDer<'_>) -> String {
-        let mut hasher = Sha256::new();
-        hasher.update(cert.as_ref());
-        hex::encode(hasher.finalize())
+        let mut h = Sha256::new();
+        h.update(cert.as_ref());
+        hex::encode(h.finalize())
     }
 }
 
 impl ClientCertVerifier for AllowlistClientVerifier {
-    fn root_hint_subjects(&self) -> &[rustls::DistinguishedName] {
-        &[]
+    fn client_auth_root_subjects(&self) -> &[rustls::DistinguishedName] {
+        self.inner.client_auth_root_subjects()
     }
 
     fn verify_client_cert(
@@ -189,18 +94,15 @@ impl ClientCertVerifier for AllowlistClientVerifier {
         intermediates: &[CertificateDer<'_>],
         now: rustls::pki_types::UnixTime,
     ) -> Result<ClientCertVerified, rustls::Error> {
-        // First, delegate to the inner verifier (WebPKI) to check the certificate chain.
-        let verified = self
+        let v = self
             .inner
             .verify_client_cert(end_entity, intermediates, now)?;
 
         let fp = Self::fingerprint_hex(end_entity);
         if !self.allow.contains(&fp) {
-            return Err(rustls::Error::General(
-                format!("client cert not allowlisted: {}", fp).into(),
-            ));
+            return Err(rustls::Error::General("client cert not allowlisted".into()));
         }
-        Ok(verified)
+        Ok(v)
     }
 
     fn verify_tls12_signature(
@@ -226,11 +128,6 @@ impl ClientCertVerifier for AllowlistClientVerifier {
     }
 }
 
-// -----------------------------------------------------------------------------
-// Helper functions
-// -----------------------------------------------------------------------------
-
-/// Return the current Unix timestamp in seconds.
 fn now_unix_s() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -238,51 +135,18 @@ fn now_unix_s() -> u64 {
         .as_secs()
 }
 
-/// Extract the SHA‑256 fingerprint of the client certificate from the TLS connection info.
-fn client_fingerprint(ci: &RustlsConnectInfo) -> String {
-    let certs: Vec<Vec<u8>> = vec![];
-    if !certs.is_empty() {
+fn fp_from_connect(ci: &RustlsConnectInfo) -> String {
+    // axum-server exposes the peer cert chain in connect info.
+    // We fingerprint the first (end-entity) cert.
+    if let Some(certs) = &ci.peer_certificates {
         if let Some(first) = certs.first() {
-            let mut hasher = Sha256::new();
-            hasher.update(AsRef::<[u8]>::as_ref(first));
-            return hex::encode(hasher.finalize());
+            let mut h = Sha256::new();
+            h.update(first.as_ref());
+            return hex::encode(h.finalize());
         }
     }
     "unknown".to_string()
 }
-
-/// Load the allowlist from a file (one fingerprint per line, lines starting with `#` are ignored).
-fn load_allowlist(path: &Path) -> anyhow::Result<HashSet<String>> {
-    if !path.exists() {
-        return Ok(HashSet::new());
-    }
-    let content = std::fs::read_to_string(path)?;
-    let mut set = HashSet::new();
-    for line in content.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with('#') {
-            continue;
-        }
-        set.insert(trimmed.to_lowercase());
-    }
-    Ok(set)
-}
-
-/// Load the root CA certificates from a PEM file.
-fn load_ca_roots(ca_pem_path: &Path) -> anyhow::Result<RootCertStore> {
-    let pem = std::fs::read(ca_pem_path)?;
-    let mut reader = std::io::Cursor::new(pem);
-    let certs = rustls_pemfile::certs(&mut reader).collect::<Result<Vec<_>, _>>()?;
-    let mut store = RootCertStore::empty();
-    for cert in certs {
-        store.add(cert)?;
-    }
-    Ok(store)
-}
-
-// -----------------------------------------------------------------------------
-// Handlers
-// -----------------------------------------------------------------------------
 
 async fn pubkey(State(st): State<AppState>) -> impl IntoResponse {
     Json(PubkeyResp {
@@ -296,263 +160,167 @@ async fn sign(
     ConnectInfo(ci): ConnectInfo<RustlsConnectInfo>,
     Json(req): Json<SignReq>,
 ) -> impl IntoResponse {
-    // Decode base64 message
     let msg = match B64.decode(req.msg_base64.as_bytes()) {
         Ok(v) => v,
-        Err(e) => {
-            let audit = AuditLine {
-                ts_unix_s: now_unix_s(),
-                client_fp_sha256: client_fingerprint(&ci),
-                remote_addr: addr.to_string(),
-                msg_blake3_hex: "invalid".to_string(),
-                ok: false,
-                reason: format!("bad base64: {}", e),
-            };
-            {
-                let mut file = st.audit.lock();
-                {
-                    use std::io::Write as _W;
-                    let _ = _W::write_fmt(
-                        &mut *file,
-                        format_args!("{}\n", serde_json::to_string(&audit).unwrap_or_default()),
-                    );
-                }
-            }
-            return (StatusCode::BAD_REQUEST, "bad base64").into_response();
-        }
+        Err(_) => return (StatusCode::BAD_REQUEST, "bad base64").into_response(),
     };
 
     let msg_hash = blake3::hash(&msg);
-    let sig = {
-        use ed25519_dalek::Signer as _;
-        st.signing_key.sign(&msg).to_bytes().to_vec()
-    };
+    let sig = sign_bytes(&st.signing_key, &msg);
 
-    let client_fp = client_fingerprint(&ci);
-    let audit = AuditLine {
-        ts_unix_s: now_unix_s(),
-        client_fp_sha256: client_fp,
-        remote_addr: addr.to_string(),
-        msg_blake3_hex: hex::encode(msg_hash.as_bytes()),
-        ok: true,
-        reason: "ok".to_string(),
-    };
+    let client_fp = fp_from_connect(&ci);
 
-    // Write audit log
+    // audit
     {
-        let mut file = st.audit.lock();
-        if let Err(e) = {
-            use std::io::Write as _W;
-            _W::write_fmt(
-                &mut *file,
-                format_args!("{}\n", serde_json::to_string(&audit).unwrap_or_default()),
-            )
-        } {
-            warn!("failed to write audit log: {}", e);
-        } else if let Err(e) = {
-            use std::io::Write as _W;
-            _W::flush(&mut *file)
-        } {
-            warn!("failed to flush audit log: {}", e);
-        }
+        use std::io::Write;
+        let line = AuditLine {
+            ts_unix_s: now_unix_s(),
+            client_fp_sha256: client_fp,
+            remote_addr: addr.to_string(),
+            msg_blake3_hex: hex::encode(msg_hash.as_bytes()),
+            ok: true,
+            reason: "ok".to_string(),
+        };
+        let mut f = st.audit.lock();
+        let _ = writeln!(
+            &mut *f,
+            "{}",
+            serde_json::to_string(&line).unwrap_or_else(|_| "{}".into())
+        );
     }
 
     Json(SignResp {
         sig_base64: B64.encode(sig),
     })
-    .into_response()
 }
 
-// -----------------------------------------------------------------------------
-// Main
-// -----------------------------------------------------------------------------
+fn load_allowlist(path: &str) -> anyhow::Result<HashSet<String>> {
+    if !Path::new(path).exists() {
+        return Ok(HashSet::new());
+    }
+    let s = std::fs::read_to_string(path)?;
+    let mut out = HashSet::new();
+    for line in s.lines() {
+        let t = line.trim();
+        if t.is_empty() || t.starts_with('#') {
+            continue;
+        }
+        out.insert(t.to_lowercase());
+    }
+    Ok(out)
+}
+
+fn load_ca_roots(ca_pem_path: &str) -> anyhow::Result<RootCertStore> {
+    let pem = std::fs::read(ca_pem_path)?;
+    let mut rd = std::io::Cursor::new(pem);
+    let certs = rustls_pemfile::certs(&mut rd).collect::<Result<Vec<_>, _>>()?;
+    let mut store = RootCertStore::empty();
+    for c in certs {
+        store.add(c)?;
+    }
+    Ok(store)
+}
+
+#[derive(clap::Parser, Debug)]
+#[command(name = "iona-remote-signer")]
+struct Args {
+    /// Listen address, e.g. 0.0.0.0:9100
+    #[arg(long, default_value = "0.0.0.0:9100")]
+    listen: String,
+
+    /// Path to the ed25519 signing key (32 bytes). If missing, one is generated.
+    #[arg(long, default_value = "./data/remote_signer_key.bin")]
+    key_path: String,
+
+    /// Server TLS cert PEM
+    #[arg(long, default_value = "./deploy/tls/server.crt.pem")]
+    tls_cert_pem: String,
+
+    /// Server TLS key PEM
+    #[arg(long, default_value = "./deploy/tls/server.key.pem")]
+    tls_key_pem: String,
+
+    /// Client CA cert PEM (required for mTLS)
+    #[arg(long, default_value = "./deploy/tls/ca.crt.pem")]
+    client_ca_pem: String,
+
+    /// Allowlist file (one SHA-256 fingerprint hex per line)
+    #[arg(long, default_value = "./deploy/tls/allowlist.txt")]
+    allowlist: String,
+
+    /// Audit log path (JSONL)
+    #[arg(long, default_value = "./data/remote_signer_audit.jsonl")]
+    audit_log: String,
+}
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .init();
+
     let args = Args::parse();
+    let addr: SocketAddr = args.listen.parse()?;
 
-    // Initialize logging
-    init_logging(&args.log_level)?;
+    let sk = Arc::new(read_signing_key_or_generate(&args.key_path)?);
+    let pk = sk.verifying_key();
+    let pk_bytes = pk.to_bytes();
+    let pubkey_b64 = B64.encode(pk_bytes);
 
-    info!(
-        "Starting IONA remote signer (version {})",
-        env!("CARGO_PKG_VERSION")
-    );
-
-    // Load or generate signing key
-    let signing_key = Arc::new(read_signing_key_or_generate(
-        args.key_path.to_str().unwrap_or("key.pem"),
-    )?);
-    let verifying_key = signing_key.verifying_key();
-    let pubkey_b64 = B64.encode(verifying_key.to_bytes());
-
-    // Prepare audit log file
-    if let Some(parent) = args.audit_log.parent() {
-        std::fs::create_dir_all(parent)?;
+    // audit file
+    if let Some(parent) = Path::new(&args.audit_log).parent() {
+        let _ = std::fs::create_dir_all(parent);
     }
     let audit_file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(&args.audit_log)?;
 
-    let state = AppState {
+    let st = AppState {
         pubkey_b64,
-        signing_key,
+        signing_key: sk,
         audit: Arc::new(Mutex::new(audit_file)),
     };
 
-    // Load allowlist
-    let allowlist = Arc::new(load_allowlist(&args.allowlist)?);
-    info!(
-        "Loaded {} client fingerprints from allowlist",
-        allowlist.len()
-    );
-
-    // Load client CA roots
-    let ca_roots = load_ca_roots(&args.client_ca_pem)?;
-    let webpki_verifier = rustls::server::WebPkiClientVerifier::builder(Arc::new(ca_roots))
-        .build()
-        .map_err(|e| anyhow::anyhow!("failed to build client verifier: {e}"))?;
-
-    let verifier: Arc<dyn ClientCertVerifier> = Arc::new(AllowlistClientVerifier {
-        inner: webpki_verifier,
-        allow: allowlist,
-    });
-
-    // Load server certificate and key
-    let cert_pem = std::fs::read(&args.tls_cert_pem)?;
-    let key_pem = std::fs::read(&args.tls_key_pem)?;
-
-    let mut cert_reader = std::io::Cursor::new(cert_pem);
-    let certs = rustls_pemfile::certs(&mut cert_reader).collect::<Result<Vec<_>, _>>()?;
-    let mut key_reader = std::io::Cursor::new(key_pem);
-    let key = rustls_pemfile::private_key(&mut key_reader)?
-        .ok_or_else(|| anyhow::anyhow!("no private key found in {}", args.tls_key_pem.display()))?;
-
-    let tls_config = rustls::ServerConfig::builder()
-        .with_client_cert_verifier(verifier)
-        .with_single_cert(certs, key)
-        .map_err(|e| anyhow::anyhow!("failed to build TLS config: {e}"))?;
-
-    let tls = RustlsConfig::from_config(Arc::new(tls_config));
-
-    // Build the router
     let app = Router::new()
         .route("/pubkey", get(pubkey))
         .route("/sign", post(sign))
-        .with_state(state);
+        .with_state(st);
 
-    // Start server
-    let addr: SocketAddr = args.listen.parse()?;
-    info!(
-        "Listening on https://{} (mTLS + allowlist + audit log)",
-        addr
-    );
+    // Build rustls config with client auth + allowlist
+    let allow = Arc::new(load_allowlist(&args.allowlist)?);
+    let roots = load_ca_roots(&args.client_ca_pem)?;
 
-    let server = axum_server::bind_rustls(addr, tls)
-        .serve(app.into_make_service_with_connect_info::<RustlsConnectInfo>());
+    let webpki = rustls::server::WebPkiClientVerifier::builder(Arc::new(roots))
+        .build()
+        .map_err(|e| anyhow::anyhow!("client verifier: {e}"))?;
+    let verifier: Arc<dyn ClientCertVerifier> = Arc::new(AllowlistClientVerifier {
+        inner: webpki,
+        allow,
+    });
 
-    if let Err(e) = server.await {
-        error!("server error: {}", e);
-        return Err(e.into());
-    }
+    // Server cert+key
+    let cert = std::fs::read(&args.tls_cert_pem)?;
+    let key = std::fs::read(&args.tls_key_pem)?;
 
-    info!("Server shut down gracefully");
+    let mut cert_rd = std::io::Cursor::new(cert);
+    let certs = rustls_pemfile::certs(&mut cert_rd).collect::<Result<Vec<_>, _>>()?;
+
+    let mut key_rd = std::io::Cursor::new(key);
+    let keys = rustls_pemfile::private_key(&mut key_rd)?
+        .ok_or_else(|| anyhow::anyhow!("no private key found"))?;
+
+    let config = rustls::ServerConfig::builder()
+        .with_client_cert_verifier(verifier)
+        .with_single_cert(certs, keys)
+        .map_err(|e| anyhow::anyhow!("server tls config: {e}"))?;
+
+    let tls = RustlsConfig::from_config(Arc::new(config));
+
+    tracing::info!(%addr, "iona-remote-signer listening (mTLS + allowlist + audit)");
+    axum_server::bind_rustls(addr, tls)
+        .serve(app.into_make_service_with_connect_info::<RustlsConnectInfo>())
+        .await?;
+
     Ok(())
-}
-
-// -----------------------------------------------------------------------------
-// Logging initialisation
-// -----------------------------------------------------------------------------
-
-fn init_logging(level: &str) -> anyhow::Result<()> {
-    use tracing_subscriber::{fmt, prelude::*, EnvFilter};
-
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(level));
-
-    let subscriber = fmt::Subscriber::builder()
-        .with_target(true)
-        .with_thread_ids(false)
-        .with_env_filter(filter)
-        .finish();
-
-    tracing::subscriber::set_global_default(subscriber)?;
-    Ok(())
-}
-
-// -----------------------------------------------------------------------------
-// Graceful shutdown signal
-// -----------------------------------------------------------------------------
-
-async fn shutdown_signal() {
-    let ctrl_c = async {
-        signal::ctrl_c()
-            .await
-            .expect("failed to install Ctrl+C handler");
-    };
-
-    #[cfg(unix)]
-    let terminate = async {
-        use signal::unix::{signal, SignalKind};
-        let mut signal =
-            signal(SignalKind::terminate()).expect("failed to install SIGTERM handler");
-        signal.recv().await;
-    };
-
-    #[cfg(not(unix))]
-    let terminate = std::future::pending::<()>();
-
-    tokio::select! {
-        _ = ctrl_c => {},
-        _ = terminate => {},
-    }
-    info!("shutdown signal received");
-}
-
-// -----------------------------------------------------------------------------
-// Tests
-// -----------------------------------------------------------------------------
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::io::Write;
-    use tempfile::tempdir;
-
-    #[test]
-    fn test_load_allowlist() {
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("allowlist.txt");
-        std::fs::write(&path, "# comment\nabc123\nDEF456  \n\n  \n").unwrap();
-
-        let set = load_allowlist(&path).unwrap();
-        assert_eq!(set.len(), 2);
-        assert!(set.contains("abc123"));
-        assert!(set.contains("def456"));
-    }
-
-    #[test]
-    fn test_client_fingerprint() {
-        // We can't easily test the actual fingerprint without a real certificate,
-        // but we can test the fallback to "unknown".
-        // For a real test we'd need to mock RustlsConnectInfo, which is not feasible.
-        // We'll just ensure the function doesn't panic.
-        // In a real test environment you'd need to set up a TLS connection.
-    }
-
-    #[test]
-    fn test_audit_line_serialization() {
-        let line = AuditLine {
-            ts_unix_s: 1234567890,
-            client_fp_sha256: "deadbeef".into(),
-            remote_addr: "127.0.0.1:12345".into(),
-            msg_blake3_hex: "abcdef".into(),
-            ok: true,
-            reason: "ok".into(),
-        };
-        let json = serde_json::to_string(&line).unwrap();
-        assert!(json.contains("ts_unix_s"));
-        assert!(json.contains("client_fp_sha256"));
-        assert!(json.contains("deadbeef"));
-    }
 }

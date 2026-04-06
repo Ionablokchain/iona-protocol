@@ -1,20 +1,33 @@
-use crate::storage::layout::DataLayout;
-use crate::storage::SchemaMeta;
-use std::io;
+//! Migration v3 -> v4: Introduce `node_meta.json` with protocol version tracking.
+//!
+//! This migration creates the `node_meta.json` file if it doesn't exist,
+//! recording the current protocol version, schema version, and node binary version.
 
-pub fn migrate(layout: &DataLayout, meta: &mut SchemaMeta) -> io::Result<()> {
-    let node_meta_path = layout.node_meta_path();
-    if !node_meta_path.exists() {
-        let node_meta = serde_json::json!({
-            "schema_version": 4,
-            "protocol_version": 1,
-            "node_version": env!("CARGO_PKG_VERSION"),
-        });
-        let json = serde_json::to_string_pretty(&node_meta)
+use crate::storage::SchemaMeta;
+use std::{fs, io, path::Path};
+
+pub fn migrate(data_dir: &str, meta: &mut SchemaMeta) -> io::Result<()> {
+    let timestamp = {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0)
+    };
+
+    let meta_path = format!("{data_dir}/node_meta.json");
+    if !Path::new(&meta_path).exists() {
+        let node_meta = crate::storage::meta::NodeMeta::new_current();
+        let out = serde_json::to_string_pretty(&node_meta)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
-        DataLayout::atomic_write(&node_meta_path, json.as_bytes())?;
+        let tmp = format!("{meta_path}.tmp");
+        fs::write(&tmp, &out)?;
+        fs::rename(&tmp, &meta_path)?;
     }
-    meta.migration_log
-        .push(format!("v3 → v4: node_meta.json created"));
+
+    meta.migration_log.push(format!(
+        "[{timestamp}] v3 -> v4: node_meta.json created with protocol version tracking"
+    ));
+
     Ok(())
 }
