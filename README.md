@@ -2,21 +2,21 @@
 
 IONA is an open-source infrastructure project focused on reproducibility, deterministic execution, upgrade safety, and operational reliability in distributed systems.
 
-The project provides a Rust-based protocol implementation, local multi-node testing environments, release verification workflows, observability tooling, and operational documentation designed to help developers and operators validate system behavior before broader deployment.
+It provides a Rust-based protocol implementation, controlled multi-node testing environments, release verification workflows, observability tooling, and operator-oriented documentation designed to help developers and infrastructure operators validate behavior before broader deployment.
 
-## Why IONA
+## Overview
 
-Many distributed systems assume deterministic execution and safe protocol evolution, but often lack practical tooling for reproducibility testing, release validation, upgrade simulation, and operator-oriented recovery workflows.
+Many distributed systems depend on deterministic execution and safe protocol evolution, but often lack practical tooling for reproducibility testing, release validation, upgrade simulation, and operational recovery.
 
-IONA explores these problems through an open engineering framework that emphasizes:
+IONA explores these challenges through an engineering-first framework that prioritizes:
 
 - deterministic state transition behavior
 - reproducible execution across environments
 - safer protocol and software upgrades
 - operator-first observability and recovery tooling
-- controlled multi-node test environments
+- controlled multi-node validation environments
 
-## Current Scope
+## What the Repository Includes
 
 This repository currently includes:
 
@@ -26,6 +26,8 @@ This repository currently includes:
 - release verification and artifact integrity checks
 - monitoring and observability assets
 - operational runbooks and supporting documentation
+- TypeScript SDK assets
+- deployment and configuration templates
 
 ## Project Goals
 
@@ -36,19 +38,46 @@ Its main goals are:
 - to make execution behavior easier to verify
 - to make upgrades safer to test before rollout
 - to improve operational clarity for node operators
-- to provide reusable tools and documentation for reproducible infrastructure workflows
+- to support reproducible infrastructure workflows
+- to produce reusable tools and documentation for open systems engineering
 
-## Status
+## Current Status
 
 IONA is under active development.
 
-The repository should currently be understood as:
+At the current stage, the repository should be understood as:
 
 - functional for local development and controlled multi-node testing
-- suitable for infrastructure experimentation and architecture review
+- suitable for infrastructure experimentation, validation, and architecture review
+- useful as a research and engineering environment for reproducibility and upgrade-safety work
 - not a final production deployment claim
 
 Some components are more mature than others. Experimental areas should be treated accordingly.
+
+## Why IONA
+
+IONA exists to make distributed infrastructure easier to reason about, test, and operate safely.
+
+Rather than optimizing for marketing claims, the project focuses on concrete engineering concerns such as:
+
+- repeatable validation workflows
+- reliable release verification
+- safer upgrade preparation
+- clearer operational procedures
+- better failure visibility and recovery support
+
+## What You Can Evaluate Today
+
+At its current stage, the repository is best evaluated as an infrastructure and reliability project.
+
+Reviewers and contributors can use it to:
+
+- inspect the protocol and node implementation
+- run controlled local multi-node environments
+- review verification and validation workflows
+- examine upgrade-safety and operational documentation
+- assess observability, monitoring, and recovery assets
+- explore reproducible infrastructure practices in an open repository
 
 ## Repository Structure
 
@@ -62,6 +91,3 @@ testnet/local4/         Local 4-validator test environment
 scripts/                Verification and automation scripts
 sdk/typescript/         TypeScript SDK assets
 config/                 Configuration templates
-
-## License
-This project is licensed under the Apache License 2.0 - see the [LICENSE](LICENSE) file for details.
