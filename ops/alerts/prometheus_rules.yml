@@ -1,0 +1,146 @@
+# IONA Prometheus Alert Rules — v28.8.0
+# 10 production alerts with runbook links
+
+groups:
+  - name: iona.consensus
+    rules:
+
+      - alert: IonaConsensusNoProgress
+        expr: increase(iona_consensus_height[5m]) == 0
+        for: 3m
+        labels:
+          severity: critical
+          team: validators
+        annotations:
+          summary: "Chain halt on {{ $labels.instance }}"
+          description: "Block height has not advanced in 3+ minutes. Chain may be halted."
+          runbook: "https://github.com/iona/iona/blob/main/ops/runbooks/consensus_no_progress.md"
+
+      - alert: IonaFinalityLagHigh
+        expr: iona_consensus_finality_lag_blocks > 10
+        for: 2m
+        labels:
+          severity: warning
+          team: validators
+        annotations:
+          summary: "High finality lag on {{ $labels.instance }}: {{ $value }} blocks"
+          runbook: "https://github.com/iona/iona/blob/main/ops/runbooks/finality_lag.md"
+
+      - alert: IonaValidatorDoubleSigned
+        expr: iona_validator_double_sign_total > 0
+        for: 0m
+        labels:
+          severity: critical
+          team: security
+        annotations:
+          summary: "DOUBLE-SIGN detected on {{ $labels.instance }} — STOP NODE NOW"
+          description: "Validator has signed conflicting messages. Immediate action required to prevent slashing."
+          runbook: "https://github.com/iona/iona/blob/main/ops/runbooks/validator_double_sign.md"
+
+  - name: iona.rpc
+    rules:
+
+      - alert: IonaRpcP99LatencyHigh
+        expr: |
+          histogram_quantile(0.99,
+            rate(iona_rpc_request_duration_seconds_bucket[5m])
+          ) > 2.0
+        for: 5m
+        labels:
+          severity: warning
+          team: ops
+        annotations:
+          summary: "RPC P99 latency > 2s on {{ $labels.instance }}"
+          runbook: "https://github.com/iona/iona/blob/main/ops/runbooks/rpc_latency.md"
+
+      - alert: IonaRpcRateLimitFiring
+        expr: rate(iona_rpc_rate_limit_rejections_total[1m]) > 10
+        for: 2m
+        labels:
+          severity: warning
+          team: ops
+        annotations:
+          summary: "RPC rate limiter firing on {{ $labels.instance }}: {{ $value }}/s rejected"
+          runbook: "https://github.com/iona/iona/blob/main/ops/runbooks/rpc_latency.md"
+
+  - name: iona.network
+    rules:
+
+      - alert: IonaPeerCountLow
+        expr: iona_p2p_peer_count < 3
+        for: 5m
+        labels:
+          severity: warning
+          team: ops
+        annotations:
+          summary: "Low peer count on {{ $labels.instance }}: {{ $value }} peers"
+          runbook: "https://github.com/iona/iona/blob/main/ops/runbooks/peer_drop.md"
+
+  - name: iona.storage
+    rules:
+
+      - alert: IonaDiskWalGrowthHigh
+        expr: rate(iona_wal_size_bytes[10m]) > 10485760
+        for: 5m
+        labels:
+          severity: warning
+          team: ops
+        annotations:
+          summary: "WAL growing fast on {{ $labels.instance }}: {{ $value | humanize }}B/s"
+          runbook: "https://github.com/iona/iona/blob/main/ops/runbooks/disk_wal_growth.md"
+
+      - alert: IonaMempoolCapacityHigh
+        expr: iona_mempool_size / iona_mempool_capacity > 0.9
+        for: 3m
+        labels:
+          severity: warning
+          team: ops
+        annotations:
+          summary: "Mempool at {{ $value | humanizePercentage }} capacity on {{ $labels.instance }}"
+          runbook: "https://github.com/iona/iona/blob/main/ops/runbooks/mempool_pressure.md"
+
+  - name: iona.security
+    rules:
+
+      - alert: IonaTLSCertExpiringSoon
+        expr: iona_tls_cert_expiry_seconds < 86400 * 30
+        for: 1h
+        labels:
+          severity: warning
+          team: security
+        annotations:
+          summary: "TLS cert expires in {{ $value | humanizeDuration }} on {{ $labels.instance }}"
+          description: "Run: iona-cli cert reload (after renewing cert). See runbook."
+          runbook: "https://github.com/iona/iona/blob/main/ops/runbooks/tls_cert_expiry.md"
+
+      - alert: IonaTLSCertCritical
+        expr: iona_tls_cert_expiry_seconds < 86400 * 7
+        for: 5m
+        labels:
+          severity: critical
+          team: security
+        annotations:
+          summary: "TLS cert expires in {{ $value | humanizeDuration }} — ROTATE NOW"
+          runbook: "https://github.com/iona/iona/blob/main/ops/runbooks/tls_cert_expiry.md"
+
+      - alert: IonaAuditChainIntegrityFail
+        expr: iona_audit_chain_integrity == 0
+        for: 1m
+        labels:
+          severity: critical
+          team: security
+        annotations:
+          summary: "Audit chain integrity failure on {{ $labels.instance }}"
+          description: "Possible tampering or storage corruption. Run: iona-cli audit verify"
+          runbook: "https://github.com/iona/iona/blob/main/ops/runbooks/audit_chain_break.md"
+
+      - alert: IonaNodeVersionSkew
+        expr: count(count by (version) (iona_node_info)) > 1
+        for: 30m
+        labels:
+          severity: warning
+          team: ops
+        annotations:
+          summary: "Multiple IONA versions running in validator set"
+          description: "Rolling upgrade may be in progress. Verify all nodes upgrade within SLA."
+          runbook: "https://github.com/iona/iona/blob/main/ops/runbooks/upgrade_lag.md"

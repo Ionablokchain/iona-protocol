@@ -1,0 +1,178 @@
+# IONA v28 SLO Configuration
+# ==========================
+# Service Level Objectives (SLOs) for IONA blockchain validator operations.
+# Compatible with Prometheus/Sloth SLO tooling.
+# These SLOs define target reliability metrics for production validators.
+
+spec_version: "0.1"
+
+service: iona-validator
+labels:
+  team: infrastructure
+  component: blockchain-validator
+
+slos:
+  # SLO 1: Validator Uptime
+  # =======================
+  # Target: The validator is up and healthy 99.5% of the time.
+  # SLI: Measured by continuous block commitment rate (blocks committed per minute > 0)
+  # Failure modes: Process crash, out of memory, network partition, consensus failure
+  # 30-day error budget: 3.6 hours of downtime
+  - name: validator_uptime
+    description: "Validator node is up and participating in consensus"
+    target: 99.5
+    window: 30d
+    
+    # Service Level Indicator definition
+    # Higher than 0 blocks committed = validator is healthy
+    sli:
+      type: prometheus
+      # Query returns 1 when validator is up (rate > 0), 0 when down
+      good_query: |
+        rate(iona_blocks_committed_total[5m]) > 0
+      total_query: |
+        1
+
+    # Alert windows for fast detection and response
+    alert_windows:
+      - name: "5m"
+        duration: 5m
+        severity: warning
+      - name: "1h"
+        duration: 1h
+        severity: critical
+
+  # SLO 2: Block Signing Rate
+  # =========================
+  # Target: Validator correctly signs 99.9% of blocks it's supposed to sign.
+  # SLI: Ratio of blocks signed / blocks proposed by this validator
+  # Failure modes: Validator selected but failed to sign (consensus error, slow response)
+  # 30-day error budget: 26 minutes of missed signatures
+  - name: block_signing_rate
+    description: "Validator successfully signs proposed blocks"
+    target: 99.9
+    window: 30d
+
+    sli:
+      type: prometheus
+      # Signed blocks / proposed blocks
+      good_query: |
+        rate(iona_blocks_signed_total[5m]) / on() rate(iona_blocks_proposed_total[5m])
+      total_query: |
+        rate(iona_blocks_proposed_total[5m]) / rate(iona_blocks_proposed_total[5m])
+
+    alert_windows:
+      - name: "30m"
+        duration: 30m
+        severity: warning
+      - name: "2h"
+        duration: 2h
+        severity: critical
+
+  # SLO 3: RPC Availability
+  # =======================
+  # Target: RPC endpoint serves requests successfully 99.9% of the time.
+  # SLI: Request success rate (non-error responses / total requests)
+  # Failure modes: RPC server down, overwhelmed, backend blockchain error
+  # 30-day error budget: 26 minutes of failed requests
+  - name: rpc_availability
+    description: "RPC endpoint returns successful responses"
+    target: 99.9
+    window: 30d
+
+    sli:
+      type: prometheus
+      # Successful RPC requests (2xx/3xx) / total requests
+      good_query: |
+        rate(iona_rpc_requests_total{status=~"2.."}[5m]) / rate(iona_rpc_requests_total[5m])
+      total_query: |
+        rate(iona_rpc_requests_total[5m]) / rate(iona_rpc_requests_total[5m])
+
+    alert_windows:
+      - name: "5m"
+        duration: 5m
+        severity: warning
+      - name: "1h"
+        duration: 1h
+        severity: critical
+
+  # SLO 4: Consensus Height Freshness
+  # ==================================
+  # Target: Validator stays within 1 block of consensus height 99.8% of the time.
+  # SLI: Measured by consensus height lag
+  # Failure modes: Node falling behind network (slow synchronization, network issues)
+  # 30-day error budget: 4.3 hours
+  - name: consensus_freshness
+    description: "Validator consensus height lag <= 1 block"
+    target: 99.8
+    window: 30d
+
+    sli:
+      type: prometheus
+      # 1 when lag <= 1, 0 when lag > 1
+      good_query: |
+        iona_consensus_height_lag <= 1
+      total_query: |
+        1
+
+    alert_windows:
+      - name: "10m"
+        duration: 10m
+        severity: warning
+      - name: "1h"
+        duration: 1h
+        severity: critical
+
+  # SLO 5: P2P Network Connectivity
+  # ===============================
+  # Target: Validator maintains connection to 90%+ of known peers 99.5% of the time.
+  # SLI: Ratio of connected peers to total known peers
+  # Failure modes: Network issues, firewall rules, peer discovery problems
+  # 30-day error budget: 3.6 hours
+  - name: p2p_connectivity
+    description: "Validator connected to healthy peer set"
+    target: 99.5
+    window: 30d
+
+    sli:
+      type: prometheus
+      # Connected peers / (total peers or min 10 if < 10 available)
+      good_query: |
+        iona_peer_count >= 10
+      total_query: |
+        1
+
+    alert_windows:
+      - name: "15m"
+        duration: 15m
+        severity: warning
+      - name: "2h"
+        duration: 2h
+        severity: critical
+
+# Error budgets tracking
+# Alerts fire when error budget is exhausted faster than expected
+error_budgets:
+  - name: validator_uptime_budget
+    slo: validator_uptime
+    alerts:
+      - name: SLOErrorBudgetBurn
+        short_window: 1h
+        long_window: 6h
+        burn_rate_threshold: 10
+
+  - name: block_signing_budget
+    slo: block_signing_rate
+    alerts:
+      - name: SLOErrorBudgetBurn
+        short_window: 30m
+        long_window: 2h
+        burn_rate_threshold: 15
+
+  - name: rpc_availability_budget
+    slo: rpc_availability
+    alerts:
+      - name: SLOErrorBudgetBurn
+        short_window: 5m
+        long_window: 1h
+        burn_rate_threshold: 30

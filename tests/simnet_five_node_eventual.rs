@@ -1,16 +1,14 @@
-use iona::consensus::{
-    proposal_sign_bytes, BlockStore, Config, ConsensusMsg, Engine, Outbox, Proposal, Step,
-    Validator, ValidatorSet,
-};
+
+use iona::consensus::{ConsensusMsg, SimpleBlockProducer, SimpleProducerCfg, Validator, ValidatorSet, BlockStore, Outbox, Engine, Step, Config};
 use iona::crypto::ed25519::{Ed25519Keypair, Ed25519Verifier};
 use iona::crypto::Signer;
-use iona::execution::{build_block, KvState};
-use iona::net::simnet::{NetMsg, NodeId, SimNet, SimNetConfig};
+use iona::types::{Hash32, Block};
 use iona::slashing::StakeLedger;
-use iona::types::{Block, Hash32};
+use iona::execution::KvState;
+use iona::net::simnet::{SimNet, NetMsg, NodeId, SimNetConfig};
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Mutex, Arc};
 use tokio::sync::mpsc;
 
 #[derive(Default)]
@@ -32,45 +30,21 @@ struct SimOutbox {
     net: SimNet,
 }
 impl SimOutbox {
-    fn new(net: SimNet) -> Self {
-        Self { net }
-    }
+    fn new(net: SimNet) -> Self { Self { net } }
 }
 impl Outbox for SimOutbox {
-    fn broadcast(&mut self, msg: ConsensusMsg) {
-        self.net.broadcast_consensus(msg);
-    }
+    fn broadcast(&mut self, msg: ConsensusMsg) { self.net.broadcast_consensus(msg); }
     fn request_block(&mut self, block_id: Hash32) {
         // Use retry here to tolerate block traffic loss in this test.
         self.net.request_block_with_retry(block_id, 8, 10);
     }
-    fn on_commit(
-        &mut self,
-        _cert: &iona::consensus::CommitCertificate,
-        _block: &Block,
-        _new_state: &KvState,
-        _new_base_fee: u64,
-        _receipts: &[iona::types::Receipt],
-    ) {
-    }
+    fn on_commit(&mut self, _cert: &iona::consensus::CommitCertificate, _block: &Block, _new_state: &KvState, _new_base_fee: u64, _receipts: &[iona::types::Receipt]) {}
 }
 
-fn make_engine(
-    height: u64,
-    vset: ValidatorSet,
-    include_block_in_proposal: bool,
-) -> Engine<Ed25519Verifier> {
+fn make_engine(height: u64, vset: ValidatorSet, include_block_in_proposal: bool) -> Engine<Ed25519Verifier> {
     let mut cfg = Config::default();
     cfg.include_block_in_proposal = include_block_in_proposal;
-    Engine::new(
-        cfg,
-        vset,
-        height,
-        Hash32([0u8; 32]),
-        KvState::default(),
-        StakeLedger::default(),
-        None,
-    )
+    Engine::new(cfg, vset, height, Hash32([0u8; 32]), KvState::default(), StakeLedger::default(), None)
 }
 
 async fn pump(
@@ -91,13 +65,7 @@ async fn pump(
             }
             NetMsg::BlockRequest { from, id } => {
                 if let Some(b) = store.get(&id) {
-                    net.send_to(
-                        from,
-                        NetMsg::BlockResponse {
-                            from: self_id,
-                            block: b,
-                        },
-                    );
+                    net.send_to(from, NetMsg::BlockResponse { from: self_id, block: b });
                 }
             }
             NetMsg::BlockResponse { from: _from, block } => {
@@ -110,17 +78,9 @@ async fn pump(
 #[tokio::test]
 async fn five_nodes_eventually_receive_block_under_loss() {
     // 5 validators (keys)
-    let ks: Vec<Ed25519Keypair> = (1u8..=5u8)
-        .map(|i| Ed25519Keypair::from_seed([i; 32]))
-        .collect();
+    let ks: Vec<Ed25519Keypair> = (1u8..=5u8).map(|i| Ed25519Keypair::from_seed([i; 32])).collect();
     let vset = ValidatorSet {
-        vals: ks
-            .iter()
-            .map(|k| Validator {
-                pk: k.public_key(),
-                power: 1,
-            })
-            .collect(),
+        vals: ks.iter().map(|k| Validator { pk: k.public_key(), power: 1 }).collect(),
     };
 
     // Loss on BOTH consensus and block traffic (but not too extreme). Add delay.
@@ -146,16 +106,10 @@ async fn five_nodes_eventually_receive_block_under_loss() {
     let mut outboxes: Vec<Arc<tokio::sync::Mutex<SimOutbox>>> = Vec::new();
     for _ in 0..5 {
         stores.push(Arc::new(MemStore::default()));
-        engines.push(Arc::new(tokio::sync::Mutex::new(make_engine(
-            1,
-            vset.clone(),
-            false,
-        ))));
+        engines.push(Arc::new(tokio::sync::Mutex::new(make_engine(1, vset.clone(), false))));
     }
     for i in 0..5 {
-        outboxes.push(Arc::new(tokio::sync::Mutex::new(SimOutbox::new(
-            nets[i].clone(),
-        ))));
+        outboxes.push(Arc::new(tokio::sync::Mutex::new(SimOutbox::new(nets[i].clone()))));
     }
 
     // Spawn pumps
@@ -167,59 +121,19 @@ async fn five_nodes_eventually_receive_block_under_loss() {
         let net = nets[i].clone();
         let store = stores[i].clone();
         let signer = ks[i].clone();
-        tasks.push(tokio::spawn(pump(
-            rx,
-            eng_c,
-            signer,
-            store,
-            out_c,
-            net,
-            (i + 1) as u64,
-        )));
+        tasks.push(tokio::spawn(pump(rx, eng_c, signer, store, out_c, net, (i+1) as u64)));
     }
 
-    // Engine uses proposer_for(height, round) = vals[(height+round) % n].
-    // height=1 round=0 => vals[(1+0)%5] = vals[1] => ks[1] is proposer.
-    let proposer_key = &ks[1];
-    let proposer_addr = hex::encode(&blake3::hash(&proposer_key.public_key().0).as_bytes()[..20]);
-
+    // Producer: use node1 engine, proposer determined by round-robin
+    let producer = SimpleBlockProducer::new(SimpleProducerCfg { max_txs: 0, include_block_in_proposal: false });
     let block_id: Hash32;
     {
-        let eng = engines[0].lock().await;
+        let mut eng = engines[0].lock().await;
         assert_eq!(eng.state.step, Step::Propose);
+        // height=1 round=0 proposer idx=(1+0)%5=1 => validator #2 (seed [2;32])
         let mut ob = outboxes[0].lock().await;
-
-        // Build block directly.
-        let (block, _next_state, _receipts) = build_block(
-            eng.state.height,
-            eng.state.round,
-            Hash32([0u8; 32]),
-            proposer_key.public_key().0.clone(),
-            &proposer_addr,
-            &eng.app_state,
-            eng.base_fee_per_gas,
-            vec![],
-            0,
-            0,
-        );
-        let bid = block.id();
-
-        // Build a light proposal (no block attached).
-        let sign_bytes = proposal_sign_bytes(eng.state.height, eng.state.round, &bid, None);
-        let sig = proposer_key.sign(&sign_bytes);
-        let proposal = Proposal {
-            height: eng.state.height,
-            round: eng.state.round,
-            proposer: proposer_key.public_key(),
-            block_id: bid.clone(),
-            block: None,
-            pol_round: None,
-            signature: sig,
-        };
-
-        block_id = bid;
-        stores[0].put(block);
-        ob.broadcast(ConsensusMsg::Proposal(proposal));
+        assert!(producer.try_produce(&mut *eng, &ks[1], stores[0].as_ref(), &mut *ob, vec![]));
+        block_id = eng.state.proposal.as_ref().unwrap().block_id.clone();
         assert!(stores[0].get(&block_id).is_some());
     }
 
@@ -236,20 +150,14 @@ async fn five_nodes_eventually_receive_block_under_loss() {
     loop {
         let mut ok = 0;
         for s in &stores {
-            if s.get(&block_id).is_some() {
-                ok += 1;
-            }
+            if s.get(&block_id).is_some() { ok += 1; }
         }
-        if ok == 5 {
-            break;
-        }
+        if ok == 5 { break; }
         if tokio::time::Instant::now() > deadline {
             panic!("not all nodes received the block by deadline; have {ok}/5");
         }
         tokio::time::sleep(std::time::Duration::from_millis(40)).await;
     }
 
-    for t in tasks {
-        t.abort();
-    }
+    for t in tasks { t.abort(); }
 }

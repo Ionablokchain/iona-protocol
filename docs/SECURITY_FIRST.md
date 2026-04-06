@@ -1,6 +1,6 @@
 # IONA Security-First Manifesto
 
-**Version:** 28.1.0
+**Version:** 28.3.0
 **Date:** 2026-03-02
 **Status:** Normative — enforced by CI
 
@@ -1441,7 +1441,7 @@ Honesty about what is **not yet done** is part of being security-first. This sec
 | Account abstraction / social recovery | LOW — private key loss = permanent loss | v31.0 | Protocol team |
 | HSM PKCS#11 integration (hardware) | LOW — software encrypted keystore available; HSM is optional | v29.0 | Infra team |
 | ASN-based peer bucketing | LOW — currently IP-prefix buckets; ASN requires external mapping | v29.0 | Net team |
-| `cargo-cyclonedx` SBOM in CI | LOW — manual today | v28.1 | DevOps |
+| `cargo-cyclonedx` SBOM in CI | DONE in v28.2 | — | ✓ |
 | Downtime penalty (gradual) | LOW — only double-sign slash today | v30.0 | Consensus team |
 
 **Any HIGH item blocks mainnet deployment.**
@@ -1766,9 +1766,9 @@ For mainnet validators demanding maximum isolation.
 
 ---
 
-## 23. v28.0 Security Changes (This Release)
+## 23. v28.x Security Changes
 
-The following security improvements were added in v28.0.0 and are captured here for grant reviewers and auditors:
+The following security improvements were added in v28.x and are captured here for grant reviewers and auditors:
 
 ### 23.1 RPC Bind-Address Safety Gate
 

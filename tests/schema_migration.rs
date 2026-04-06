@@ -18,7 +18,7 @@ fn make_dir() -> (TempDir, DataDir) {
 fn write_schema_version(data: &DataDir, version: u32) {
     data.ensure().unwrap();
     let meta = serde_json::json!({ "version": version });
-    let path = data.layout().schema_path();
+    let path = format!("{}/schema.json", data.root);
     fs::write(path, serde_json::to_string_pretty(&meta).unwrap()).unwrap();
 }
 
@@ -59,7 +59,7 @@ fn schema_migration_v1_to_current_normalises_state_full() {
         "nonces": {}
     });
     fs::write(
-        data.layout().state_full_path(),
+        format!("{}/state_full.json", data.root),
         serde_json::to_string_pretty(&old_state).unwrap(),
     )
     .unwrap();
@@ -68,21 +68,15 @@ fn schema_migration_v1_to_current_normalises_state_full() {
     assert_eq!(read_schema_version(&data), CURRENT_SCHEMA_VERSION);
 
     // state_full.json should now have a `vm` field.
-    let raw = fs::read_to_string(data.layout().state_full_path()).unwrap();
+    let raw = fs::read_to_string(format!("{}/state_full.json", data.root)).unwrap();
     let val: serde_json::Value = serde_json::from_str(&raw).unwrap();
-    assert!(
-        val.get("vm").is_some(),
-        "vm field should be injected by migration"
-    );
+    assert!(val.get("vm").is_some(), "vm field should be injected by migration");
     // Original data must be preserved.
     assert_eq!(val["kv"]["hello"], "world");
 
     // Backup must exist.
     assert!(
-        data.layout()
-            .state_full_path()
-            .with_extension("v1.bak")
-            .exists(),
+        std::path::Path::new(&format!("{}/state_full.json.v1.bak", data.root)).exists(),
         "backup file should be created"
     );
 }
@@ -94,17 +88,23 @@ fn schema_migration_v2_migrates_flat_wal_to_segments() {
     write_schema_version(&data, 2);
 
     // Write a flat wal.jsonl (pre-segmented format).
-    let old_wal = data.layout().wal_flat_path();
+    let old_wal = format!("{}/wal.jsonl", data.root);
     fs::write(&old_wal, b"{\"height\":1}\n{\"height\":2}\n").unwrap();
 
     data.ensure_schema_and_migrate().unwrap();
     assert_eq!(read_schema_version(&data), CURRENT_SCHEMA_VERSION);
 
     // Old file should be gone (renamed).
-    assert!(!old_wal.exists(), "old wal.jsonl should be renamed");
+    assert!(
+        !std::path::Path::new(&old_wal).exists(),
+        "old wal.jsonl should be renamed"
+    );
     // Segment 0 should exist with original content.
-    let seg0 = data.layout().wal_dir().join("wal_00000000.jsonl");
-    assert!(seg0.exists(), "segment 0 should be created");
+    let seg0 = format!("{}/wal/wal_00000000.jsonl", data.root);
+    assert!(
+        std::path::Path::new(&seg0).exists(),
+        "segment 0 should be created"
+    );
     let content = fs::read_to_string(&seg0).unwrap();
     assert!(content.contains("\"height\":1"));
 }
@@ -119,10 +119,7 @@ fn schema_migration_future_version_returns_error() {
         "should error when on-disk version is newer than binary"
     );
     let msg = result.unwrap_err().to_string();
-    assert!(
-        msg.contains("newer than this binary"),
-        "error message should explain the issue: {msg}"
-    );
+    assert!(msg.contains("newer than this binary"), "error message should explain the issue: {msg}");
 }
 
 #[test]
@@ -131,7 +128,7 @@ fn schema_migration_log_is_populated() {
     // Start from v0 so we exercise all migration steps.
     data.ensure_schema_and_migrate().unwrap();
 
-    let raw = fs::read_to_string(data.layout().schema_path()).unwrap();
+    let raw = fs::read_to_string(format!("{}/schema.json", data.root)).unwrap();
     let meta: serde_json::Value = serde_json::from_str(&raw).unwrap();
     let log = meta["migration_log"].as_array().unwrap();
     assert!(

@@ -21,29 +21,21 @@ pub const SLASH_FRACTION_DOUBLE_VOTE: u64 = 20; // 1/20
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ValidatorStatus {
     Active,
-    Jailed {
-        since_height: Height,
-        slash_count: u32,
-    },
-    Tombstoned, // permanently banned (double-vote at same height)
+    Jailed { since_height: Height, slash_count: u32 },
+    Tombstoned,  // permanently banned (double-vote at same height)
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ValidatorRecord {
-    pub stake: u64,
+    pub stake:         u64,
     pub slashed_total: u64,
-    pub status: ValidatorStatus,
-    pub jailed_at: Option<Height>,
+    pub status:        ValidatorStatus,
+    pub jailed_at:     Option<Height>,
 }
 
 impl ValidatorRecord {
     pub fn new(stake: u64) -> Self {
-        Self {
-            stake,
-            slashed_total: 0,
-            status: ValidatorStatus::Active,
-            jailed_at: None,
-        }
+        Self { stake, slashed_total: 0, status: ValidatorStatus::Active, jailed_at: None }
     }
 
     pub fn is_active(&self) -> bool {
@@ -52,9 +44,8 @@ impl ValidatorRecord {
 
     pub fn can_unjail(&self, current_height: Height) -> bool {
         match &self.status {
-            ValidatorStatus::Jailed { since_height, .. } => {
-                current_height >= since_height + UNJAIL_DELAY_BLOCKS
-            }
+            ValidatorStatus::Jailed { since_height, .. } =>
+                current_height >= since_height + UNJAIL_DELAY_BLOCKS,
             _ => false,
         }
     }
@@ -75,23 +66,20 @@ impl StakeLedger {
     pub fn default_demo_with(validators: &[PublicKeyBytes], stake_each: u64) -> Self {
         let mut s = Self::default();
         for v in validators {
-            s.validators
-                .insert(v.clone(), ValidatorRecord::new(stake_each));
+            s.validators.insert(v.clone(), ValidatorRecord::new(stake_each));
         }
         s
     }
 
     pub fn total_power(&self) -> u64 {
-        self.validators
-            .values()
+        self.validators.values()
             .filter(|r| r.is_active())
             .map(|r| r.stake)
             .sum()
     }
 
     pub fn power_of(&self, pk: &PublicKeyBytes) -> u64 {
-        self.validators
-            .get(pk)
+        self.validators.get(pk)
             .filter(|r| r.is_active())
             .map(|r| r.stake)
             .unwrap_or(0)
@@ -99,10 +87,7 @@ impl StakeLedger {
 
     /// Backward compat fields for engine serialization
     pub fn stake_raw(&self) -> BTreeMap<PublicKeyBytes, u64> {
-        self.validators
-            .iter()
-            .map(|(k, v)| (k.clone(), v.stake))
-            .collect()
+        self.validators.iter().map(|(k, v)| (k.clone(), v.stake)).collect()
     }
 
     pub fn apply_evidence(&mut self, ev: &Evidence, current_height: Height) {
@@ -117,10 +102,7 @@ impl StakeLedger {
 
                 let record = match self.validators.get_mut(voter) {
                     Some(r) => r,
-                    None => {
-                        warn!("evidence for unknown validator");
-                        return;
-                    }
+                    None => { warn!("evidence for unknown validator"); return; }
                 };
 
                 let slash = (record.stake / SLASH_FRACTION_DOUBLE_VOTE).max(1);
@@ -157,9 +139,7 @@ impl StakeLedger {
                 }
             }
 
-            Evidence::DoubleProposal {
-                proposer, height, ..
-            } => {
+            Evidence::DoubleProposal { proposer, height, .. } => {
                 // Treat double-proposals as a severe safety violation (similar severity to double-vote).
                 let key = (*height, proposer.clone());
                 if self.processed_evidence.contains(&key) {
@@ -170,10 +150,7 @@ impl StakeLedger {
 
                 let record = match self.validators.get_mut(proposer) {
                     Some(r) => r,
-                    None => {
-                        warn!("evidence for unknown validator");
-                        return;
-                    }
+                    None => { warn!("evidence for unknown validator"); return; }
                 };
 
                 let slash = (record.stake / SLASH_FRACTION_DOUBLE_VOTE).max(1);
@@ -201,11 +178,7 @@ impl StakeLedger {
 
     /// Unjail a validator who has waited the required delay.
     /// Returns Err if validator is not jailed or delay not elapsed.
-    pub fn unjail(
-        &mut self,
-        pk: &PublicKeyBytes,
-        current_height: Height,
-    ) -> Result<(), &'static str> {
+    pub fn unjail(&mut self, pk: &PublicKeyBytes, current_height: Height) -> Result<(), &'static str> {
         let record = self.validators.get_mut(pk).ok_or("unknown validator")?;
         match &record.status {
             ValidatorStatus::Tombstoned => Err("tombstoned validators cannot unjail"),
@@ -226,10 +199,7 @@ impl StakeLedger {
 
     /// Status report for all validators.
     pub fn status_report(&self) -> Vec<(PublicKeyBytes, &ValidatorRecord)> {
-        self.validators
-            .iter()
-            .map(|(k, v)| (k.clone(), v))
-            .collect()
+        self.validators.iter().map(|(k, v)| (k.clone(), v)).collect()
     }
 }
 
@@ -238,21 +208,18 @@ impl StakeLedger {
 impl StakeLedger {
     /// Deserialize old format (stake: BTreeMap<PK,u64>, slashed: BTreeMap<PK,u64>)
     pub fn from_legacy(
-        stake: BTreeMap<PublicKeyBytes, u64>,
+        stake:   BTreeMap<PublicKeyBytes, u64>,
         slashed: BTreeMap<PublicKeyBytes, u64>,
     ) -> Self {
         let mut s = Self::default();
         for (pk, amount) in stake {
             let slashed_total = *slashed.get(&pk).unwrap_or(&0);
-            s.validators.insert(
-                pk,
-                ValidatorRecord {
-                    stake: amount,
-                    slashed_total,
-                    status: ValidatorStatus::Active,
-                    jailed_at: None,
-                },
-            );
+            s.validators.insert(pk, ValidatorRecord {
+                stake: amount,
+                slashed_total,
+                status: ValidatorStatus::Active,
+                jailed_at: None,
+            });
         }
         s
     }
@@ -305,13 +272,15 @@ impl UptimeTracker {
 
     /// Returns validators that should be jailed for downtime at this height.
     /// Only returns active validators that have been in the set for at least DOWNTIME_WINDOW blocks.
-    pub fn check_downtime(&self, height: Height, stakes: &StakeLedger) -> Vec<PublicKeyBytes> {
+    pub fn check_downtime(
+        &self,
+        height: Height,
+        stakes: &StakeLedger,
+    ) -> Vec<PublicKeyBytes> {
         if height < DOWNTIME_WINDOW {
             return vec![]; // too early to check
         }
-        stakes
-            .validators
-            .iter()
+        stakes.validators.iter()
             .filter(|(_, r)| r.is_active())
             .filter(|(pk, _)| {
                 let signed = *self.signed_in_window.get(*pk).unwrap_or(&0);
@@ -338,10 +307,7 @@ impl StakeLedger {
         record.stake = record.stake.saturating_sub(slash);
         record.slashed_total += slash;
         let slash_count = 1;
-        record.status = ValidatorStatus::Jailed {
-            since_height: current_height,
-            slash_count,
-        };
+        record.status = ValidatorStatus::Jailed { since_height: current_height, slash_count };
         record.jailed_at = Some(current_height);
         warn!(
             validator = %hex::encode(&pk.0),

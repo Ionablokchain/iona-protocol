@@ -1,7 +1,7 @@
 # IONA Blockchain — Public Benchmark Report
 
-**Version:** 27.0.0  
-**Date:** 2026-02-25  
+**Version:** 29.0.0  
+**Date:** 2026-03-25  
 **Rust Toolchain:** 1.85.0 (frozen)  
 **Platform:** Linux x86_64, Ubuntu 22.04  
 **Hardware Reference:** AMD EPYC 7R13 (8 vCPU), 32 GB RAM, NVMe SSD  

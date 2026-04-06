@@ -1,36 +1,226 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# IONA CI — Test, Clippy, Format, Build
+#
+# Triggers: every push + every pull request to main/develop
+# Jobs:
+#   fmt      — rustfmt check (fast gate, runs first)
+#   clippy   — clippy with -D warnings (all targets + features)
+#   test     — cargo test (unit + integration, with nextest)
+#   build    — cargo build --release --locked (smoke: does it compile?)
+#   doc      — cargo doc --no-deps (docs must build cleanly)
+# ─────────────────────────────────────────────────────────────────────────────
 name: CI
 
 on:
   push:
-    branches: ["main"]
+    branches: [main, develop, "release/**"]
   pull_request:
+    branches: [main, develop]
   workflow_dispatch:
 
-env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
-permissions:
-  contents: read
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  RUST_BACKTRACE: 1
+  # Speeds up compilation in CI (avoids debug symbols)
+  RUSTFLAGS: "-C debuginfo=0"
 
 jobs:
-  test:
-    runs-on: ubuntu-latest
-
+  # ── 0. Read pinned toolchain version ──────────────────────────────────────
+  toolchain:
+    name: Read toolchain
+    runs-on: ubuntu-22.04
+    outputs:
+      channel: ${{ steps.read.outputs.channel }}
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+      - name: Read rust-toolchain.toml
+        id: read
+        run: |
+          CHANNEL=$(grep 'channel' rust-toolchain.toml | cut -d'"' -f2)
+          echo "channel=${CHANNEL}" >> "$GITHUB_OUTPUT"
+          echo "Pinned toolchain: ${CHANNEL}"
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: "1.85.0"
-          components: rustfmt, clippy
+  # ── 1. rustfmt ────────────────────────────────────────────────────────────
+  fmt:
+    name: Format check
+    needs: toolchain
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
 
-      - name: Check formatting
+      - name: Install Rust ${{ needs.toolchain.outputs.channel }}
+        run: |
+          rustup override set ${{ needs.toolchain.outputs.channel }}
+          rustup component add rustfmt
+
+      - name: cargo fmt --check
         run: cargo fmt --all -- --check
 
-      - name: Run clippy
-        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+  # ── 2. clippy ─────────────────────────────────────────────────────────────
+  clippy:
+    name: Clippy
+    needs: toolchain
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
 
-      - name: Run tests
-        run: cargo test --workspace --all-targets --all-features --locked
+      - name: Install Rust ${{ needs.toolchain.outputs.channel }}
+        run: |
+          rustup override set ${{ needs.toolchain.outputs.channel }}
+          rustup component add clippy
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/
+          key: ${{ runner.os }}-clippy-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-clippy-
+
+      - name: cargo clippy — main library
+        run: |
+          cargo clippy --locked --all-targets -- -D warnings
+
+      - name: cargo clippy — all features
+        run: |
+          cargo clippy --locked --all-targets \
+            --features "bin-cli,bin-remote-signer,bin-chaos" \
+            -- -D warnings
+
+  # ── 3. tests ──────────────────────────────────────────────────────────────
+  test:
+    name: Tests — ${{ matrix.name }}
+    needs: [fmt, clippy]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: "unit + integration (Linux x86_64)"
+            os: ubuntu-22.04
+            rust: ""           # uses toolchain from rust-toolchain.toml
+            features: ""
+          - name: "all features (Linux x86_64)"
+            os: ubuntu-22.04
+            rust: ""
+            features: "--features bin-cli,bin-remote-signer"
+          - name: "macOS ARM64"
+            os: macos-14
+            rust: ""
+            features: ""
+
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        run: |
+          rustup override set $(grep 'channel' rust-toolchain.toml | cut -d'"' -f2)
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/
+          key: ${{ runner.os }}-test-${{ matrix.name }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-test-
+
+      - name: cargo nextest run (unit tests)
+        run: |
+          cargo nextest run --locked ${{ matrix.features }} \
+            --test-threads 4 \
+            --no-fail-fast
+
+      - name: cargo test --doc (doctest)
+        run: cargo test --locked --doc ${{ matrix.features }}
+
+  # ── 4. release build smoke ────────────────────────────────────────────────
+  build:
+    name: Build release — ${{ matrix.target }}
+    needs: [fmt, clippy]
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-22.04
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-22.04
+            use_cross: true
+          - target: aarch64-apple-darwin
+            os: macos-14
+
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        run: |
+          rustup override set $(grep 'channel' rust-toolchain.toml | cut -d'"' -f2)
+          rustup target add ${{ matrix.target }}
+
+      - name: Install cross (ARM64 cross-compile)
+        if: matrix.use_cross
+        run: cargo install cross --locked
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/
+          key: ${{ runner.os }}-build-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: cargo build --release
+        run: |
+          CMD="${{ matrix.use_cross && 'cross' || 'cargo' }}"
+          $CMD build --release --locked --target ${{ matrix.target }} \
+            --bin iona-node \
+            --features bin-cli
+
+      - name: Verify binary exists and runs
+        if: "!matrix.use_cross"
+        run: |
+          BIN="target/${{ matrix.target }}/release/iona-node"
+          ls -lh "$BIN"
+          "$BIN" --version
+
+  # ── 5. cargo doc ──────────────────────────────────────────────────────────
+  doc:
+    name: Docs
+    needs: toolchain
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        run: rustup override set ${{ needs.toolchain.outputs.channel }}
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/
+          key: ${{ runner.os }}-doc-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: cargo doc --no-deps
+        run: |
+          RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps

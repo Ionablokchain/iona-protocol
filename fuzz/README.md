@@ -1,12 +1,20 @@
-# Fuzzing Iona with `cargo-fuzz`
+# Fuzzing (cargo-fuzz)
 
-This directory contains fuzzing targets for high-risk decoding and execution paths in the Iona protocol.  
-Fuzzing helps discover crashes, panics, or assertion failures that could be exploited by malicious input.
+This repo includes a minimal fuzzing harness for high-risk decoding paths.
 
-## Prerequisites
-
-Install `cargo-fuzz` and the nightly Rust toolchain:
+## Setup
 
 ```bash
-rustup toolchain install nightly
 cargo install cargo-fuzz
+```
+
+## Run
+
+```bash
+cargo fuzz run consensus_msg
+cargo fuzz run tx_json
+```
+
+These targets are intended to harden:
+- `bincode` decoding for P2P consensus messages
+- `serde_json` decoding for transactions (RPC)

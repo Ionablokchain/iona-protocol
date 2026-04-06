@@ -1,0 +1,21 @@
+Package: iona-node
+Version: 28.8.0
+Section: net
+Priority: optional
+Architecture: amd64
+Depends: libssl3 (>= 3.0), adduser, systemd
+Recommends: prometheus-node-exporter, jq
+Installed-Size: 45000
+Maintainer: IONA Engineering <packages@example.invalid>
+Homepage: https://github.com/iona/iona
+Description: IONA blockchain node — production-grade BFT consensus
+ IONA is a high-performance Byzantine Fault Tolerant blockchain node
+ with pluggable execution layers, Cosmos-compatible key management,
+ enterprise-grade RBAC, tamper-evident audit logging, and cosign-signed
+ release artifacts.
+ .
+ This package installs:
+  - iona-node: consensus and networking daemon
+  - iona-cli: command-line management tool
+  - iona-remote-signer: HSM/KMS remote signing proxy
+  - Default configuration and systemd service

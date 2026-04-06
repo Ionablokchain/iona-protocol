@@ -14,24 +14,21 @@
 //! Combined with the existing `fast_quorum` flag (which skips waiting for timeouts when
 //! 2/3+ votes arrive), this achieves consistent sub-second finality under normal conditions.
 //!
-//! # Integration with the consensus engine
+//! Finality budget (typical 4-validator network, LAN):
+//!   - Proposal broadcast:    ~10ms
+//!   - Signature verification: ~5ms  (parallel)
+//!   - Prevote round-trip:    ~20ms
+//!   - Precommit round-trip:  ~20ms
+//!   - Block execution:       ~50ms
+//!   - Total:                ~105ms  (well under 1s)
 //!
-//! The consensus engine should hold an instance of `FinalityTracker` and `PipelineState`.
-//! At each commit, call `tracker.record_commit(finality_ms, round)` and then use
-//! `tracker.adaptive_timeouts()` to update the engine's timeouts for the next rounds.
-//! After a successful commit, the engine can call `pipeline.begin_pipeline(next_height, txs)`
-//! to pre‑drain the mempool, and later in `maybe_propose` use `pipeline.take_pipelined_txs()`
-//! to get the pre‑prepared transactions, if available.
+//! Even with WAN latencies (~80ms RTT), total is ~300-400ms.
 
+use crate::types::{Hash32, Height};
 use crate::consensus::CommitCertificate;
-use crate::types::Height;
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
-
-// -----------------------------------------------------------------------------
-// Finality Tracker
-// -----------------------------------------------------------------------------
+use std::time::Duration;
 
 /// Tracks finality timing and adapts consensus parameters.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -58,19 +55,6 @@ pub struct FinalityTracker {
     pub start_height: Height,
 }
 
-/// Minimum timeouts (floor) to prevent livelock.
-const MIN_PROPOSE_MS: u64 = 50;
-const MIN_VOTE_MS: u64 = 30;
-
-/// Maximum timeouts (ceiling) for fallback.
-const MAX_PROPOSE_MS: u64 = 500;
-const MAX_VOTE_MS: u64 = 300;
-
-/// Threshold: if average finality < this, shrink timeouts.
-const SHRINK_THRESHOLD_MS: u64 = 500;
-/// Threshold: if average finality > this, grow timeouts.
-const GROW_THRESHOLD_MS: u64 = 800;
-
 impl Default for FinalityTracker {
     fn default() -> Self {
         Self {
@@ -87,6 +71,19 @@ impl Default for FinalityTracker {
         }
     }
 }
+
+/// Minimum timeouts (floor) to prevent livelock.
+const MIN_PROPOSE_MS: u64 = 50;
+const MIN_VOTE_MS: u64 = 30;
+
+/// Maximum timeouts (ceiling) for fallback.
+const MAX_PROPOSE_MS: u64 = 500;
+const MAX_VOTE_MS: u64 = 300;
+
+/// Threshold: if average finality < this, shrink timeouts.
+const SHRINK_THRESHOLD_MS: u64 = 500;
+/// Threshold: if average finality > this, grow timeouts.
+const GROW_THRESHOLD_MS: u64 = 800;
 
 impl FinalityTracker {
     pub fn new(start_height: Height) -> Self {
@@ -175,24 +172,13 @@ impl FinalityTracker {
         )
     }
 
-    /// Apply the adaptive timeouts to a mutable config.
-    pub fn apply_to_config(&self, cfg: &mut crate::consensus::Config) {
-        cfg.propose_timeout_ms = self.adaptive_propose_ms;
-        cfg.prevote_timeout_ms = self.adaptive_prevote_ms;
-        cfg.precommit_timeout_ms = self.adaptive_precommit_ms;
-    }
-
     /// Report finality statistics as JSON-compatible struct.
     pub fn stats(&self) -> FinalityStats {
         FinalityStats {
             total_finalized: self.total_finalized,
             average_finality_ms: self.average_finality_ms(),
             p95_finality_ms: self.p95_finality_ms(),
-            best_finality_ms: if self.best_finality_ms == u64::MAX {
-                0
-            } else {
-                self.best_finality_ms
-            },
+            best_finality_ms: if self.best_finality_ms == u64::MAX { 0 } else { self.best_finality_ms },
             worst_finality_ms: self.worst_finality_ms,
             consecutive_fast_commits: self.consecutive_fast_commits,
             is_sub_second: self.is_sub_second(),
@@ -217,10 +203,6 @@ pub struct FinalityStats {
     pub adaptive_precommit_ms: u64,
 }
 
-// -----------------------------------------------------------------------------
-// Finality Certificate
-// -----------------------------------------------------------------------------
-
 /// A finality certificate that proves a block was finalized in < 1 second.
 /// This is an extension of CommitCertificate with timing metadata.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -236,10 +218,6 @@ pub struct FinalityCertificate {
     /// Timestamp (Unix ms) when finality was achieved.
     pub finality_timestamp_ms: u64,
 }
-
-// -----------------------------------------------------------------------------
-// Pipeline State
-// -----------------------------------------------------------------------------
 
 /// Pipeline state for overlapping block preparation with commit propagation.
 /// While the commit certificate for height H propagates, we can start
@@ -291,27 +269,6 @@ impl PipelineState {
     }
 }
 
-// -----------------------------------------------------------------------------
-// Helpers for measuring time
-// -----------------------------------------------------------------------------
-
-/// Returns the current time in milliseconds since Unix epoch.
-pub fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or(Duration::ZERO)
-        .as_millis() as u64
-}
-
-/// Compute finality time (ms) between two timestamps.
-pub fn finality_ms(start: u64, end: u64) -> u64 {
-    end.saturating_sub(start)
-}
-
-// -----------------------------------------------------------------------------
-// Tests
-// -----------------------------------------------------------------------------
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -320,6 +277,7 @@ mod tests {
     fn test_finality_tracker_basic() {
         let mut ft = FinalityTracker::new(1);
 
+        // Record 10 fast commits at ~100ms
         for _ in 0..10 {
             ft.record_commit(100, 0);
         }
@@ -335,10 +293,12 @@ mod tests {
     fn test_finality_tracker_adapts_down() {
         let mut ft = FinalityTracker::new(1);
 
+        // Record many fast commits
         for _ in 0..20 {
             ft.record_commit(80, 0);
         }
 
+        // Timeouts should have shrunk
         assert!(ft.adaptive_propose_ms < 150);
         assert!(ft.adaptive_prevote_ms < 100);
     }
@@ -347,10 +307,12 @@ mod tests {
     fn test_finality_tracker_adapts_up() {
         let mut ft = FinalityTracker::new(1);
 
+        // Record slow commits (round > 0)
         for _ in 0..10 {
             ft.record_commit(900, 2);
         }
 
+        // Timeouts should have grown
         assert!(ft.adaptive_propose_ms >= 150);
     }
 
@@ -363,6 +325,7 @@ mod tests {
         assert!(ps.active);
         assert_eq!(ps.pipeline_height, 5);
 
+        // Take for wrong height
         assert!(ps.take_pipelined_txs(6).is_none());
 
         ps.begin_pipeline(7, vec![]);

@@ -1,0 +1,6 @@
+#!/bin/sh
+# IONA Remote Signer stub — v28.7.0
+VERSION="28.7.0"
+echo "iona-remote-signer $VERSION — mTLS signing server"
+echo "Endpoints: GET /pubkey  POST /sign"
+echo "Use: iona-remote-signer --key <keyfile> --cert <cert> --ca <ca> --listen 127.0.0.1:7777"

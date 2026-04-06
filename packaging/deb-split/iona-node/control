@@ -1,0 +1,16 @@
+Package: iona-node
+Version: 28.7.0
+Section: net
+Priority: optional
+Architecture: amd64
+Depends: libssl3 (>= 3.0), adduser, systemd
+Recommends: iona-cli, prometheus-node-exporter
+Maintainer: IONA Engineering <packages@example.invalid>
+Homepage: https://github.com/iona/iona
+Description: IONA blockchain — consensus node daemon (v28.7.0)
+ IONA is a high-performance Byzantine Fault Tolerant blockchain node
+ with pluggable execution, Cosmos adapter, enterprise RBAC, and
+ tamper-evident audit logging.
+ .
+ This package provides: iona-node binary + systemd unit + default config.
+ After install: systemctl enable --now iona-node

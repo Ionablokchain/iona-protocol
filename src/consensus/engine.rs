@@ -1,24 +1,15 @@
-//! Consensus engine for IONA.
-//!
-//! Implements a Tendermint‑style BFT consensus with fast quorum, double‑sign protection,
-//! and proper handling of `valid_round` and `locked_round`.
-
-use crate::consensus::double_sign::DoubleSignGuard;
 use crate::consensus::messages::*;
 use crate::consensus::quorum::*;
 use crate::consensus::validator_set::*;
-use crate::crypto::{PublicKeyBytes, Signer, Verifier};
+use crate::consensus::double_sign::DoubleSignGuard;
+use crate::crypto::{Signer, Verifier, PublicKeyBytes};
 use crate::evidence::Evidence;
 use crate::execution::{build_block, next_base_fee, verify_block_with_vset, KvState};
 use crate::slashing::StakeLedger;
-use crate::types::{Block, Hash32, Height, Receipt, Round, Tx};
-use std::collections::{BTreeMap, HashMap};
+use crate::types::{Block, Hash32, Height, Round, Tx, Receipt};
 use thiserror::Error;
 use tracing::{info, warn};
-
-// -----------------------------------------------------------------------------
-// Errors
-// -----------------------------------------------------------------------------
+use std::collections::{HashMap, BTreeMap};
 
 #[derive(Debug, Error)]
 pub enum ConsensusError {
@@ -30,25 +21,10 @@ pub enum ConsensusError {
     BadStep,
     #[error("execution error")]
     Exec,
-    #[error("invalid proposal pol_round")]
-    InvalidPolRound,
 }
-
-// -----------------------------------------------------------------------------
-// Step
-// -----------------------------------------------------------------------------
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub enum Step {
-    Propose,
-    Prevote,
-    Precommit,
-    Commit,
-}
-
-// -----------------------------------------------------------------------------
-// CommitCertificate
-// -----------------------------------------------------------------------------
+pub enum Step { Propose, Prevote, Precommit, Commit }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct CommitCertificate {
@@ -56,10 +32,6 @@ pub struct CommitCertificate {
     pub block_id: Hash32,
     pub precommits: Vec<Vote>,
 }
-
-// -----------------------------------------------------------------------------
-// Config
-// -----------------------------------------------------------------------------
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Config {
@@ -72,17 +44,24 @@ pub struct Config {
     pub initial_base_fee_per_gas: u64,
     pub include_block_in_proposal: bool,
     /// If true, advance step immediately when quorum is reached (don't wait for timeout).
+    /// This is the key to sub-second finality — blocks commit as soon as 2/3+ validators respond.
     pub fast_quorum: bool,
 }
 
 impl Default for Config {
     fn default() -> Self {
         Self {
+            // Tendermint safety: propose timeout must be long enough for block propagation.
+            // At 200ms tick, 300ms gives one full tick + margin before nil-vote fallback.
             propose_timeout_ms: 300,
+            // Prevote/precommit timeouts are fallbacks only; fast_quorum bypasses them.
             prevote_timeout_ms: 200,
             precommit_timeout_ms: 200,
             max_rounds: 50,
+            // 4096 txs/block @ ~21k gas each = ~86M gas/block (vs ETH's 30M)
             max_txs_per_block: 4096,
+            // Gas target = half of max capacity (EIP-1559 design)
+            // 43M target vs ETH's 15M → ~3x higher sustained throughput
             gas_target: 43_000_000,
             initial_base_fee_per_gas: 1,
             include_block_in_proposal: true,
@@ -90,10 +69,6 @@ impl Default for Config {
         }
     }
 }
-
-// -----------------------------------------------------------------------------
-// ConsensusState
-// -----------------------------------------------------------------------------
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct ConsensusState {
@@ -135,10 +110,6 @@ impl ConsensusState {
     }
 }
 
-// -----------------------------------------------------------------------------
-// Traits
-// -----------------------------------------------------------------------------
-
 pub trait BlockStore: Send + Sync {
     fn get(&self, id: &Hash32) -> Option<Block>;
     fn put(&self, block: Block);
@@ -147,19 +118,8 @@ pub trait BlockStore: Send + Sync {
 pub trait Outbox {
     fn broadcast(&mut self, msg: ConsensusMsg);
     fn request_block(&mut self, block_id: Hash32);
-    fn on_commit(
-        &mut self,
-        cert: &CommitCertificate,
-        block: &Block,
-        new_state: &KvState,
-        new_base_fee: u64,
-        receipts: &[Receipt],
-    );
+    fn on_commit(&mut self, cert: &CommitCertificate, block: &Block, new_state: &KvState, new_base_fee: u64, receipts: &[Receipt]);
 }
-
-// -----------------------------------------------------------------------------
-// Engine
-// -----------------------------------------------------------------------------
 
 pub struct Engine<V: Verifier> {
     pub cfg: Config,
@@ -180,15 +140,7 @@ pub struct Engine<V: Verifier> {
 }
 
 impl<V: Verifier> Engine<V> {
-    pub fn new(
-        cfg: Config,
-        vset: ValidatorSet,
-        height: Height,
-        prev_block_id: Hash32,
-        app_state: KvState,
-        stakes: StakeLedger,
-        ds_guard: Option<DoubleSignGuard>,
-    ) -> Self {
+    pub fn new(cfg: Config, vset: ValidatorSet, height: Height, prev_block_id: Hash32, app_state: KvState, stakes: StakeLedger, ds_guard: Option<DoubleSignGuard>) -> Self {
         Self {
             base_fee_per_gas: cfg.initial_base_fee_per_gas,
             cfg,
@@ -203,51 +155,39 @@ impl<V: Verifier> Engine<V> {
         }
     }
 
-    /// Whether the given public key belongs to the proposer for the current height/round.
     pub fn is_proposer(&self, pk: &PublicKeyBytes) -> bool {
-        self.vset
-            .proposer_for(self.state.height, self.state.round)
-            .pk
-            == *pk
+        self.vset.proposer_for(self.state.height, self.state.round).pk == *pk
     }
 
-    /// Human‑readable address for a public key.
     fn proposer_addr_string(&self, pk: &PublicKeyBytes) -> String {
         hex::encode(&blake3::hash(&pk.0).as_bytes()[..20])
     }
 
-    // -------------------------------------------------------------------------
-    // Tick – drive the state machine
-    // -------------------------------------------------------------------------
-
-    pub fn tick<S: Signer, B: BlockStore, O: Outbox>(
-        &mut self,
-        signer: &S,
-        store: &B,
-        out: &mut O,
-        dt_ms: u64,
-        mempool_drain: impl FnOnce(usize) -> Vec<Tx>,
-    ) {
-        if self.state.decided.is_some() {
-            return;
-        }
+    pub fn tick<S: Signer, B: BlockStore, O: Outbox>(&mut self, signer: &S, store: &B, out: &mut O, dt_ms: u64, mempool_drain: impl FnOnce(usize)->Vec<Tx>) {
+        if self.state.decided.is_some() { return; }
         self.step_elapsed_ms = self.step_elapsed_ms.saturating_add(dt_ms);
 
         match self.state.step {
             Step::Propose => {
-                // First tick after entering Propose: attempt to produce a proposal if we are the proposer.
+                // On the first tick of the Propose step (elapsed was 0 before adding dt),
+                // attempt to build a proposal if we are the designated proposer.
+                // The condition `self.step_elapsed_ms == dt_ms` means we just entered this step.
                 let first_tick = self.step_elapsed_ms == dt_ms;
                 if first_tick && self.state.proposal.is_none() {
                     self.maybe_propose(signer, store, out, mempool_drain);
                 }
-                // If we have a valid proposal (either self‑produced or received), move to Prevote immediately.
+                // Fast-path: if we already have a valid proposal block, prevote immediately
+                // without waiting for propose_timeout_ms. This is the key to sub-second blocks:
+                // once block is received and validated, we don't need to wait.
                 let has_valid_proposal = self.cfg.fast_quorum
                     && self.state.proposal.is_some()
                     && self.state.proposal_block.is_some();
                 if has_valid_proposal || self.step_elapsed_ms >= self.cfg.propose_timeout_ms {
                     self.state.step = Step::Prevote;
                     self.step_elapsed_ms = 0;
-                    let vote_block = self.prevote_choice();
+                    let vote_block = self.state.proposal.as_ref().and_then(|p| {
+                        if self.state.proposal_block.is_some() { Some(p.block_id.clone()) } else { None }
+                    });
                     self.broadcast_vote(signer, out, VoteType::Prevote, vote_block);
                 }
             }
@@ -265,65 +205,42 @@ impl<V: Verifier> Engine<V> {
         }
     }
 
-    // -------------------------------------------------------------------------
-    // Proposal production
-    // -------------------------------------------------------------------------
+    fn advance_round<S: Signer, B: BlockStore, O: Outbox>(&mut self, signer: &S, store: &B, out: &mut O) {
+        if self.state.round + 1 >= self.cfg.max_rounds {
+            warn!(height=self.state.height, round=self.state.round, "max rounds reached; staying");
+            return;
+        }
+        self.state.round += 1;
+        self.state.proposal = None;
+        self.state.proposal_block = None;
+        self.state.step = Step::Propose;
+        self.step_elapsed_ms = 0;
+        info!(height=self.state.height, round=self.state.round, "advance round");
+        self.maybe_propose(signer, store, out, |_| vec![]);
+    }
 
-    fn maybe_propose<S: Signer, B: BlockStore, O: Outbox>(
-        &mut self,
-        signer: &S,
-        store: &B,
-        out: &mut O,
-        mempool_drain: impl FnOnce(usize) -> Vec<Tx>,
-    ) {
+    fn maybe_propose<S: Signer, B: BlockStore, O: Outbox>(&mut self, signer: &S, store: &B, out: &mut O, mempool_drain: impl FnOnce(usize)->Vec<Tx>) {
+        // If a proposal is already present (e.g. produced by an external proposer loop),
+        // do not create a second proposal for the same height/round.
         if self.state.proposal.is_some() {
             return;
         }
-        if !self.is_proposer(&signer.public_key()) {
-            return;
-        }
-
-        // Decide which block to propose: if we have a valid_value (from a previous round)
-        // we must propose that block. Otherwise, build a new block from the mempool.
-        let (block, _block_id) = if let Some(valid_value) = &self.state.valid_value {
-            // Try to fetch the block from store (should exist because we voted for it)
-            if let Some(block) = store.get(valid_value) {
-                (block, valid_value.clone())
-            } else {
-                // Should not happen, but fall back to building a new block.
-                warn!(
-                    height = self.state.height,
-                    round = self.state.round,
-                    "valid_value not found in store – falling back to new block"
-                );
-                self.build_new_block(signer, mempool_drain)
-            }
-        } else {
-            self.build_new_block(signer, mempool_drain)
-        };
-
+        if !self.is_proposer(&signer.public_key()) { return; }
+        let txs = mempool_drain(self.cfg.max_txs_per_block);
         let proposer_addr = self.proposer_addr_string(&signer.public_key());
-        // Verify block (should pass, but we check anyway)
-        if verify_block_with_vset(
-            &self.app_state,
-            &block,
+        let (block, _next_state, _receipts) = build_block(
+            self.state.height,
+            self.state.round,
+            self.prev_block_id.clone(),
+            signer.public_key().0.clone(),
             &proposer_addr,
-            &signer.public_key(),
-        )
-        .is_none()
-        {
-            warn!(
-                height = self.state.height,
-                round = self.state.round,
-                "self‑proposed block invalid – skipping proposal"
-            );
-            return;
-        }
-
+            &self.app_state,
+            self.base_fee_per_gas,
+            txs,
+        );
         let bid = block.id();
         store.put(block.clone());
 
-        // Double‑sign check
         if let Some(g) = &self.ds_guard {
             if let Err(e) = g.check_proposal(self.state.height, self.state.round, &bid) {
                 warn!("double-sign guard refused proposal signature: {e}");
@@ -331,14 +248,8 @@ impl<V: Verifier> Engine<V> {
             }
         }
 
-        let sign_bytes = proposal_sign_bytes(
-            self.state.height,
-            self.state.round,
-            &bid,
-            self.state.valid_round,
-        );
+        let sign_bytes = proposal_sign_bytes(self.state.height, self.state.round, &bid, self.state.valid_round);
         let sig = signer.sign(&sign_bytes);
-
         if let Some(g) = &self.ds_guard {
             if let Err(e) = g.record_proposal(self.state.height, self.state.round, &bid) {
                 warn!("double-sign guard write failed — halting proposal: {e}");
@@ -350,12 +261,8 @@ impl<V: Verifier> Engine<V> {
             height: self.state.height,
             round: self.state.round,
             proposer: signer.public_key(),
-            block_id: bid,
-            block: if self.cfg.include_block_in_proposal {
-                Some(block.clone())
-            } else {
-                None
-            },
+            block_id: bid.clone(),
+            block: if self.cfg.include_block_in_proposal { Some(block.clone()) } else { None },
             pol_round: self.state.valid_round,
             signature: sig,
         };
@@ -364,91 +271,15 @@ impl<V: Verifier> Engine<V> {
         self.state.proposal_block = Some(block);
 
         out.broadcast(ConsensusMsg::Proposal(prop));
-        info!(
-            height = self.state.height,
-            round = self.state.round,
-            "proposal broadcast"
-        );
+        info!(height=self.state.height, round=self.state.round, "broadcast proposal");
     }
 
-    /// Build a fresh block from the mempool.
-    fn build_new_block<S: Signer>(
-        &self,
-        signer: &S,
-        mempool_drain: impl FnOnce(usize) -> Vec<Tx>,
-    ) -> (Block, Hash32) {
-        let txs = mempool_drain(self.cfg.max_txs_per_block);
-        let proposer_addr = self.proposer_addr_string(&signer.public_key());
-        // Use current timestamp? We'll rely on the build_block function to set timestamp.
-        // We pass 0 as timestamp, expecting the node to fill it later. This is a simplification.
-        let (block, _next_state, _receipts) = build_block(
-            self.state.height,
-            self.state.round,
-            self.prev_block_id.clone(),
-            signer.public_key().0.clone(),
-            &proposer_addr,
-            &self.app_state,
-            self.base_fee_per_gas,
-            txs,
-            0, // block_timestamp
-            0, // chain_id
-        );
-        let bid = block.id();
-        (block, bid)
-    }
-
-    // -------------------------------------------------------------------------
-    // Vote choice
-    // -------------------------------------------------------------------------
-
-    /// Decide which block to vote for (prevote) based on the received proposal.
-    /// Implements the Tendermint rule: if proposal has a pol_round >= locked_round,
-    /// vote for the proposal; otherwise vote nil.
-    fn prevote_choice(&self) -> Option<Hash32> {
-        let Some(proposal) = &self.state.proposal else {
-            return None;
-        };
-        let Some(block) = &self.state.proposal_block else {
-            return None;
-        };
-        let bid = block.id();
-
-        // If we have a locked value, we must compare pol_round.
-        if let Some(locked_round) = self.state.locked_round {
-            // The proposal's pol_round must be >= locked_round to be acceptable.
-            if let Some(pol_round) = proposal.pol_round {
-                if pol_round >= locked_round {
-                    // We can vote for this block.
-                    Some(bid)
-                } else {
-                    // pol_round too low – vote nil.
-                    None
-                }
-            } else {
-                // No pol_round means it's a new proposal (pol_round = -1), which is < any locked_round.
-                None
-            }
-        } else {
-            // No locked value – vote for the proposal.
-            Some(bid)
-        }
-    }
-
-    // -------------------------------------------------------------------------
-    // Message handling
-    // -------------------------------------------------------------------------
-
-    pub fn on_message<S: Signer, B: BlockStore, O: Outbox>(
-        &mut self,
-        signer: &S,
-        store: &B,
-        out: &mut O,
-        msg: ConsensusMsg,
-    ) -> Result<(), ConsensusError> {
+    pub fn on_message<S: Signer, B: BlockStore, O: Outbox>(&mut self, signer: &S, store: &B, out: &mut O, msg: ConsensusMsg) -> Result<(), ConsensusError> {
         match msg {
             ConsensusMsg::Proposal(p) => self.on_proposal(signer, store, out, p),
             ConsensusMsg::Vote(v) => self.on_vote(signer, store, out, v),
             ConsensusMsg::Evidence(ev) => {
+                // Apply evidence using the current consensus height.
                 self.stakes.apply_evidence(&ev, self.state.height);
                 Ok(())
             }
@@ -456,102 +287,67 @@ impl<V: Verifier> Engine<V> {
     }
 
     fn verify_proposal(&self, p: &Proposal) -> Result<(), ConsensusError> {
-        if !self.vset.contains(&p.proposer) {
-            return Err(ConsensusError::UnknownValidator);
-        }
-        // Must be the designated proposer for this height+round.
+        if !self.vset.contains(&p.proposer) { return Err(ConsensusError::UnknownValidator); }
+        // Must be the designated proposer for this height+round (round-robin)
         if self.vset.proposer_for(p.height, p.round).pk != p.proposer {
             return Err(ConsensusError::UnknownValidator);
         }
-        if p.height != self.state.height || p.round != self.state.round {
-            return Err(ConsensusError::BadStep);
-        }
-        // pol_round must be < current round.
-        if let Some(pr) = p.pol_round {
-            if pr >= p.round {
-                return Err(ConsensusError::InvalidPolRound);
-            }
-        }
+        if p.height != self.state.height || p.round != self.state.round { return Err(ConsensusError::BadStep); }
         let bytes = proposal_sign_bytes(p.height, p.round, &p.block_id, p.pol_round);
         V::verify(&p.proposer, &bytes, &p.signature).map_err(|_| ConsensusError::BadSig)?;
         Ok(())
     }
 
     fn verify_vote(&self, v: &Vote) -> Result<(), ConsensusError> {
-        if !self.vset.contains(&v.voter) {
-            return Err(ConsensusError::UnknownValidator);
-        }
-        if v.height != self.state.height || v.round != self.state.round {
-            return Err(ConsensusError::BadStep);
-        }
+        if !self.vset.contains(&v.voter) { return Err(ConsensusError::UnknownValidator); }
+        if v.height != self.state.height || v.round != self.state.round { return Err(ConsensusError::BadStep); }
         let bytes = vote_sign_bytes(v.vote_type, v.height, v.round, &v.block_id);
         V::verify(&v.voter, &bytes, &v.signature).map_err(|_| ConsensusError::BadSig)?;
         Ok(())
     }
 
-    fn on_proposal<S: Signer, B: BlockStore, O: Outbox>(
-        &mut self,
-        signer: &S,
-        store: &B,
-        out: &mut O,
-        p: Proposal,
-    ) -> Result<(), ConsensusError> {
-        if self.state.decided.is_some() {
-            return Ok(());
-        }
+    fn on_proposal<S: Signer, B: BlockStore, O: Outbox>(&mut self, signer: &S, store: &B, out: &mut O, mut p: Proposal) -> Result<(), ConsensusError> {
+        if self.state.decided.is_some() { return Ok(()); }
         self.verify_proposal(&p)?;
 
-        // Store the block if it was included.
-        if let Some(b) = p.block.clone() {
-            store.put(b);
-        }
+        if let Some(b) = p.block.clone() { store.put(b); }
 
-        // Determine if we already have the block.
         let block = store.get(&p.block_id);
         if block.is_none() {
-            // Block missing – request it and keep the proposal, but do NOT vote yet.
             out.request_block(p.block_id.clone());
+            self.state.step = Step::Prevote;
+            self.step_elapsed_ms = 0;
+            self.broadcast_vote(signer, out, VoteType::Prevote, None);
             self.state.proposal = Some(p);
             self.state.proposal_block = None;
             return Ok(());
         }
 
-        let block = block.expect("block is Some: None case handled above");
+        let Some(block) = block else { return Ok(()); };
         let proposer_addr = self.proposer_addr_string(&p.proposer);
-        // Verify the block against the current state.
         if verify_block_with_vset(&self.app_state, &block, &proposer_addr, &p.proposer).is_none() {
-            // Invalid block – we can still vote nil.
             self.state.step = Step::Prevote;
             self.step_elapsed_ms = 0;
             self.broadcast_vote(signer, out, VoteType::Prevote, None);
             return Ok(());
         }
 
-        self.state.proposal = Some(p.clone());
+        let proposal_id = p.block_id.clone();
+        self.state.proposal = Some(p);
         self.state.proposal_block = Some(block);
+
         self.state.step = Step::Prevote;
         self.step_elapsed_ms = 0;
-
-        // Compute vote choice BEFORE applying locking, so that the lock we are
-        // about to set does not cause prevote_choice to return nil for a fresh
-        // proposal (pol_round == None < locked_round).
-        let vote_block = self.prevote_choice();
+        let vote_block = self.prevote_choice(&proposal_id);
         self.broadcast_vote(signer, out, VoteType::Prevote, vote_block);
-
-        // Locking logic: if pol_round >= locked_round, we lock on this block.
-        if let Some(locked_round) = self.state.locked_round {
-            if let Some(pol_round) = p.pol_round {
-                if pol_round >= locked_round {
-                    self.state.locked_round = Some(self.state.round);
-                    self.state.locked_value = Some(p.block_id.clone());
-                }
-            }
-        } else {
-            // No locked value – lock on this proposal.
-            self.state.locked_round = Some(self.state.round);
-            self.state.locked_value = Some(p.block_id.clone());
-        }
         Ok(())
+    }
+
+    fn prevote_choice(&self, proposal_id: &Hash32) -> Option<Hash32> {
+        if let Some(locked) = &self.state.locked_value {
+            if locked != proposal_id { return None; }
+        }
+        Some(proposal_id.clone())
     }
 
     fn record_vote_and_detect_evidence(&mut self, v: &Vote) -> Option<Evidence> {
@@ -570,55 +366,39 @@ impl<V: Verifier> Engine<V> {
                 });
             }
         } else {
-            self.state
-                .vote_index
-                .insert(key, (v.block_id.clone(), v.clone()));
+            self.state.vote_index.insert(key, (v.block_id.clone(), v.clone()));
         }
         None
     }
 
-    fn on_vote<S: Signer, B: BlockStore, O: Outbox>(
-        &mut self,
-        signer: &S,
-        store: &B,
-        out: &mut O,
-        v: Vote,
-    ) -> Result<(), ConsensusError> {
-        if self.state.decided.is_some() {
-            return Ok(());
-        }
+    fn on_vote<S: Signer, B: BlockStore, O: Outbox>(&mut self, signer: &S, store: &B, out: &mut O, v: Vote) -> Result<(), ConsensusError> {
+        if self.state.decided.is_some() { return Ok(()); }
         self.verify_vote(&v)?;
 
-        // Check for double vote.
         if let Some(ev) = self.record_vote_and_detect_evidence(&v) {
             self.stakes.apply_evidence(&ev, self.state.height);
             out.broadcast(ConsensusMsg::Evidence(ev));
         }
 
-        // Store the vote.
-        let round_votes = self.state.votes.entry(v.round).or_default();
-        let type_votes = round_votes.entry(v.vote_type).or_default();
-        type_votes.insert(v.voter.clone(), v.clone());
+        let rt = self.state.votes.entry(v.round).or_default();
+        let vt = rt.entry(v.vote_type).or_default();
+        vt.insert(v.voter.clone(), v.clone());
 
         match v.vote_type {
             VoteType::Prevote => {
                 if self.state.step == Step::Prevote {
-                    if let Some((bid_opt, power)) = self.tally(v.round, VoteType::Prevote) {
-                        let threshold = quorum_threshold(self.vset.total_power());
-                        if power >= threshold {
+                    if let Some((bid_opt, pow)) = self.tally(v.round, VoteType::Prevote) {
+                        let q = quorum_threshold(self.vset.total_power());
+                        if pow >= q {
                             if let Some(bid) = bid_opt {
-                                // Update valid_round/value.
                                 self.state.valid_round = Some(self.state.round);
                                 self.state.valid_value = Some(bid.clone());
-                                // Also update locked_round/value.
                                 self.state.locked_round = Some(self.state.round);
                                 self.state.locked_value = Some(bid.clone());
-                                // Move to precommit and broadcast precommit.
                                 self.state.step = Step::Precommit;
                                 self.step_elapsed_ms = 0;
                                 self.broadcast_vote(signer, out, VoteType::Precommit, Some(bid));
                             } else {
-                                // Nil vote quorum – advance round.
                                 self.advance_round(signer, store, out);
                             }
                         }
@@ -627,49 +407,38 @@ impl<V: Verifier> Engine<V> {
             }
             VoteType::Precommit => {
                 if self.state.step == Step::Precommit {
-                    if let Some((bid_opt, power)) = self.tally(v.round, VoteType::Precommit) {
-                        let threshold = quorum_threshold(self.vset.total_power());
-                        if power >= threshold {
+                    if let Some((bid_opt, pow)) = self.tally(v.round, VoteType::Precommit) {
+                        let q = quorum_threshold(self.vset.total_power());
+                        if pow >= q {
                             if let Some(bid) = bid_opt {
-                                // Commit block.
-                                let block = store.get(&bid).ok_or(ConsensusError::Exec)?;
+                                let block = store.get(&bid);
+                                if block.is_none() {
+                                    out.request_block(bid.clone());
+                                    return Ok(());
+                                }
+                                let Some(block) = block else { return Ok(()); };
                                 let proposer_pk = PublicKeyBytes(block.header.proposer_pk.clone());
-                                let expected_proposer =
-                                    &self.vset.proposer_for(self.state.height, v.round).pk;
+                                let expected_proposer = &self.vset.proposer_for(self.state.height, v.round).pk;
                                 let proposer_addr = self.proposer_addr_string(&proposer_pk);
-                                let (new_state, receipts) = verify_block_with_vset(
-                                    &self.app_state,
-                                    &block,
-                                    &proposer_addr,
-                                    expected_proposer,
-                                )
-                                .ok_or(ConsensusError::Exec)?;
+                                let (new_state, _receipts) = verify_block_with_vset(
+                                    &self.app_state, &block, &proposer_addr, expected_proposer
+                                ).ok_or(ConsensusError::Exec)?;
 
-                                let precommits =
-                                    self.collect_votes(v.round, VoteType::Precommit, Some(&bid));
-                                let cert = CommitCertificate {
-                                    height: self.state.height,
-                                    block_id: bid.clone(),
-                                    precommits,
-                                };
+                                let precommits = self.collect_votes(v.round, VoteType::Precommit, Some(&bid));
+                                let cert = CommitCertificate { height: self.state.height, block_id: bid.clone(), precommits };
                                 self.state.decided = Some(cert.clone());
                                 self.state.step = Step::Commit;
                                 self.step_elapsed_ms = 0;
 
-                                self.app_state = new_state;
-                                self.prev_block_id = bid;
+                                self.app_state = new_state.clone();
+                                self.prev_block_id = bid.clone();
 
-                                let new_base = next_base_fee(
-                                    self.base_fee_per_gas,
-                                    block.header.gas_used,
-                                    self.cfg.gas_target,
-                                );
+                                let new_base = next_base_fee(self.base_fee_per_gas, block.header.gas_used, self.cfg.gas_target);
                                 self.base_fee_per_gas = new_base;
 
-                                out.on_commit(&cert, &block, &self.app_state, new_base, &receipts);
-                                info!(height = self.state.height, "committed");
+                                out.on_commit(&cert, &block, &new_state, new_base, &_receipts);
+                                info!(height=self.state.height, "committed");
                             } else {
-                                // Nil precommit quorum – advance round.
                                 self.advance_round(signer, store, out);
                             }
                         }
@@ -682,42 +451,30 @@ impl<V: Verifier> Engine<V> {
 
     fn tally(&self, round: Round, vt: VoteType) -> Option<(Option<Hash32>, u64)> {
         let mut tally = VoteTally::default();
-        let round_votes = self.state.votes.get(&round)?;
-        let type_votes = round_votes.get(&vt)?;
-        for (voter, vote) in type_votes.iter() {
+        let rt = self.state.votes.get(&round)?;
+        let votes = rt.get(&vt)?;
+        for (voter, vote) in votes.iter() {
             tally.add_vote(&self.vset, voter, &vote.block_id);
         }
         tally.best()
     }
 
     fn collect_votes(&self, round: Round, vt: VoteType, target: Option<&Hash32>) -> Vec<Vote> {
-        let mut out = Vec::new();
-        let Some(round_votes) = self.state.votes.get(&round) else {
-            return out;
-        };
-        let Some(type_votes) = round_votes.get(&vt) else {
-            return out;
-        };
-        for (_, vote) in type_votes.iter() {
+        let mut outv = Vec::new();
+        let Some(rt) = self.state.votes.get(&round) else { return outv; };
+        let Some(votes) = rt.get(&vt) else { return outv; };
+        for (_voter, vote) in votes.iter() {
             let matches = match (target, &vote.block_id) {
                 (Some(t), Some(b)) => t == b,
                 (None, None) => true,
                 _ => false,
             };
-            if matches {
-                out.push(vote.clone());
-            }
+            if matches { outv.push(vote.clone()); }
         }
-        out
+        outv
     }
 
-    fn broadcast_vote<S: Signer, O: Outbox>(
-        &self,
-        signer: &S,
-        out: &mut O,
-        vt: VoteType,
-        block_id: Option<Hash32>,
-    ) {
+    fn broadcast_vote<S: Signer, O: Outbox>(&self, signer: &S, out: &mut O, vt: VoteType, block_id: Option<Hash32>) {
         if let Some(g) = &self.ds_guard {
             if let Err(e) = g.check_vote(vt, self.state.height, self.state.round, &block_id) {
                 warn!("double-sign guard refused vote signature: {e}");
@@ -727,14 +484,12 @@ impl<V: Verifier> Engine<V> {
 
         let bytes = vote_sign_bytes(vt, self.state.height, self.state.round, &block_id);
         let sig = signer.sign(&bytes);
-
         if let Some(g) = &self.ds_guard {
             if let Err(e) = g.record_vote(vt, self.state.height, self.state.round, &block_id) {
                 warn!("double-sign guard write failed — halting vote: {e}");
                 return;
             }
         }
-
         let vote = Vote {
             vote_type: vt,
             height: self.state.height,
@@ -746,72 +501,27 @@ impl<V: Verifier> Engine<V> {
         out.broadcast(ConsensusMsg::Vote(vote));
     }
 
-    fn advance_round<S: Signer, B: BlockStore, O: Outbox>(
-        &mut self,
-        signer: &S,
-        store: &B,
-        out: &mut O,
-    ) {
-        if self.state.round + 1 >= self.cfg.max_rounds {
-            warn!(
-                height = self.state.height,
-                round = self.state.round,
-                "max rounds reached; staying"
-            );
-            return;
-        }
-        self.state.round += 1;
-        self.state.proposal = None;
-        self.state.proposal_block = None;
-        self.state.step = Step::Propose;
-        self.step_elapsed_ms = 0;
-        info!(
-            height = self.state.height,
-            round = self.state.round,
-            "advance round"
-        );
-        self.maybe_propose(signer, store, out, |_| vec![]);
-    }
-
-    /// Called when a requested block arrives (e.g., from sync).
+    /// Handle a block received from sync (range response).
     pub fn on_block_received<S: Signer, B: BlockStore, O: Outbox>(
-        &mut self,
-        signer: &S,
-        store: &B,
-        out: &mut O,
-        block: Block,
+        &mut self, signer: &S, store: &B, out: &mut O, block: Block
     ) -> Result<(), ConsensusError> {
         store.put(block.clone());
-        // If we had a pending proposal for this block, re‑evaluate it.
-        if let Some(prop) = &self.state.proposal {
+        // If we had a pending proposal referencing this block, retry it
+        if let Some(prop) = self.state.proposal.clone() {
             if prop.block_id == block.id() && self.state.proposal_block.is_none() {
-                // Block now available – verify and proceed.
-                let proposer_addr = self.proposer_addr_string(&prop.proposer);
-                if verify_block_with_vset(&self.app_state, &block, &proposer_addr, &prop.proposer)
-                    .is_none()
-                {
-                    // Invalid block – still vote nil.
-                    self.state.step = Step::Prevote;
-                    self.step_elapsed_ms = 0;
-                    self.broadcast_vote(signer, out, VoteType::Prevote, None);
-                    return Ok(());
-                }
                 self.state.proposal_block = Some(block);
-                self.state.step = Step::Prevote;
-                self.step_elapsed_ms = 0;
-                let vote_block = self.prevote_choice();
-                self.broadcast_vote(signer, out, VoteType::Prevote, vote_block);
+                // Now we can prevote
+                if self.state.step == Step::Prevote {
+                    let bid = prop.block_id.clone();
+                    let vote_block = self.prevote_choice(&bid);
+                    self.broadcast_vote(signer, out, VoteType::Prevote, vote_block);
+                }
             }
         }
         Ok(())
     }
 
-    pub fn next_height<S: Signer, B: BlockStore, O: Outbox>(
-        &mut self,
-        signer: &S,
-        store: &B,
-        out: &mut O,
-    ) {
+    pub fn next_height<S: Signer, B: BlockStore, O: Outbox>(&mut self, signer: &S, store: &B, out: &mut O) {
         self.state = ConsensusState::new(self.state.height + 1);
         self.step_elapsed_ms = 0;
         self.state.step = Step::Propose;

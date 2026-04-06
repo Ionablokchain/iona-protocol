@@ -9,22 +9,21 @@
 //!   tails or whole chunks without discarding previously verified data.
 
 use crate::net::p2p::{
-    proto_state, Codec, DeltaChunkRequest, DeltaChunkResponse, DeltaManifestRequest,
-    DeltaManifestResponse, Req, Resp, StateChunkRequest, StateChunkResponse, StateIndexRequest,
-    StateIndexResponse, StateManifestRequest, StateManifestResponse, StateReq, StateResp,
+    Codec, Req, Resp, StateChunkRequest, StateChunkResponse, StateManifestRequest,
+    StateManifestResponse, StateReq, StateResp,
+    DeltaManifestRequest, DeltaManifestResponse, DeltaChunkRequest, DeltaChunkResponse,
+    StateIndexRequest, StateIndexResponse,
+    proto_state,
 };
-// snapshots module used conditionally
-use libp2p::futures::StreamExt;
+use crate::storage::snapshots;
 use libp2p::{
     core::upgrade,
-    noise,
-    request_response::{
-        self, Behaviour as RequestResponse, Event as RequestResponseEvent,
-        Message as RequestResponseMessage, ProtocolSupport,
-    },
+    noise, tcp, yamux,
+    request_response::{self, ProtocolSupport, Behaviour as RequestResponse, Event as RequestResponseEvent, Message as RequestResponseMessage},
     swarm::{NetworkBehaviour, SwarmEvent},
-    tcp, yamux, Multiaddr, PeerId, Swarm, Transport,
+    Multiaddr, PeerId, Swarm, Transport,
 };
+use libp2p::futures::StreamExt;
 use std::{collections::BTreeMap, io, path::Path, time::Duration};
 use tokio::time::timeout;
 use tracing::{debug, info, warn};
@@ -51,9 +50,7 @@ fn verify_full_chunk_hash(mani: &StateManifestResponse, chunk_start: u64, data: 
     if idx >= mani.chunk_hashes.len() {
         return false;
     }
-    if data.len() != mani.chunk_size as usize
-        && (chunk_start + data.len() as u64) < mani.total_bytes
-    {
+    if data.len() != mani.chunk_size as usize && (chunk_start + data.len() as u64) < mani.total_bytes {
         // We only verify full-sized chunks (except possibly the last partial chunk at EOF).
         return false;
     }
@@ -73,18 +70,12 @@ struct ResumeInfo {
 /// Verify existing full chunks from disk; keep a partial tail (if present) for partial re-request.
 fn resume_info(tmp_path: &str, mani: &StateManifestResponse) -> anyhow::Result<ResumeInfo> {
     if !Path::new(tmp_path).exists() {
-        return Ok(ResumeInfo {
-            chunk_start: 0,
-            partial_len: 0,
-        });
+        return Ok(ResumeInfo { chunk_start: 0, partial_len: 0 });
     }
     let meta = std::fs::metadata(tmp_path)?;
     let len = meta.len();
     if len == 0 {
-        return Ok(ResumeInfo {
-            chunk_start: 0,
-            partial_len: 0,
-        });
+        return Ok(ResumeInfo { chunk_start: 0, partial_len: 0 });
     }
 
     let cs = mani.chunk_size as u64;
@@ -101,27 +92,15 @@ fn resume_info(tmp_path: &str, mani: &StateManifestResponse) -> anyhow::Result<R
         f.seek(SeekFrom::Start(off))?;
         f.read_exact(&mut buf)?;
         if !verify_full_chunk_hash(mani, off, &buf) {
-            warn!(
-                offset = off,
-                "statesync: resume verification failed; truncating to last valid boundary"
-            );
-            std::fs::OpenOptions::new()
-                .write(true)
-                .open(tmp_path)?
-                .set_len(off)?;
-            return Ok(ResumeInfo {
-                chunk_start: off,
-                partial_len: 0,
-            });
+            warn!(offset = off, "statesync: resume verification failed; truncating to last valid boundary");
+            std::fs::OpenOptions::new().write(true).open(tmp_path)?.set_len(off)?;
+            return Ok(ResumeInfo { chunk_start: off, partial_len: 0 });
         }
         off += cs;
     }
 
     // Keep the partial tail (if any). We'll request the missing part on resume.
-    Ok(ResumeInfo {
-        chunk_start: full,
-        partial_len: partial,
-    })
+    Ok(ResumeInfo { chunk_start: full, partial_len: partial })
 }
 
 async fn wait_for_chunk_response(
@@ -133,17 +112,9 @@ async fn wait_for_chunk_response(
     let chunk_deadline = tokio::time::Instant::now() + Duration::from_secs(timeout_s.max(3));
     while tokio::time::Instant::now() < chunk_deadline {
         let ev = timeout(Duration::from_millis(250), swarm.select_next_some()).await;
-        let Ok(ev) = ev else {
-            continue;
-        };
-        if let SwarmEvent::Behaviour(BehaviourEvent::Rr(RequestResponseEvent::Message {
-            peer: p,
-            message,
-        })) = ev
-        {
-            if p != peer {
-                continue;
-            }
+        let Ok(ev) = ev else { continue; };
+        if let SwarmEvent::Behaviour(BehaviourEvent::Rr(RequestResponseEvent::Message { peer: p, message })) = ev {
+            if p != peer { continue; }
             if let RequestResponseMessage::Response { response, .. } = message {
                 if let Resp::State(StateResp::Chunk(c)) = response {
                     if c.offset == expected_offset {
@@ -164,17 +135,9 @@ async fn wait_for_delta_manifest_response(
     let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout_s.max(3));
     while tokio::time::Instant::now() < deadline {
         let ev = timeout(Duration::from_millis(250), swarm.select_next_some()).await;
-        let Ok(ev) = ev else {
-            continue;
-        };
-        if let SwarmEvent::Behaviour(BehaviourEvent::Rr(RequestResponseEvent::Message {
-            peer: p,
-            message,
-        })) = ev
-        {
-            if p != peer {
-                continue;
-            }
+        let Ok(ev) = ev else { continue; };
+        if let SwarmEvent::Behaviour(BehaviourEvent::Rr(RequestResponseEvent::Message { peer: p, message })) = ev {
+            if p != peer { continue; }
             if let RequestResponseMessage::Response { response, .. } = message {
                 if let Resp::State(StateResp::DeltaManifest(m)) = response {
                     return Some(m);
@@ -194,17 +157,9 @@ async fn wait_for_delta_chunk_response(
     let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout_s.max(3));
     while tokio::time::Instant::now() < deadline {
         let ev = timeout(Duration::from_millis(250), swarm.select_next_some()).await;
-        let Ok(ev) = ev else {
-            continue;
-        };
-        if let SwarmEvent::Behaviour(BehaviourEvent::Rr(RequestResponseEvent::Message {
-            peer: p,
-            message,
-        })) = ev
-        {
-            if p != peer {
-                continue;
-            }
+        let Ok(ev) = ev else { continue; };
+        if let SwarmEvent::Behaviour(BehaviourEvent::Rr(RequestResponseEvent::Message { peer: p, message })) = ev {
+            if p != peer { continue; }
             if let RequestResponseMessage::Response { response, .. } = message {
                 if let Resp::State(StateResp::DeltaChunk(c)) = response {
                     if c.offset == expected_offset {
@@ -225,17 +180,9 @@ async fn wait_for_state_index_response(
     let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout_s.max(3));
     while tokio::time::Instant::now() < deadline {
         let ev = timeout(Duration::from_millis(250), swarm.select_next_some()).await;
-        let Ok(ev) = ev else {
-            continue;
-        };
-        if let SwarmEvent::Behaviour(BehaviourEvent::Rr(RequestResponseEvent::Message {
-            peer: p,
-            message,
-        })) = ev
-        {
-            if p != peer {
-                continue;
-            }
+        let Ok(ev) = ev else { continue; };
+        if let SwarmEvent::Behaviour(BehaviourEvent::Rr(RequestResponseEvent::Message { peer: p, message })) = ev {
+            if p != peer { continue; }
             if let RequestResponseMessage::Response { response, .. } = message {
                 if let Resp::State(StateResp::Index(ix)) = response {
                     return Some(ix);
@@ -261,22 +208,14 @@ fn find_delta_path(edges: &[(u64, u64)], from: u64, to: u64) -> Option<Vec<(u64,
     prev.insert(from, from);
 
     while let Some(x) = q.pop_front() {
-        let Some(ns) = adj.get(&x) else {
-            continue;
-        };
+        let Some(ns) = adj.get(&x) else { continue; };
         for n in ns {
-            if prev.contains_key(n) {
-                continue;
-            }
+            if prev.contains_key(n) { continue; }
             prev.insert(*n, x);
-            if *n == to {
-                break;
-            }
+            if *n == to { break; }
             q.push_back(*n);
         }
-        if prev.contains_key(&to) {
-            break;
-        }
+        if prev.contains_key(&to) { break; }
     }
     if !prev.contains_key(&to) {
         return None;
@@ -285,10 +224,7 @@ fn find_delta_path(edges: &[(u64, u64)], from: u64, to: u64) -> Option<Vec<(u64,
     let mut hs = vec![to];
     let mut cur = to;
     while cur != from {
-        let p = match prev.get(&cur) {
-            Some(&p) => p,
-            None => break, // path ended unexpectedly
-        };
+        let p = *prev.get(&cur).unwrap();
         hs.push(p);
         cur = p;
     }
@@ -320,15 +256,9 @@ async fn probe_throughput_bps(
     timeout_s: u64,
 ) -> u64 {
     let start = tokio::time::Instant::now();
-    let req = Req::State(StateReq::Chunk(StateChunkRequest {
-        height,
-        offset: 0,
-        len: probe_len,
-    }));
+    let req = Req::State(StateReq::Chunk(StateChunkRequest { height, offset: 0, len: probe_len }));
     swarm.behaviour_mut().rr.send_request(&peer, req);
-    let Some(c) = wait_for_chunk_response(swarm, peer, 0, timeout_s).await else {
-        return 0;
-    };
+    let Some(c) = wait_for_chunk_response(swarm, peer, 0, timeout_s).await else { return 0; };
     let ms = start.elapsed().as_millis().max(1) as u64;
     // bytes per second, coarse
     (c.data.len() as u64) * 1000 / ms
@@ -355,9 +285,7 @@ pub async fn try_p2p_restore_state(
 
     let transport = tcp::tokio::Transport::new(tcp::Config::default().nodelay(true))
         .upgrade(upgrade::Version::V1)
-        .authenticate(
-            noise::Config::new(&local_key).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?,
-        )
+        .authenticate(noise::Config::new(&local_key).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?)
         .multiplex(yamux::Config::default())
         .boxed();
 
@@ -392,9 +320,7 @@ pub async fn try_p2p_restore_state(
             break;
         }
         let ev = timeout(Duration::from_millis(250), swarm.select_next_some()).await;
-        let Ok(ev) = ev else {
-            continue;
-        };
+        let Ok(ev) = ev else { continue; };
 
         match ev {
             SwarmEvent::ConnectionEstablished { peer_id, .. } => {
@@ -403,27 +329,13 @@ pub async fn try_p2p_restore_state(
                 inflight_manifest.insert(peer_id, tokio::time::Instant::now());
                 swarm.behaviour_mut().rr.send_request(&peer_id, req);
             }
-            SwarmEvent::Behaviour(BehaviourEvent::Rr(RequestResponseEvent::Message {
-                peer,
-                message,
-            })) => {
+            SwarmEvent::Behaviour(BehaviourEvent::Rr(RequestResponseEvent::Message { peer, message })) => {
                 if let RequestResponseMessage::Response { response, .. } = message {
                     if let Resp::State(StateResp::Manifest(m)) = response {
                         let start = inflight_manifest.remove(&peer);
-                        let rtt_ms = start
-                            .map(|s| s.elapsed().as_millis() as u64)
-                            .unwrap_or(9_999);
-                        if m.height > 0
-                            && m.total_bytes > 0
-                            && m.chunk_size > 0
-                            && !m.chunk_hashes.is_empty()
-                        {
-                            candidates.push(Candidate {
-                                peer,
-                                mani: m,
-                                rtt_ms,
-                                throughput_bps: 0,
-                            });
+                        let rtt_ms = start.map(|s| s.elapsed().as_millis() as u64).unwrap_or(9_999);
+                        if m.height > 0 && m.total_bytes > 0 && m.chunk_size > 0 && !m.chunk_hashes.is_empty() {
+                            candidates.push(Candidate { peer, mani: m, rtt_ms, throughput_bps: 0 });
                         }
                     }
                 }
@@ -441,59 +353,38 @@ pub async fn try_p2p_restore_state(
     }
 
     // Prefer best height; keep only peers at that height.
-    candidates.sort_by(|a, b| {
-        b.mani
-            .height
-            .cmp(&a.mani.height)
-            .then_with(|| a.rtt_ms.cmp(&b.rtt_ms))
-    });
+    candidates.sort_by(|a, b| b.mani.height.cmp(&a.mani.height).then_with(|| a.rtt_ms.cmp(&b.rtt_ms)));
     let best_height = candidates[0].mani.height;
-    let mut best: Vec<Candidate> = candidates
-        .into_iter()
-        .filter(|c| c.mani.height == best_height)
-        .collect();
+    let mut best: Vec<Candidate> = candidates.into_iter().filter(|c| c.mani.height == best_height).collect();
 
     // Throughput probe (best-effort) on a few best RTT peers.
     // Probe length is capped and does not need to match manifest chunk size.
     let probe_len: u32 = 262_144; // 256 KiB
     for c in best.iter_mut().take(3) {
-        let tp =
-            probe_throughput_bps(&mut swarm, c.peer, c.mani.height, probe_len, timeout_s).await;
+        let tp = probe_throughput_bps(&mut swarm, c.peer, c.mani.height, probe_len, timeout_s).await;
         c.throughput_bps = tp;
     }
 
     // Final ordering: throughput desc, then RTT asc (height is equal here).
-    best.sort_by(|a, b| {
-        b.throughput_bps
-            .cmp(&a.throughput_bps)
-            .then_with(|| a.rtt_ms.cmp(&b.rtt_ms))
-    });
+    best.sort_by(|a, b| b.throughput_bps.cmp(&a.throughput_bps).then_with(|| a.rtt_ms.cmp(&b.rtt_ms)));
 
     let mani = best[0].mani.clone();
 
-    let snap_dir = crate::storage::snapshots::snapshots_dir(data_dir);
+    let snap_dir = snapshots::snapshots_dir(data_dir);
     std::fs::create_dir_all(&snap_dir)?;
 
     // --- Delta sync fast-path (delta chains) ---
-    if let Ok(Some(local_h)) = crate::storage::snapshots::latest_snapshot_height(data_dir) {
+    if let Ok(Some(local_h)) = snapshots::latest_snapshot_height(data_dir) {
         if local_h > 0 && local_h < mani.height {
-            info!(
-                from = local_h,
-                to = mani.height,
-                "statesync: attempting delta-chain sync"
-            );
+            info!(from = local_h, to = mani.height, "statesync: attempting delta-chain sync");
 
             // Collect state indexes from a few best peers.
             let mut all_edges: Vec<(u64, u64)> = vec![];
-            let mut edge_peers: std::collections::HashMap<(u64, u64), Vec<PeerId>> =
-                std::collections::HashMap::new();
+            let mut edge_peers: std::collections::HashMap<(u64, u64), Vec<PeerId>> = std::collections::HashMap::new();
 
             for c in best.iter().take(6) {
                 let peer = c.peer;
-                swarm
-                    .behaviour_mut()
-                    .rr
-                    .send_request(&peer, Req::State(StateReq::Index(StateIndexRequest {})));
+                swarm.behaviour_mut().rr.send_request(&peer, Req::State(StateReq::Index(StateIndexRequest {})));
                 if let Some(ix) = wait_for_state_index_response(&mut swarm, peer, timeout_s).await {
                     for e in ix.delta_edges {
                         all_edges.push(e);
@@ -508,20 +399,17 @@ pub async fn try_p2p_restore_state(
             if let Some(path) = find_delta_path(&all_edges, local_h, mani.height) {
                 info!(hops = path.len(), "statesync: found delta path");
                 // Load base snapshot state.
-                let mut state = crate::storage::snapshots::read_snapshot_state(data_dir, local_h)?;
+                let mut state = snapshots::read_snapshot_state(data_dir, local_h)?;
 
                 for (from_h, to_h) in path {
                     // Choose a peer for this edge: prefer highest throughput, then lowest RTT.
-                    let peers_for_edge =
-                        edge_peers.get(&(from_h, to_h)).cloned().unwrap_or_default();
+                    let peers_for_edge = edge_peers.get(&(from_h, to_h)).cloned().unwrap_or_default();
                     let mut chosen: Option<PeerId> = None;
                     let mut chosen_score: (u64, u64) = (0, u64::MAX); // (throughput, rtt)
                     for p in peers_for_edge {
                         if let Some(c) = best.iter().find(|c| c.peer == p) {
                             let score = (c.throughput_bps, c.rtt_ms);
-                            if score.0 > chosen_score.0
-                                || (score.0 == chosen_score.0 && score.1 < chosen_score.1)
-                            {
+                            if score.0 > chosen_score.0 || (score.0 == chosen_score.0 && score.1 < chosen_score.1) {
                                 chosen = Some(p);
                                 chosen_score = score;
                             }
@@ -531,109 +419,58 @@ pub async fn try_p2p_restore_state(
                         }
                     }
                     let Some(peer) = chosen else {
-                        warn!(
-                            from = from_h,
-                            to = to_h,
-                            "statesync: no peer for delta edge; falling back"
-                        );
+                        warn!(from = from_h, to = to_h, "statesync: no peer for delta edge; falling back");
+                        chosen = None;
                         break;
                     };
 
                     // Request delta manifest
-                    swarm.behaviour_mut().rr.send_request(
-                        &peer,
-                        Req::State(StateReq::DeltaManifest(DeltaManifestRequest {
-                            from_height: from_h,
-                            to_height: to_h,
-                        })),
-                    );
-                    let Some(dm) =
-                        wait_for_delta_manifest_response(&mut swarm, peer, timeout_s).await
-                    else {
-                        warn!(
-                            from = from_h,
-                            to = to_h,
-                            "statesync: delta manifest timeout; falling back"
-                        );
+                    swarm.behaviour_mut().rr.send_request(&peer, Req::State(StateReq::DeltaManifest(DeltaManifestRequest { from_height: from_h, to_height: to_h })));
+                    let Some(dm) = wait_for_delta_manifest_response(&mut swarm, peer, timeout_s).await else {
+                        warn!(from = from_h, to = to_h, "statesync: delta manifest timeout; falling back");
+                        chosen = None;
                         break;
                     };
                     if dm.total_bytes == 0 || dm.chunk_hashes.is_empty() {
-                        warn!(
-                            from = from_h,
-                            to = to_h,
-                            "statesync: invalid delta manifest; falling back"
-                        );
+                        warn!(from = from_h, to = to_h, "statesync: invalid delta manifest; falling back");
+                        chosen = None;
                         break;
                     }
 
                     // Download & verify delta file.
-                    let tmp_delta = format!(
-                        "{}/statesync_delta_{}_{}.zst",
-                        snap_dir.display(),
-                        from_h,
-                        to_h
-                    );
-                    let mut f = std::fs::OpenOptions::new()
-                        .create(true)
-                        .write(true)
-                        .truncate(true)
-                        .open(&tmp_delta)?;
+                    let tmp_delta = format!("{}/statesync_delta_{}_{}.zst", snap_dir, from_h, to_h);
+                    let mut f = std::fs::OpenOptions::new().create(true).write(true).truncate(true).open(&tmp_delta)?;
                     let mut off = 0u64;
                     while off < dm.total_bytes {
                         let len = (dm.chunk_size as u64).min(dm.total_bytes - off) as u32;
-                        swarm.behaviour_mut().rr.send_request(
-                            &peer,
-                            Req::State(StateReq::DeltaChunk(DeltaChunkRequest {
-                                from_height: from_h,
-                                to_height: to_h,
-                                offset: off,
-                                len,
-                            })),
-                        );
-                        let Some(c) =
-                            wait_for_delta_chunk_response(&mut swarm, peer, off, timeout_s).await
-                        else {
-                            warn!(
-                                from = from_h,
-                                to = to_h,
-                                offset = off,
-                                "statesync: delta chunk timeout; falling back"
-                            );
+                        swarm.behaviour_mut().rr.send_request(&peer, Req::State(StateReq::DeltaChunk(DeltaChunkRequest { from_height: from_h, to_height: to_h, offset: off, len })));
+                        let Some(c) = wait_for_delta_chunk_response(&mut swarm, peer, off, timeout_s).await else {
+                            warn!(from = from_h, to = to_h, offset = off, "statesync: delta chunk timeout; falling back");
+                            chosen = None;
                             break;
                         };
                         if !verify_delta_chunk_hash(&dm, off, &c.data) {
-                            warn!(
-                                from = from_h,
-                                to = to_h,
-                                offset = off,
-                                "statesync: delta chunk hash mismatch; falling back"
-                            );
+                            warn!(from = from_h, to = to_h, offset = off, "statesync: delta chunk hash mismatch; falling back");
+                            chosen = None;
                             break;
                         }
                         use std::io::Write;
                         f.write_all(&c.data)?;
                         off = off.saturating_add(c.data.len() as u64);
-                        if c.done {
-                            break;
-                        }
+                        if c.done { break; }
                     }
                     if chosen.is_none() {
                         break;
                     }
 
                     let bytes = std::fs::read(&tmp_delta)?;
-                    let json = zstd::decode_all(&bytes[..])
-                        .map_err(|e| anyhow::anyhow!("delta decode: {e}"))?;
-                    let d: crate::storage::snapshots::StateDelta = serde_json::from_slice(&json)
-                        .map_err(|e| anyhow::anyhow!("delta json: {e}"))?;
-                    state = crate::storage::snapshots::apply_delta(&state, &d);
+                    let json = zstd::decode_all(&bytes[..]).map_err(|e| anyhow::anyhow!("delta decode: {e}"))?;
+                    let d: snapshots::StateDelta = serde_json::from_slice(&json).map_err(|e| anyhow::anyhow!("delta json: {e}"))?;
+                    state = snapshots::apply_delta(&state, &d);
                     let got_root = hex::encode(state.root().0);
                     if got_root != dm.to_state_root_hex {
-                        warn!(
-                            from = from_h,
-                            to = to_h,
-                            "statesync: delta root mismatch; falling back"
-                        );
+                        warn!(from = from_h, to = to_h, "statesync: delta root mismatch; falling back");
+                        chosen = None;
                         break;
                     }
                 }
@@ -646,18 +483,11 @@ pub async fn try_p2p_restore_state(
                 if ok_root {
                     let json = serde_json::to_vec(&state)?;
                     std::fs::write(state_full_path, json)?;
-                    info!(
-                        height = mani.height,
-                        "statesync: delta-chain sync completed"
-                    );
+                    info!(height = mani.height, "statesync: delta-chain sync completed");
                     return Ok(true);
                 }
             } else {
-                warn!(
-                    from = local_h,
-                    to = mani.height,
-                    "statesync: no delta path; falling back to full snapshot"
-                );
+                warn!(from = local_h, to = mani.height, "statesync: no delta path; falling back to full snapshot");
             }
         }
     }
@@ -665,15 +495,11 @@ pub async fn try_p2p_restore_state(
     // We always request in manifest-sized "full chunk" steps for hashing, except when resuming a partial chunk tail.
     let req_chunk = (mani.chunk_size as usize).min(chunk_bytes.max(1));
     if req_chunk != mani.chunk_size as usize {
-        warn!(
-            manifest_chunk = mani.chunk_size,
-            local_chunk = chunk_bytes as u32,
-            "statesync: local chunk_bytes differs; using manifest chunk_size for correctness"
-        );
+        warn!(manifest_chunk = mani.chunk_size, local_chunk = chunk_bytes as u32, "statesync: local chunk_bytes differs; using manifest chunk_size for correctness");
     }
 
     // snap_dir already ensured above.
-    let tmp_path = format!("{}/statesync_{}.zst", snap_dir.display(), mani.height);
+    let tmp_path = format!("{}/statesync_{}.zst", snap_dir, mani.height);
 
     // Resume info (verify full chunks; keep partial tail)
     let mut resume = resume_info(&tmp_path, &mani)?;
@@ -688,20 +514,13 @@ pub async fn try_p2p_restore_state(
 
     // Open file for random write (supports overwrite on mismatch).
     use std::io::{Read, Seek, SeekFrom, Write};
-    let mut f = std::fs::OpenOptions::new()
-        .create(true)
-        .read(true)
-        .write(true)
-        .open(&tmp_path)?;
+    let mut f = std::fs::OpenOptions::new().create(true).read(true).write(true).open(&tmp_path)?;
 
     // Ensure file length matches resume state (don't extend unexpectedly).
     let cur_len = std::fs::metadata(&tmp_path)?.len();
     if cur_len < resume.chunk_start + resume.partial_len {
         // Strange, clamp to existing.
-        resume = ResumeInfo {
-            chunk_start: (cur_len / mani.chunk_size as u64) * mani.chunk_size as u64,
-            partial_len: cur_len % mani.chunk_size as u64,
-        };
+        resume = ResumeInfo { chunk_start: (cur_len / mani.chunk_size as u64) * mani.chunk_size as u64, partial_len: cur_len % mani.chunk_size as u64 };
     }
 
     let total = mani.total_bytes;
@@ -716,22 +535,14 @@ pub async fn try_p2p_restore_state(
 
         'tail: loop {
             if peer_idx >= best.len() {
-                warn!(
-                    offset = tail_off,
-                    "statesync: no peers left to complete partial tail"
-                );
+                warn!(offset = tail_off, "statesync: no peers left to complete partial tail");
                 return Ok(false);
             }
             let peer = best[peer_idx].peer;
-            let req = Req::State(StateReq::Chunk(StateChunkRequest {
-                height: mani.height,
-                offset: tail_off,
-                len: missing as u32,
-            }));
+            let req = Req::State(StateReq::Chunk(StateChunkRequest { height: mani.height, offset: tail_off, len: missing as u32 }));
             swarm.behaviour_mut().rr.send_request(&peer, req);
 
-            let Some(chunk) = wait_for_chunk_response(&mut swarm, peer, tail_off, timeout_s).await
-            else {
+            let Some(chunk) = wait_for_chunk_response(&mut swarm, peer, tail_off, timeout_s).await else {
                 warn!(peer=%peer, offset=tail_off, "statesync: tail timeout; switching peer");
                 peer_idx += 1;
                 continue;
@@ -751,9 +562,7 @@ pub async fn try_p2p_restore_state(
                 f.read_exact(&mut buf)?;
                 if want_len == mani.chunk_size as usize || (offset + want_len as u64) == total {
                     // If it is a full chunk, verify against chunk hash list.
-                    if want_len == mani.chunk_size as usize
-                        && !verify_full_chunk_hash(&mani, offset, &buf)
-                    {
+                    if want_len == mani.chunk_size as usize && !verify_full_chunk_hash(&mani, offset, &buf) {
                         warn!(peer=%peer, chunk_start=offset, "statesync: assembled chunk hash mismatch; re-requesting whole chunk");
                         // Re-request the whole chunk and overwrite.
                         peer_idx += 1;
@@ -778,11 +587,7 @@ pub async fn try_p2p_restore_state(
         let peer = best[peer_idx].peer;
 
         let len = (total - offset).min(cs) as u32;
-        let req = Req::State(StateReq::Chunk(StateChunkRequest {
-            height: mani.height,
-            offset,
-            len,
-        }));
+        let req = Req::State(StateReq::Chunk(StateChunkRequest { height: mani.height, offset, len }));
         swarm.behaviour_mut().rr.send_request(&peer, req);
 
         let Some(chunk) = wait_for_chunk_response(&mut swarm, peer, offset, timeout_s).await else {
@@ -829,9 +634,6 @@ pub async fn try_p2p_restore_state(
     let _state: crate::execution::KvState = serde_json::from_slice(&json)?;
     std::fs::write(state_full_path, json)?;
 
-    info!(
-        height = mani.height,
-        "statesync: state_full.json restored via P2P snapshot"
-    );
+    info!(height = mani.height, "statesync: state_full.json restored via P2P snapshot");
     Ok(true)
 }

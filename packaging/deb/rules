@@ -1,0 +1,52 @@
+#!/usr/bin/make -f
+# -*- makefile -*-
+
+export DH_VERBOSE=1
+export CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse
+
+%:
+	dh $@
+
+override_dh_auto_build:
+	cargo build --release
+
+override_dh_auto_test:
+	cargo test --release
+
+override_dh_auto_install:
+	dh_auto_install -- --no-strip
+	
+	# Create directory structure
+	mkdir -p debian/iona-node/usr/local/bin
+	mkdir -p debian/iona-node/lib/systemd/system
+	mkdir -p debian/iona-node/etc/iona
+	mkdir -p debian/iona-node/var/lib/iona
+	mkdir -p debian/iona-node/var/log/iona
+	
+	# Copy binaries
+	cp target/release/iona-node debian/iona-node/usr/local/bin/
+	cp target/release/iona-cli debian/iona-node/usr/local/bin/
+	cp target/release/iona-remote-signer debian/iona-node/usr/local/bin/
+	
+	# Strip binaries
+	strip --strip-all debian/iona-node/usr/local/bin/iona-node
+	strip --strip-all debian/iona-node/usr/local/bin/iona-cli
+	strip --strip-all debian/iona-node/usr/local/bin/iona-remote-signer
+	
+	# Copy systemd service
+	cp packaging/deb/iona-node.service debian/iona-node/lib/systemd/system/
+	
+	# Copy default configuration
+	cp config.toml debian/iona-node/etc/iona/config.toml.default
+	
+	# Set permissions
+	chmod 0755 debian/iona-node/usr/local/bin/iona-node
+	chmod 0755 debian/iona-node/usr/local/bin/iona-cli
+	chmod 0755 debian/iona-node/usr/local/bin/iona-remote-signer
+	chmod 0644 debian/iona-node/lib/systemd/system/iona-node.service
+	chmod 0644 debian/iona-node/etc/iona/config.toml.default
+
+override_dh_strip:
+	# Strip already done in override_dh_auto_install
+
+.PHONY: override_dh_auto_build override_dh_auto_test override_dh_auto_install override_dh_strip

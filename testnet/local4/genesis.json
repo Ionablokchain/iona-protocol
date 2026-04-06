@@ -1,0 +1,44 @@
+{
+  "chain_id": 6126151,
+  "chain_name": "iona-testnet-local4",
+  "validators": [
+    {
+      "seed": 1,
+      "power": 1,
+      "name": "val1",
+      "p2p_addr": "/ip4/127.0.0.1/tcp/7010",
+      "rpc_addr": "http://127.0.0.1:8541"
+    },
+    {
+      "seed": 2,
+      "power": 1,
+      "name": "val2",
+      "p2p_addr": "/ip4/127.0.0.1/tcp/7020",
+      "rpc_addr": "http://127.0.0.1:8542"
+    },
+    {
+      "seed": 3,
+      "power": 1,
+      "name": "val3",
+      "p2p_addr": "/ip4/127.0.0.1/tcp/7030",
+      "rpc_addr": "http://127.0.0.1:8543"
+    },
+    {
+      "seed": 4,
+      "power": 1,
+      "name": "val4",
+      "p2p_addr": "/ip4/127.0.0.1/tcp/7040",
+      "rpc_addr": "http://127.0.0.1:8544"
+    }
+  ],
+  "protocol_version": 1,
+  "initial_base_fee": 1000000000,
+  "stake_each": 1000000,
+  "genesis_time": 1741132800,
+  "alloc": {
+    "0xfaucet0000000000000000000000000000000001": {
+      "balance": "1000000000000000000000000",
+      "nonce": 0
+    }
+  }
+}

@@ -1,0 +1,52 @@
+# IONA RBAC policy — maps mTLS client identities to admin roles.
+#
+# Loaded at startup from `config.toml → [admin] rbac_path`.
+# Hot-reload: POST /admin/config-reload (requires operator role).
+#
+# ─── Roles ────────────────────────────────────────────────────────────────
+#
+#   auditor    – read-only endpoints:
+#                  /admin/status, /admin/audit, /admin/metrics
+#
+#   operator   – auditor + node control:
+#                  /admin/snapshot, /admin/peer-kick,
+#                  /admin/config-reload, /admin/mempool-flush
+#
+#   maintainer – operator + destructive/privileged ops:
+#                  /admin/key-rotate, /admin/upgrade-trigger,
+#                  /admin/reset-chain, /admin/schema-migrate
+#
+# ─── Identity matching ────────────────────────────────────────────────────
+#
+#   cn          = Subject Common Name (case-insensitive, exact match)
+#   fingerprint = SHA-256 of DER cert, colon-hex (UPPERCASE)
+#
+#   If both are specified, BOTH must match the presented certificate.
+#   If only one is specified, only that field is checked.
+#
+# ─── Example entries ──────────────────────────────────────────────────────
+
+[[identities]]
+# Monitoring / read-only bot (CI pipeline, Grafana probes, etc.)
+cn    = "ci-monitor"
+roles = ["auditor"]
+
+[[identities]]
+# On-call operator — can snapshot, reload config, kick bad peers.
+cn    = "ops-oncall"
+roles = ["operator"]
+
+[[identities]]
+# Specific known cert by fingerprint — extra security for high-privilege ops.
+cn          = "node-maintainer"
+fingerprint = "REPLACE_WITH_ACTUAL_SHA256_FINGERPRINT_OF_YOUR_CLIENT_CERT"
+roles       = ["maintainer"]
+
+# ─── Production note ──────────────────────────────────────────────────────
+# Generate client certs with:
+#   openssl req -newkey ed25519 -x509 -days 365 \
+#     -subj "/CN=ops-oncall" \
+#     -out client.crt.pem -keyout client.key.pem -nodes
+#
+# Get fingerprint with:
+#   openssl x509 -in client.crt.pem -noout -fingerprint -sha256

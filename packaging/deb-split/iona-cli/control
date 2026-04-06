@@ -1,0 +1,14 @@
+Package: iona-cli
+Version: 28.7.0
+Section: net
+Priority: optional
+Architecture: amd64
+Depends: libssl3 (>= 3.0)
+Recommends: iona-node (>= 28.7.0)
+Maintainer: IONA Engineering <packages@example.invalid>
+Homepage: https://github.com/iona/iona
+Description: IONA blockchain — CLI management tool (v28.7.0)
+ Command-line interface for IONA node management.
+ Commands: doctor, keys, audit, admin, tx, query, peer, upgrade.
+ .
+ Can be installed independently to manage a remote IONA node.
