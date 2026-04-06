@@ -1,64 +1,74 @@
 # IONA
 
-IONA is an open-source infrastructure project focused on reproducibility, deterministic execution, upgrade safety, and operational reliability in distributed systems.
+IONA is an experimental open-source framework for deterministic execution verification, reproducibility testing, and upgrade safety in distributed systems.
 
-The project provides a Rust-based protocol implementation, local multi-node testing environments, release verification workflows, observability tooling, and operational documentation designed to help developers and operators validate system behavior before broader deployment.
+It provides a Rust-based protocol implementation, controlled multi-node test environments, replay-oriented validation workflows, operator-focused tooling, and technical documentation designed to help developers and infrastructure operators validate system behavior before broader deployment.
 
-## Why IONA
+> Research and engineering repository for reproducible, upgrade-safe distributed infrastructure.
 
-Many distributed systems assume deterministic execution and safe protocol evolution, but often lack practical tooling for reproducibility testing, release validation, upgrade simulation, and operator-oriented recovery workflows.
+## Overview
 
-IONA explores these problems through an open engineering framework that emphasizes:
+Many distributed systems rely on deterministic execution and coordinated protocol evolution, yet often lack practical tooling for reproducibility testing, replay verification, compatibility validation, and structured upgrade simulation.
+
+IONA explores these challenges through an engineering-first framework that prioritizes:
 
 - deterministic state transition behavior
 - reproducible execution across environments
-- safer protocol and software upgrades
+- explicit protocol and schema versioning
+- safer upgrade and migration workflows
 - operator-first observability and recovery tooling
-- controlled multi-node test environments
+- controlled multi-node validation environments
 
-## Current Scope
+The project is intended as an open research and engineering environment for studying reliability improvements in distributed state machine infrastructure.
+
+## Why IONA
+
+Distributed infrastructure is frequently expected to behave deterministically, but the workflows needed to verify that assumption are often incomplete or difficult to inspect in practice.
+
+IONA focuses on practical questions such as:
+
+- can state transitions be reproduced across environments?
+- can protocol changes be introduced with explicit compatibility handling?
+- can schema evolution be validated before broader rollout?
+- can observed behavior be replayed and compared deterministically?
+- can operators verify upgrade outcomes before and after transition?
+
+Rather than presenting itself as a finalized production deployment, IONA is designed as an open framework for validating reliability-critical workflows around execution, compatibility, and protocol evolution.
+
+## What the Repository Includes
 
 This repository currently includes:
 
 - a Rust-based distributed node implementation
-- local multi-validator testnet tooling
-- reproducible development and validation workflows
-- release verification and artifact integrity checks
+- controlled local multi-node and multi-validator test environments
+- deterministic replay and validation workflows
+- reproducibility-oriented testing and verification assets
+- protocol and schema upgrade documentation
+- release verification and artifact integrity workflows
 - monitoring and observability assets
-- operational runbooks and supporting documentation
+- operator-facing runbooks and technical documentation
+- deployment and configuration templates
+- TypeScript SDK assets
 
-## Project Goals
+## What Can Be Evaluated Today
 
-IONA is intended as an open research and engineering environment for improving the reliability of distributed state machine infrastructure.
+At its current stage, the repository is best evaluated as an infrastructure and reliability project.
 
-Its main goals are:
+Reviewers and contributors can use it to:
 
-- to make execution behavior easier to verify
-- to make upgrades safer to test before rollout
-- to improve operational clarity for node operators
-- to provide reusable tools and documentation for reproducible infrastructure workflows
+- inspect the protocol and node implementation
+- run controlled local multi-node environments
+- review replay and reproducibility workflows
+- examine upgrade-safety and compatibility documentation
+- inspect observability and operator-facing assets
+- evaluate the project as an open engineering framework for deterministic infrastructure research
 
-## Status
+## Quick Start
 
-IONA is under active development.
+The exact workflows may evolve, but a typical local evaluation flow is intended to look like this:
 
-The repository should currently be understood as:
-
-- functional for local development and controlled multi-node testing
-- suitable for infrastructure experimentation and architecture review
-- not a final production deployment claim
-
-Some components are more mature than others. Experimental areas should be treated accordingly.
-
-## Repository Structure
-
-```text
-src/                    Core node implementation
-tests/                  Integration and protocol tests
-docs/                   Architecture, operations, and security documentation
-ops/                    Monitoring, alerts, dashboards, and runbooks
-deploy/                 Deployment-related configuration
-testnet/local4/         Local 4-validator test environment
-scripts/                Verification and automation scripts
-sdk/typescript/         TypeScript SDK assets
-config/                 Configuration templates
+```bash
+git clone https://github.com/Ionablokchain/iona-protocol.git
+cd iona-protocol
+cargo build
+cargo test
