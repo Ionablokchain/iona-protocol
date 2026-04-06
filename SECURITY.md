@@ -1,175 +1,164 @@
-# IONA Security Policy
+# Security Policy
 
-> **Security-first by design.** For the full manifesto — secure defaults, key isolation,
-> fuzz-driven hardening, and reproducible builds — see [`docs/SECURITY_FIRST.md`](docs/SECURITY_FIRST.md).
+> **Security-first by design.**  
+> For the broader security engineering approach behind IONA — including secure defaults, key isolation, fuzz-driven hardening, reproducible builds, and operational safeguards — see [`docs/SECURITY_FIRST.md`](docs/SECURITY_FIRST.md).
 
-## Supported Versions
+## Overview
 
-| Version | Supported |
-|---------|-----------|
-| v28.0.x | Yes |
-| v27.1.x | Security patches only |
-| v27.0.x | Security patches only |
-| < v27   | No |
+IONA is an open-source infrastructure project focused on deterministic execution, reproducibility, upgrade safety, and operator reliability in distributed systems.
+
+Security is treated as a core engineering concern rather than an afterthought. This repository includes protocol, operational, and build-level controls intended to reduce the risk of unsafe upgrades, inconsistent state transitions, key exposure, and supply-chain compromise.
+
+That said, IONA remains under active development. The repository should be evaluated as a security-conscious research and engineering project, not as a blanket claim of final production readiness.
 
 ## Reporting a Vulnerability
 
-Please report security issues privately. **Do NOT** open a public GitHub issue.
+Please report suspected vulnerabilities **privately**.
 
-Include:
-- version / commit
-- reproduction steps
+**Do not open a public GitHub issue for unpatched security problems.**
+
+When reporting an issue, please include as much of the following as possible:
+
+- affected version, tag, or commit
+- environment details
+- clear reproduction steps
+- expected versus actual behavior
 - impact assessment
-- logs if available
+- logs, traces, or screenshots where relevant
 
-We aim to acknowledge reports within 48 hours and provide a fix within 7 days for critical issues.
+If the report is valid, the project aims to:
 
----
+- acknowledge receipt within 48 hours
+- assess severity and scope as quickly as possible
+- provide a remediation plan or fix timeline for critical issues
 
-## Formal Safety Properties (UPGRADE_SPEC.md §7)
+## Supported Versions
+
+The following versions currently receive security attention:
+
+| Version | Support Status |
+|---------|----------------|
+| v28.0.x | Supported |
+| v27.1.x | Security patches only |
+| v27.0.x | Security patches only |
+| < v27   | Not supported |
+
+Older versions may contain known or unknown security issues and should not be relied on for current deployments.
+
+## Security Model
+
+IONA approaches security across four main areas:
+
+- **consensus safety**
+- **network resilience**
+- **cryptographic key protection**
+- **build and release integrity**
+
+The repository also includes upgrade-safety mechanisms intended to reduce the risk of state incompatibility, protocol-version mismatches, and partial migration failures.
+
+## Formal Safety Properties
+
+The project defines and tests a number of upgrade and protocol safety properties.
 
 | Property | Description | Verified By |
 |----------|-------------|-------------|
-| **S1: No Split Finality** | At most one finalized block per height | `safety::check_no_split_finality()`, TLA+ model |
-| **S2: Finality Monotonic** | `finalized_height` never decreases | `safety::check_finality_monotonic()`, TLA+ model |
-| **S3: Deterministic PV** | All correct nodes agree on PV(height) | `safety::check_deterministic_pv()`, TLA+ model |
-| **S4: State Compatibility** | Old PV not applied after activation | `safety::check_state_compat()`, TLA+ model |
-| **M2: Value Conservation** | Token supply conserved across transitions | `safety::check_value_conservation()` |
-| **M3: Root Equivalence** | State root unchanged after format migration | `safety::check_root_equivalence()` |
+| **S1: No Split Finality** | At most one finalized block exists per height | `safety::check_no_split_finality()`, TLA+ model |
+| **S2: Finality Monotonicity** | `finalized_height` never decreases | `safety::check_finality_monotonic()`, TLA+ model |
+| **S3: Deterministic Protocol View** | Correct nodes agree on protocol view at a given height | `safety::check_deterministic_pv()`, TLA+ model |
+| **S4: State Compatibility** | Outdated protocol rules are not applied after activation | `safety::check_state_compat()`, TLA+ model |
+| **M2: Value Conservation** | Token supply remains conserved across transitions | `safety::check_value_conservation()` |
+| **M3: Root Equivalence** | State root remains unchanged after format migration | `safety::check_root_equivalence()` |
 
-See `formal/upgrade.tla` for the TLA+ model that formally verifies S1-S4.
-See `tests/upgrade_sim.rs` for executable conformance tests.
+Where applicable, these properties are backed by both executable tests and formal models.
 
----
+References:
 
-## Security Impact of v27.1.0 Update
-
-### Protocol Versioning
-
-**Threat**: Without protocol versioning, a hard fork could split the network if some nodes run incompatible rules.
-
-**Mitigation**:
-- Every block header now carries `protocol_version`.
-- Nodes reject blocks with unsupported protocol versions.
-- Activation height + grace window allow coordinated upgrades without halting.
-
-**Residual risk**: If operators fail to upgrade before `activation_height + grace_blocks`, their nodes will be forked off. This is by design (safety over liveness for non-upgraded nodes).
-
-### Schema Migrations
-
-**Threat**: Corrupted or partial migrations could leave the node in an inconsistent state.
-
-**Mitigation**:
-- Migrations are atomic (write to `.tmp` + rename).
-- Each step persists progress to `schema.json` before moving to the next.
-- Interrupted migrations resume from the last successful step.
-- Backup files (`.bak`) created before destructive changes.
-- Future-version guard prevents running old binary on new data.
-
-**Residual risk**: Disk full during migration could leave `.tmp` files. Recovery: delete `.tmp` files, restart.
-
-### Node Metadata
-
-**Threat**: Stale or missing metadata could cause a node to operate under wrong assumptions.
-
-**Mitigation**:
-- `node_meta.json` is checked at startup for compatibility.
-- Atomic writes prevent partial metadata.
-
----
+- `formal/upgrade.tla`
+- `tests/upgrade_sim.rs`
+- `docs/UPGRADE_SPEC.md`
 
 ## Threat Model
 
 ### Consensus Safety
 
 | Threat | Mitigation | Status |
-|--------|-----------|--------|
-| Double-sign | `DoubleSignGuard` with persistent state | Implemented (v24.9) |
-| Equivocation evidence | `Evidence::DoubleVote` detection + slashing | Implemented (v24.9) |
+|--------|------------|--------|
+| Double-signing | `DoubleSignGuard` with persistent state tracking | Implemented |
+| Equivocation | `Evidence::DoubleVote` detection and slashing | Implemented |
+| Nothing-at-stake behavior | Slashing for conflicting votes | Implemented |
 | Long-range attack | Weak subjectivity checkpoints | Planned |
-| Nothing-at-stake | Slashing for double votes | Implemented |
 
 ### Network Security
 
 | Threat | Mitigation | Status |
-|--------|-----------|--------|
-| Eclipse attack | Peer diversity buckets + inbound gating | Implemented (v24.12) |
-| DoS via P2P | Per-protocol rate limits + bandwidth caps | Implemented (v24.3) |
-| Gossipsub spam | Topic ACL + per-topic caps + spam scoring | Implemented (v24.12) |
-| Sybil | Peer scoring + quarantine escalation | Implemented (v24.4) |
+|--------|------------|--------|
+| Eclipse attack | Peer diversity buckets and inbound gating | Implemented |
+| Denial of service via P2P | Per-protocol rate limits and bandwidth caps | Implemented |
+| Gossipsub spam | Topic ACLs, per-topic caps, and spam scoring | Implemented |
+| Sybil behavior | Peer scoring and quarantine escalation | Implemented |
 
 ### Cryptographic Security
 
 | Threat | Mitigation | Status |
-|--------|-----------|--------|
-| Key exposure | Encrypted keystore (AES-256-GCM + PBKDF2) | Implemented (v24.5) |
-| Weak randomness | Ed25519 with deterministic key derivation | Implemented |
-| Hash collision | BLAKE3 (256-bit) for all hashing | Implemented |
+|--------|------------|--------|
+| Key exposure | Encrypted keystore with authenticated encryption | Implemented |
+| Weak randomness assumptions | Deterministic Ed25519-based key handling | Implemented |
+| Hash collision risks | BLAKE3 (256-bit) hashing throughout core flows | Implemented |
 
-### Build Security
+### Build and Release Security
 
 | Threat | Mitigation | Status |
-|--------|-----------|--------|
-| Supply chain attack | `Cargo.lock` + `--locked` builds | Implemented (v27.0) |
-| Non-reproducible builds | `scripts/repro_check.sh` + frozen toolchain | Implemented (v27.0) |
-| CI tampering | SLSA provenance + signed releases | Implemented (v24.10) |
-| Dependency vulnerabilities | `cargo-audit` + `cargo-deny` in CI | Implemented (v24.1) |
+|--------|------------|--------|
+| Supply-chain drift | `Cargo.lock` and `--locked` builds | Implemented |
+| Non-reproducible builds | reproducibility checks and frozen toolchain workflows | Implemented |
+| CI or provenance tampering | SLSA provenance and signed release process | Implemented |
+| Dependency vulnerabilities | `cargo-audit` and `cargo-deny` in CI | Implemented |
 
----
+## Upgrade Security
+
+Protocol and schema upgrades are treated as security-sensitive operations.
+
+### Protocol Versioning
+
+Without explicit protocol versioning, incompatible rule changes may create unsafe network divergence.
+
+Current mitigation strategy includes:
+
+- explicit `protocol_version` signaling in block headers
+- rejection of unsupported protocol versions
+- activation heights and grace windows for coordinated transitions
+
+**Residual risk:** nodes that fail to upgrade before the defined transition window may fall off the canonical network. This is an intentional safety tradeoff.
+
+### Schema Migrations
+
+Storage and schema transitions introduce risks around partial writes, incompatible data layouts, and interrupted upgrade procedures.
+
+Current mitigation strategy includes:
+
+- atomic migration flow using temporary files and rename operations
+- persisted migration progress tracking
+- resumable migration steps after interruption
+- backup creation before destructive steps
+- forward-version compatibility guards
+
+**Residual risk:** disk exhaustion or abrupt interruption may leave temporary files behind. Recovery procedures should remove incomplete temporary files and restart the migration process cleanly.
+
+### Node Metadata
+
+Incorrect or stale metadata can cause a node to start under invalid assumptions.
+
+Current mitigation strategy includes:
+
+- startup compatibility checks for node metadata
+- atomic metadata writes to prevent partial state
 
 ## Secure Upgrade Procedure
 
-1. **Verify binary integrity**:
-   ```bash
-   sha256sum iona-node-v27.1.0
-   # Compare with published hash in release notes
-   ```
+Before upgrading a node, operators should follow a conservative process.
 
-2. **Backup before upgrade**:
-   ```bash
-   cp -r ./data/node ./data/node.bak.$(date +%s)
-   ```
-
-3. **Verify after upgrade**:
-   ```bash
-   curl http://localhost:9001/health
-   # Check: status=ok, height advancing, peers connected
-   ```
-
-4. **Monitor for anomalies**:
-   - Unexpected consensus stalls
-   - Peer count drops
-   - Evidence of double-signing in logs
-
----
-
-## Hardening Notes
-
-This project is a prototype consensus node. Before running with real funds or on an open/public network, complete:
-- fuzzing for all decode paths (RPC + P2P) — fuzz targets in `fuzz/fuzz_targets/` run in CI
-- connection and message DoS protections — implemented; see `src/rpc_limits.rs`, `src/net/`
-- key management (encrypted keys/HSM/KMS) — implemented; see `docs/remote_signer.md`
-- upgrade/migration plan + snapshot compatibility guarantees — implemented in v27.1.0+
-- formal safety verification — TLA+ model in `formal/upgrade.tla`
-- independent security review/audit — **required before mainnet with real funds**
-
-See [`docs/SECURITY_FIRST.md`](docs/SECURITY_FIRST.md) for the full security-first manifesto, including the complete checklist of controls, test evidence, and non-goals.
-
----
-
-## Key Management
-
-### Production Recommendations
-
-1. **Use encrypted keystore** (`keystore = "encrypted"` in config.toml)
-2. **Use environment variables** for passwords (never in config files)
-3. **Consider remote signer** for validator keys (`signing.mode = "remote"`)
-4. **Rotate keys periodically** (coordinate with network governance)
-5. **Never commit key files** to version control
-
-### File Permissions
+### 1. Verify binary integrity
 
 ```bash
-chmod 600 data/node/keys.json    # or keys.enc
-chmod 700 data/node/             # directory
-```
+sha256sum iona-node-v27.1.0
+# Compare with the published hash from the release notes
