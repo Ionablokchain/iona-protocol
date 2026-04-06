@@ -62,3 +62,6 @@ testnet/local4/         Local 4-validator test environment
 scripts/                Verification and automation scripts
 sdk/typescript/         TypeScript SDK assets
 config/                 Configuration templates
+
+## License
+This project is licensed under the Apache License 2.0 - see the [LICENSE](LICENSE) file for details.
