@@ -25,8 +25,8 @@ bin-block-store = []
 [dependencies]
 memory-db = { version = "0.32", optional = true }
 trie-db = { version = "0.28", optional = true }
-hash-db = { version = "0.16", optional = true }
-keccak-hasher = "0.16"
+hash-db = { version = "0.15", optional = true }
+keccak-hasher = "0.15"
 triehash = "0.8"
 k256 = { version = "0.13", features = ["ecdsa"] }
 sha3 = "0.10"
