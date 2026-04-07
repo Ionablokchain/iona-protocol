@@ -347,10 +347,11 @@ mod unix_perm_tests {
             result.is_err(),
             "0644 key file (world-readable) must be rejected"
         );
+        let err_text = result.err().map(|e| e.to_string()).unwrap_or_default();
         assert!(
-            result.unwrap_err().to_string().contains("0644") || result.is_err(),
+            err_text.contains("0644"),
             "error must mention the mode"
-        );
+       );
     }
 
     #[test]
