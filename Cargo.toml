@@ -128,9 +128,10 @@ proptest = "1"
 ureq = { version = "2", features = ["json"] }
 criterion = { version = "0.5", features = ["html_reports"] }
 
-[[bench]]
-name = "core_benchmarks"
-harness = false
+# Temporarily disabled because the benchmark code is outdated
+# [[bench]]
+# name = "core_benchmarks"
+# harness = false
 
 [[bin]]
 name = "iona-node"
