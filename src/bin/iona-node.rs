@@ -71,6 +71,8 @@ use tokio::{sync::Mutex, time::Instant};
 use tower_http::cors::CorsLayer;
 use tracing::{debug, error, info, warn};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
+use std::option::Option::None;
+use std::result::Result::Ok;
 
 // ── Startup security gate: key-file and data-directory permissions ─────────
 
