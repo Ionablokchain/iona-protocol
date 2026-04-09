@@ -60,6 +60,8 @@ use iona::storage::DataDir;
 use iona::types::{Hash32, Tx};
 use iona::wal::{Wal, WalEvent};
 use libp2p::{Multiaddr, PeerId};
+use std::option::Option::None;
+use std::result::Result::Ok;
 use std::{
     collections::BTreeMap,
     net::SocketAddr,
