@@ -1,24 +1,279 @@
 # Ultra profile: aggressive safety defaults for open Internet.
+# This configuration is intended for production nodes exposed to the public Internet.
+# All values are tuned for maximum security and resilience.
+
+# -----------------------------------------------------------------------------
+# Node identity and basic settings
+# -----------------------------------------------------------------------------
+[node]
+# Base directory for node data (database, snapshots, quarantines, keys)
+data_dir = "./data/ultra-node"
+
+# Deterministic key seed (change per node). WARNING: Keep secret in production.
+seed = 1
+
+# Unique chain identifier (must match genesis)
+chain_id = 6126151
+
+# Log level: trace | debug | info | warn | error
+log_level = "warn"
+
+# Keystore mode: plain (insecure) | encrypted (recommended)
+keystore = "encrypted"
+
+# Password for encrypted keystore (fallback if env var not set)
+keystore_password = ""
+
+# Environment variable name containing the keystore password
+keystore_password_env = "IONA_KEYSTORE_PASSWORD"
+
+# Maximum number of concurrent background tasks (e.g., snapshot generation)
+max_concurrent_tasks = 128
+
+# -----------------------------------------------------------------------------
+# Consensus engine (safety over liveness)
+# -----------------------------------------------------------------------------
+[consensus]
+# Timeouts (milliseconds) – longer than default for unstable networks
+propose_timeout_ms   = 500
+prevote_timeout_ms   = 400
+precommit_timeout_ms = 400
+
+# Maximum number of transactions per block (reduced to limit DoS)
+max_txs_per_block = 2048
+
+# EIP-1559 target gas per block
+gas_target = 30_000_000
+
+# Fast quorum disabled to avoid premature commits in high‑latency networks
+fast_quorum = false
+
+# Initial base fee for EIP-1559
+initial_base_fee = 1
+
+# Stake per validator (testnet only)
+stake_each = 1000
+
+# Maximum rounds before giving up
+max_rounds = 20
+
+# Minimum number of validators required
+min_validator_count = 4
+
+# Protocol activation schedule (see UPGRADE_SPEC.md)
+[[consensus.protocol_activations]]
+protocol_version = 1
+activation_height = 0
+grace_blocks = 0
+
+[[consensus.protocol_activations]]
+protocol_version = 2
+activation_height = 2_000_000
+grace_blocks = 1000
+
+# -----------------------------------------------------------------------------
+# P2P network security (aggressive limits)
+# -----------------------------------------------------------------------------
 [security]
-max_message_size = 1048576          # 1 MiB
+# Maximum size of a single P2P message (1 MiB)
+max_message_size = 1_048_576
+
+# Maximum number of inflight requests per peer (prevent resource exhaustion)
 max_inflight_requests_per_peer = 32
+
+# Request timeout (milliseconds)
 request_timeout_ms = 5000
+
+# Handshake timeout (milliseconds)
 handshake_timeout_ms = 3000
+
+# Idle connection timeout (milliseconds) – close idle peers
 idle_connection_timeout_ms = 30_000
+
+# Total connection limit (inbound + outbound)
 max_connections = 200
+
+# Maximum connections per IP (prevent Sybil)
 max_connections_per_ip = 20
 
+# Optional caps on inbound/outbound connections
+max_inbound_connections = 150
+max_outbound_connections = 50
+
+# -----------------------------------------------------------------------------
+# P2P network configuration
+# -----------------------------------------------------------------------------
+[network]
+# Listen address for P2P (multiaddr format)
+listen = "/ip4/0.0.0.0/tcp/7001"
+
+# Static peers (multiaddrs) – define your trusted peers here
+peers = [
+  # "/ip4/1.2.3.4/tcp/7001/p2p/12D3KooW...",
+]
+
+# Bootnodes for peer discovery (must include peer ID)
+bootnodes = [
+  # "/dns4/node.example/tcp/7001/p2p/12D3KooW...",
+]
+
+# Enable mDNS for local network discovery (disables for security)
+enable_mdns = false
+
+# Enable Kademlia DHT for peer discovery
+enable_kad = true
+
+# Reconnect interval to static peers (seconds)
+reconnect_s = 30
+
+# Peer scoring and quarantine settings
+[network.rr_limits]
+max_req_per_sec_block  = 10
+max_req_per_sec_status = 20
+max_req_per_sec_range  = 2
+max_bytes_per_sec_block  = 1_000_000
+max_bytes_per_sec_status = 100_000
+max_bytes_per_sec_range  = 2_000_000
+
+# Global bandwidth caps (bytes/sec)
+global_in_bytes_per_sec  = 5_000_000
+global_out_bytes_per_sec = 5_000_000
+
+# Peer scoring
+peer_strike_decay_s = 60
+peer_score_decay_s  = 120
+peer_quarantine_s   = 300
+rr_strikes_before_quarantine = 1
+rr_strikes_before_ban        = 2
+rr_quarantines_before_ban    = 1
+persist_quarantine = true
+
+# Eclipse attack protection (diversity)
+[network.diversity]
+bucket_kind = "ip16"
+max_inbound_per_bucket = 2
+max_outbound_per_bucket = 2
+eclipse_detection_min_buckets = 4
+reseed_cooldown_s = 300
+
+# Gossipsub limits
+[network.gossipsub]
+allowed_topics = ["iona/tx", "iona/blocks", "iona/evidence"]
+deny_unknown_topics = true
+max_publish_msgs_per_sec = 30
+max_publish_bytes_per_sec = 2_000_000
+max_in_msgs_per_sec = 50
+max_in_bytes_per_sec = 5_000_000
+
+# State sync security
+[network.state_sync_security]
+bind_validator_set = true
+bind_epoch = true
+attestation_epoch_s = 60
+require_attestation = true
+use_aggregated_signatures = false
+
+# P2P state sync
+enable_p2p_state_sync = true
+state_sync_chunk_bytes = 1_048_576
+state_sync_timeout_s = 15
+
+# Snapshot attestation
+enable_snapshot_attestation = true
+snapshot_attestation_threshold = 2
+snapshot_attestation_collect_s = 8
+
+# -----------------------------------------------------------------------------
+# Mempool (aggressive limits)
+# -----------------------------------------------------------------------------
+[mempool]
+capacity = 100_000
+max_tx_size = 32768
+min_gas_price = 10
+max_gas_price = 10_000
+max_priority_fee_per_gas = 100
+
+# MEV protection
+[mev]
+enable_commit_reveal = true
+enable_threshold_encryption = true
+enable_fair_ordering = true
+ordering_jitter_ms = 50
+commit_ttl_blocks = 20
+backrun_delay_blocks = 1
+max_pending_commits = 100_000
+
+# -----------------------------------------------------------------------------
+# RPC server (local only by default; expose via reverse proxy)
+# -----------------------------------------------------------------------------
 [rpc]
 bind = "127.0.0.1:8080"
-# For public exposure, put a reverse proxy with auth and rate limiting in front.
-# Or enable the in-app API key middleware (see docs).
 enable_api_key = true
 api_key_header = "x-api-key"
-api_key_value = ""
+api_key_value = ""                    # MUST be set via environment or config
 cors_allowed_origins = ["http://localhost:3000"]
-max_body_bytes = 1048576
+max_body_bytes = 1_048_576
+rate_limit_enabled = true
+rate_limit_requests_per_second = 50
+rate_limit_burst = 100
+max_json_depth = 16
 
+# -----------------------------------------------------------------------------
+# Storage and snapshots
+# -----------------------------------------------------------------------------
+[storage]
+enable_snapshots = true
+snapshot_every_n_blocks = 2000
+snapshot_keep = 5
+snapshot_zstd_level = 6
+db_cache_size_mb = 1024
+max_concurrent_tasks = 128
+
+[storage.wal]
+max_segment_bytes = 67_108_864
+keep_segments = 3
+fsync_every_write = true
+
+# -----------------------------------------------------------------------------
+# Audit logging (security‑critical)
+# -----------------------------------------------------------------------------
+[audit]
+log_path = "./data/ultra-node/audit.jsonl"
+max_file_size_bytes = 104_857_600
+rotate_count = 10
+emit_to_tracing = true
+
+# -----------------------------------------------------------------------------
+# Observability (optional, internal)
+# -----------------------------------------------------------------------------
+[observability]
+enable_otel = false
+otel_endpoint = "http://127.0.0.1:4317"
+service_name = "iona-ultra-node"
+
+# -----------------------------------------------------------------------------
+# Governance parameters
+# -----------------------------------------------------------------------------
+[governance]
+min_deposit = 1_000_000
+voting_epochs = 100
+quorum_bps = 3340
+threshold_bps = 5000
+
+# -----------------------------------------------------------------------------
+# Economics (testnet defaults)
+# -----------------------------------------------------------------------------
+[economics]
+base_inflation_bps = 500
+min_stake = 10_000_000_000
+slash_double_sign_bps = 5000
+slash_downtime_bps = 100
+unbonding_epochs = 14
+treasury_bps = 500
+
+# -----------------------------------------------------------------------------
+# Network emulation (for testing only – comment out in production)
+# -----------------------------------------------------------------------------
 [netem]
-# default chaos profile used by scripts
 delay = "200ms 50ms"
 loss = "5%"
