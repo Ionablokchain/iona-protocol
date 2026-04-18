@@ -1,6 +1,19 @@
 {
+  "_comment": "IONA v30.0.0 genesis configuration for iona-testnet-local4",
+  "_description": "Local 4‑validator testnet with deterministic seeds and local addresses",
+
   "chain_id": 6126151,
   "chain_name": "iona-testnet-local4",
+  "initial_height": 0,
+  "genesis_time": 1741132800,
+  "genesis_time_human": "2026-03-05T00:00:00Z",
+
+  "protocol_version": 1,
+  "schema_version": 5,
+
+  "initial_base_fee": 1000000000,
+  "stake_each": 1000000,
+
   "validators": [
     {
       "seed": 1,
@@ -31,14 +44,77 @@
       "rpc_addr": "http://127.0.0.1:8544"
     }
   ],
-  "protocol_version": 1,
-  "initial_base_fee": 1000000000,
-  "stake_each": 1000000,
-  "genesis_time": 1741132800,
-  "alloc": {
-    "0xfaucet0000000000000000000000000000000001": {
+
+  "accounts": {
+    "faucet": {
+      "address": "0xfaucet0000000000000000000000000000000001",
       "balance": "1000000000000000000000000",
       "nonce": 0
-    }
-  }
+    },
+    "_comment_accounts": "Additional accounts can be added here"
+  },
+
+  "bootnodes": [
+    "/ip4/127.0.0.1/tcp/7010/p2p/val1",
+    "/ip4/127.0.0.1/tcp/7020/p2p/val2",
+    "/ip4/127.0.0.1/tcp/7030/p2p/val3",
+    "/ip4/127.0.0.1/tcp/7040/p2p/val4"
+  ],
+
+  "consensus_params": {
+    "block": {
+      "max_bytes": 22020096,
+      "max_gas": -1,
+      "time_iota_ms": 1000
+    },
+    "evidence": {
+      "max_age_num_blocks": 100000,
+      "max_age_duration": "48h",
+      "max_bytes": 1048576
+    },
+    "validator": {
+      "pub_key_types": ["ed25519"]
+    },
+    "timeout_propose": "3000ms",
+    "timeout_prevote": "1000ms",
+    "timeout_precommit": "1000ms",
+      "timeout_commit": "5000ms"
+  },
+
+  "staking_params": {
+    "bond_denom": "uiona",
+    "min_stake": 100,
+    "unbonding_epochs": 21,
+    "epoch_length": 100,
+    "max_validators": 100,
+    "max_entries": 7,
+    "historical_entries": 10000
+  },
+
+  "economics_params": {
+    "base_inflation_bps": 500,
+    "treasury_bps": 1000,
+    "min_gas_price": "0.01uiona",
+    "max_gas_per_block": 10000000,
+    "fee_denom": "uiona",
+    "min_tx_fee": "1uiona",
+    "slash_double_sign_bps": 5000,
+    "slash_downtime_bps": 100
+  },
+
+  "governance_params": {
+    "min_deposit": "1000000uiona",
+    "max_deposit_period": "172800s",
+    "voting_period": "172800s",
+    "quorum": "0.334",
+    "threshold": "0.5",
+    "veto_threshold": "0.334"
+  },
+
+  "network_params": {
+    "max_peers": 50,
+    "max_packet_msg_payload_size": 1048576
+  },
+
+  "_note": "This genesis file is for local testing only. Do not use in production without changing seeds and addresses."
 }
