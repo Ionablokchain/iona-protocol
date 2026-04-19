@@ -18,9 +18,30 @@
 //! ```
 //! The `migration_state` field tracks in-progress migrations so that
 //! a crash during migration can be safely resumed.
+//!
+//! # Example
+//!
+//! ```
+//! use iona::storage::meta::NodeMeta;
+//!
+//! let mut meta = NodeMeta::load_or_create("./data/node").unwrap();
+//! if meta.has_pending_migration() {
+//!     // Resume migration
+//! }
+//! meta.begin_migration(3, 4, "adding node_meta.json", "./data/node").unwrap();
+//! // ... do migration work ...
+//! meta.end_migration("./data/node").unwrap();
+//! ```
 
 use serde::{Deserialize, Serialize};
-use std::{fs, io, path::Path};
+use std::fs;
+use std::io;
+use std::path::Path;
+use tracing::{debug, info, warn};
+
+// -----------------------------------------------------------------------------
+// MigrationState
+// -----------------------------------------------------------------------------
 
 /// In-progress migration state for crash-safe resume.
 ///
@@ -34,9 +55,13 @@ pub struct MigrationState {
     pub to_sv: u32,
     /// Human-readable description of the current step.
     pub step: String,
-    /// Timestamp when migration started.
+    /// Timestamp when migration started (Unix seconds).
     pub started_at: String,
 }
+
+// -----------------------------------------------------------------------------
+// NodeMeta
+// -----------------------------------------------------------------------------
 
 /// Persistent metadata written to `<data_dir>/node_meta.json`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -47,7 +72,7 @@ pub struct NodeMeta {
     pub protocol_version: u32,
     /// Semver of the node binary that last wrote this file.
     pub node_version: String,
-    /// ISO-8601 timestamp of last update.
+    /// ISO‑8601 timestamp of last update (simplified to Unix seconds).
     #[serde(default)]
     pub updated_at: Option<String>,
     /// If non-null, a migration is in progress (crash-safe resume).
@@ -58,6 +83,7 @@ pub struct NodeMeta {
 
 impl NodeMeta {
     /// Create a fresh `NodeMeta` for a new data directory.
+    #[must_use]
     pub fn new_current() -> Self {
         Self {
             schema_version: crate::storage::CURRENT_SCHEMA_VERSION,
@@ -68,61 +94,71 @@ impl NodeMeta {
         }
     }
 
-    /// Mark a migration as in-progress (for crash-safe resume).
-    pub fn begin_migration(
-        &mut self,
-        from_sv: u32,
-        to_sv: u32,
-        step: &str,
-        data_dir: &str,
-    ) -> io::Result<()> {
-        self.migration_state = Some(MigrationState {
-            from_sv,
-            to_sv,
-            step: step.to_string(),
-            started_at: now_iso8601(),
-        });
-        self.save(data_dir)
-    }
-
-    /// Clear the migration state (migration completed successfully).
-    pub fn end_migration(&mut self, data_dir: &str) -> io::Result<()> {
-        self.migration_state = None;
-        self.save(data_dir)
-    }
-
-    /// Check if there's a pending migration that needs to be resumed.
-    pub fn has_pending_migration(&self) -> bool {
-        self.migration_state.is_some()
-    }
-
-    /// Load from disk, or return `None` if the file doesn't exist.
+    /// Load metadata from disk, or return `None` if the file doesn't exist.
     pub fn load(data_dir: &str) -> io::Result<Option<Self>> {
-        let path = format!("{data_dir}/node_meta.json");
-        if !Path::new(&path).exists() {
+        let path = Path::new(data_dir).join("node_meta.json");
+        if !path.exists() {
+            debug!(path = %path.display(), "node_meta.json not found");
             return Ok(None);
         }
         let s = fs::read_to_string(&path)?;
         let meta: Self = serde_json::from_str(&s).map_err(|e| {
             io::Error::new(io::ErrorKind::InvalidData, format!("node_meta.json: {e}"))
         })?;
+        debug!(path = %path.display(), schema = meta.schema_version, protocol = meta.protocol_version, "loaded node_meta");
         Ok(Some(meta))
     }
 
-    /// Persist to disk (atomic write via tmp + rename).
-    pub fn save(&mut self, data_dir: &str) -> io::Result<()> {
-        self.updated_at = Some(now_iso8601());
-        let path = format!("{data_dir}/node_meta.json");
-        let tmp = format!("{path}.tmp");
-        let out = serde_json::to_string_pretty(self).map_err(|e| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("node_meta.json encode: {e}"),
-            )
-        })?;
-        fs::write(&tmp, &out)?;
-        fs::rename(&tmp, &path)?;
-        Ok(())
+    /// Load metadata, or create a fresh one if the file does not exist.
+    ///
+    /// The new file is **not** saved automatically; call `save()` if needed.
+    pub fn load_or_create(data_dir: &str) -> io::Result<Self> {
+        if let Some(meta) = Self::load(data_dir)? {
+            Ok(meta)
+        } else {
+            info!(data_dir, "node_meta.json not found, creating new");
+            Ok(Self::new_current())
+        }
+    }
+
+    /// Load metadata, create if missing, and save it immediately.
+    pub fn load_or_create_save(data_dir: &str) -> io::Result<Self> {
+        let mut meta = Self::load_or_create(data_dir)?;
+        if meta.updated_at.is_none() {
+            meta.save(data_dir)?;
+        }
+        Ok(meta)
+    }
+
+    /// Mark a migration as in-progress (for crash-safe resume).
+    pub fn begin_migration(&mut self, from_sv: u32, to_sv: u32, step: &str, data_dir: &str) -> io::Result<()> {
+        self.migration_state = Some(MigrationState {
+            from_sv,
+            to_sv,
+            step: step.to_string(),
+            started_at: now_iso8601(),
+        });
+        info!(from = from_sv, to = to_sv, step, "migration started");
+        self.save(data_dir)
+    }
+
+    /// Clear the migration state (migration completed successfully).
+    pub fn end_migration(&mut self, data_dir: &str) -> io::Result<()> {
+        self.migration_state = None;
+        info!("migration completed");
+        self.save(data_dir)
+    }
+
+    /// Check if there's a pending migration that needs to be resumed.
+    #[must_use]
+    pub fn has_pending_migration(&self) -> bool {
+        self.migration_state.is_some()
+    }
+
+    /// Get the pending migration state (if any).
+    #[must_use]
+    pub fn pending_migration(&self) -> Option<&MigrationState> {
+        self.migration_state.as_ref()
     }
 
     /// Check if the on-disk meta is compatible with this binary.
@@ -144,23 +180,56 @@ impl NodeMeta {
                 crate::protocol::version::SUPPORTED_PROTOCOL_VERSIONS,
             ));
         }
+        // Schema too old? Not an error; migrations will upgrade.
         Ok(())
+    }
+
+    /// Save metadata to disk (atomic write via tmp + rename).
+    pub fn save(&mut self, data_dir: &str) -> io::Result<()> {
+        self.updated_at = Some(now_iso8601());
+        let path = Path::new(data_dir).join("node_meta.json");
+        let tmp = path.with_extension("tmp");
+        let out = serde_json::to_string_pretty(self).map_err(|e| {
+            io::Error::new(io::ErrorKind::InvalidData, format!("node_meta.json encode: {e}"))
+        })?;
+        fs::write(&tmp, &out)?;
+        fs::rename(&tmp, &path)?;
+        debug!(path = %path.display(), "saved node_meta");
+        Ok(())
+    }
+
+    /// Update schema version and protocol version to current values and save.
+    pub fn update_to_current(&mut self, data_dir: &str) -> io::Result<()> {
+        self.schema_version = crate::storage::CURRENT_SCHEMA_VERSION;
+        self.protocol_version = crate::protocol::version::CURRENT_PROTOCOL_VERSION;
+        self.node_version = env!("CARGO_PKG_VERSION").to_string();
+        info!(schema = self.schema_version, protocol = self.protocol_version, "updating node_meta to current versions");
+        self.save(data_dir)
     }
 }
 
+// -----------------------------------------------------------------------------
+// Helper: timestamp
+// -----------------------------------------------------------------------------
+
+/// Return the current Unix timestamp as a string (seconds since epoch).
 fn now_iso8601() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
     let secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    // Simple ISO-like timestamp without pulling in chrono.
-    format!("{secs}")
+    secs.to_string()
 }
+
+// -----------------------------------------------------------------------------
+// Tests
+// -----------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::tempdir;
 
     #[test]
     fn test_new_current() {
@@ -171,11 +240,13 @@ mod tests {
             crate::protocol::version::CURRENT_PROTOCOL_VERSION
         );
         assert!(!meta.node_version.is_empty());
+        assert!(meta.updated_at.is_some());
+        assert!(!meta.has_pending_migration());
     }
 
     #[test]
     fn test_save_and_load() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempdir().unwrap();
         let data_dir = dir.path().to_str().unwrap();
         let mut meta = NodeMeta::new_current();
         meta.save(data_dir).unwrap();
@@ -184,6 +255,35 @@ mod tests {
         assert_eq!(loaded.schema_version, meta.schema_version);
         assert_eq!(loaded.protocol_version, meta.protocol_version);
         assert_eq!(loaded.node_version, meta.node_version);
+        assert!(loaded.updated_at.is_some());
+    }
+
+    #[test]
+    fn test_load_or_create() {
+        let dir = tempdir().unwrap();
+        let data_dir = dir.path().to_str().unwrap();
+
+        let meta = NodeMeta::load_or_create(data_dir).unwrap();
+        assert_eq!(meta.schema_version, crate::storage::CURRENT_SCHEMA_VERSION);
+        // File should not exist yet
+        let path = dir.path().join("node_meta.json");
+        assert!(!path.exists());
+
+        // Save and reload
+        let mut meta2 = meta;
+        meta2.save(data_dir).unwrap();
+        let loaded = NodeMeta::load(data_dir).unwrap().unwrap();
+        assert_eq!(loaded.schema_version, meta2.schema_version);
+    }
+
+    #[test]
+    fn test_load_or_create_save() {
+        let dir = tempdir().unwrap();
+        let data_dir = dir.path().to_str().unwrap();
+        let meta = NodeMeta::load_or_create_save(data_dir).unwrap();
+        let path = dir.path().join("node_meta.json");
+        assert!(path.exists());
+        assert_eq!(meta.schema_version, crate::storage::CURRENT_SCHEMA_VERSION);
     }
 
     #[test]
@@ -202,30 +302,79 @@ mod tests {
             migration_state: None,
         };
         assert!(meta.check_compatibility().is_err());
+        let err = meta.check_compatibility().unwrap_err();
+        assert!(err.contains("newer than this binary"));
+    }
+
+    #[test]
+    fn test_check_compatibility_protocol_too_new() {
+        let meta = NodeMeta {
+            schema_version: crate::storage::CURRENT_SCHEMA_VERSION,
+            protocol_version: 999,
+            node_version: "99.0.0".into(),
+            updated_at: None,
+            migration_state: None,
+        };
+        assert!(meta.check_compatibility().is_err());
+        let err = meta.check_compatibility().unwrap_err();
+        assert!(err.contains("not supported"));
     }
 
     #[test]
     fn test_migration_state_roundtrip() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempdir().unwrap();
         let data_dir = dir.path().to_str().unwrap();
         let mut meta = NodeMeta::new_current();
         assert!(!meta.has_pending_migration());
 
-        meta.begin_migration(3, 4, "adding node_meta.json", data_dir)
-            .unwrap();
+        meta.begin_migration(3, 4, "adding node_meta.json", data_dir).unwrap();
         assert!(meta.has_pending_migration());
+
+        let ms = meta.pending_migration().unwrap();
+        assert_eq!(ms.from_sv, 3);
+        assert_eq!(ms.to_sv, 4);
+        assert_eq!(ms.step, "adding node_meta.json");
 
         // Reload from disk and verify migration_state is persisted
         let loaded = NodeMeta::load(data_dir).unwrap().unwrap();
         assert!(loaded.has_pending_migration());
-        let ms = loaded.migration_state.unwrap();
-        assert_eq!(ms.from_sv, 3);
-        assert_eq!(ms.to_sv, 4);
+        let ms2 = loaded.pending_migration().unwrap();
+        assert_eq!(ms2.from_sv, 3);
+        assert_eq!(ms2.to_sv, 4);
 
         meta.end_migration(data_dir).unwrap();
         assert!(!meta.has_pending_migration());
 
         let loaded2 = NodeMeta::load(data_dir).unwrap().unwrap();
         assert!(!loaded2.has_pending_migration());
+    }
+
+    #[test]
+    fn test_update_to_current() {
+        let dir = tempdir().unwrap();
+        let data_dir = dir.path().to_str().unwrap();
+        let mut meta = NodeMeta {
+            schema_version: 1,
+            protocol_version: 1,
+            node_version: "old".into(),
+            updated_at: None,
+            migration_state: None,
+        };
+        meta.update_to_current(data_dir).unwrap();
+        assert_eq!(meta.schema_version, crate::storage::CURRENT_SCHEMA_VERSION);
+        assert_eq!(meta.protocol_version, crate::protocol::version::CURRENT_PROTOCOL_VERSION);
+        assert_eq!(meta.node_version, env!("CARGO_PKG_VERSION"));
+        assert!(meta.updated_at.is_some());
+    }
+
+    #[test]
+    fn test_atomic_write() {
+        let dir = tempdir().unwrap();
+        let data_dir = dir.path().to_str().unwrap();
+        let mut meta = NodeMeta::new_current();
+        meta.save(data_dir).unwrap();
+        let path = dir.path().join("node_meta.json");
+        let tmp = path.with_extension("tmp");
+        assert!(!tmp.exists());
     }
 }
