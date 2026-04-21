@@ -1,23 +1,41 @@
 //! Per-peer scoring, quota enforcement, and quarantine for P2P hardening.
 //!
-//! Security invariants enforced:
+//! This module implements a reputation system for peers in the P2P network.
+//! It enforces:
 //! - Per-peer message rate (msgs/sec) with token bucket
 //! - Per-peer bandwidth (bytes/sec) with token bucket
 //! - Per-peer max pending (in-flight) validation slots
 //! - Score-based quarantine and ban with configurable thresholds
 //! - Score decay: old bad behavior is forgiven over time
 //! - Structured violation reasons for audit logging
+//!
+//! # Example
+//!
+//! ```
+//! use iona::net::peer_score::{PeerScore, ViolationReason};
+//! use std::time::Duration;
+//!
+//! let mut score = PeerScore::with_defaults();
+//! if score.check_msg_quota("peer1") {
+//!     // process message
+//! } else {
+//!     score.penalise("peer1", ViolationReason::MsgRateExceeded);
+//! }
+//! ```
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
+use tracing::{debug, info, warn};
 
-// ── Per-peer hard quotas ───────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
+// Constants (configurable defaults)
+// -----------------------------------------------------------------------------
 
 /// Max messages per second accepted from a single peer.
 pub const PEER_MAX_MSGS_PER_SEC: f64 = 60.0;
 
-/// Max bytes per second accepted from a single peer.
-pub const PEER_MAX_BYTES_PER_SEC: f64 = 4_194_304.0; // 4 MB/s
+/// Max bytes per second accepted from a single peer (4 MiB/s).
+pub const PEER_MAX_BYTES_PER_SEC: f64 = 4_194_304.0;
 
 /// Max simultaneously in-flight validations queued for a single peer.
 pub const PEER_MAX_PENDING_VALIDATIONS: usize = 32;
@@ -32,8 +50,11 @@ pub const BAN_THRESHOLD: i64 = -200;
 const DECAY_FACTOR: i64 = 9;
 const DECAY_DIVISOR: i64 = 10;
 
-// ── Violation reasons (for structured audit log) ──────────────────────────
+// -----------------------------------------------------------------------------
+// Violation reasons
+// -----------------------------------------------------------------------------
 
+/// Reason for penalising a peer, with a default penalty magnitude.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ViolationReason {
     /// Peer sent a message with a bad signature.
@@ -58,6 +79,7 @@ pub enum ViolationReason {
 
 impl ViolationReason {
     /// Default penalty magnitude for this violation.
+    #[must_use]
     pub fn default_penalty(self) -> i64 {
         match self {
             Self::BadSignature => 20,
@@ -73,13 +95,16 @@ impl ViolationReason {
     }
 }
 
-// ── Per-peer bandwidth token bucket ─────────────────────────────────────
+// -----------------------------------------------------------------------------
+// Token bucket (rate limiter)
+// -----------------------------------------------------------------------------
 
+/// Token bucket for rate limiting (messages or bytes).
 #[derive(Debug)]
 struct RateBucket {
     tokens: f64,
     max: f64,
-    rate: f64, // tokens (msgs or bytes) per second
+    rate: f64, // tokens per second
     last: Instant,
 }
 
@@ -93,7 +118,7 @@ impl RateBucket {
         }
     }
 
-    /// Try to consume `n` tokens. Returns `false` if the quota is exceeded.
+    /// Try to consume `n` tokens. Returns `false` if quota exceeded.
     fn try_consume(&mut self, n: f64) -> bool {
         let now = Instant::now();
         let elapsed = now.duration_since(self.last).as_secs_f64();
@@ -108,7 +133,9 @@ impl RateBucket {
     }
 }
 
-// ── Per-peer state ────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
+// Per-peer state
+// -----------------------------------------------------------------------------
 
 #[derive(Debug)]
 struct PeerEntry {
@@ -117,7 +144,6 @@ struct PeerEntry {
     byte_bucket: RateBucket,
     pending_validations: usize,
     last_active: Instant,
-    /// Running violation count (for metrics).
     total_violations: u64,
 }
 
@@ -134,11 +160,13 @@ impl PeerEntry {
     }
 }
 
-// ── Public PeerScore ──────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
+// PeerScore (public API)
+// -----------------------------------------------------------------------------
 
 /// Per-peer scoring and quota enforcement.
 ///
-/// Call `note_bad` / `note_good` from the swarm event loop.
+/// Call `penalise` / `reward` from the swarm event loop.
 /// Call `check_msg_quota` before enqueuing a message for validation.
 /// Call `decay` periodically (e.g., every 10 seconds).
 #[derive(Debug)]
@@ -151,6 +179,8 @@ pub struct PeerScore {
 }
 
 impl PeerScore {
+    /// Create a new peer scorer with custom ban threshold and decay interval.
+    #[must_use]
     pub fn new(ban_threshold: i64, decay_every: Duration) -> Self {
         Self {
             peers: HashMap::new(),
@@ -161,11 +191,15 @@ impl PeerScore {
         }
     }
 
+    /// Create a peer scorer with default thresholds and decay interval.
+    #[must_use]
     pub fn with_defaults() -> Self {
         Self::new(BAN_THRESHOLD.unsigned_abs() as i64, Duration::from_secs(10))
     }
 
-    // ── Quota checks (call BEFORE expensive validation) ───────────────────
+    // -------------------------------------------------------------------------
+    // Quota checks (call BEFORE expensive validation)
+    // -------------------------------------------------------------------------
 
     /// Check if the peer is allowed to send another message (msg/s quota).
     /// Returns `true` if allowed, `false` if quota exceeded.
@@ -176,13 +210,14 @@ impl PeerScore {
             .or_insert_with(PeerEntry::new);
         entry.last_active = Instant::now();
         if entry.score <= self.ban_threshold {
+            debug!(peer, score = entry.score, "peer banned, rejecting");
             return false;
         }
         let allowed = entry.msg_bucket.try_consume(1.0);
         if !allowed {
             entry.score -= ViolationReason::MsgRateExceeded.default_penalty();
             entry.total_violations += 1;
-            tracing::warn!(
+            warn!(
                 peer = %peer,
                 score = entry.score,
                 "p2p::score: msg rate exceeded"
@@ -199,13 +234,14 @@ impl PeerScore {
             .or_insert_with(PeerEntry::new);
         entry.last_active = Instant::now();
         if entry.score <= self.ban_threshold {
+            debug!(peer, score = entry.score, "peer banned, rejecting");
             return false;
         }
         let allowed = entry.byte_bucket.try_consume(bytes as f64);
         if !allowed {
             entry.score -= ViolationReason::ByteRateExceeded.default_penalty();
             entry.total_violations += 1;
-            tracing::warn!(
+            warn!(
                 peer = %peer,
                 bytes,
                 score = entry.score,
@@ -216,7 +252,7 @@ impl PeerScore {
     }
 
     /// Acquire a pending-validation slot. Returns `false` if the peer is at
-    /// PEER_MAX_PENDING_VALIDATIONS. The caller must call `release_validation`
+    /// `PEER_MAX_PENDING_VALIDATIONS`. The caller must call `release_validation`
     /// when validation completes (success or failure).
     pub fn acquire_validation_slot(&mut self, peer: &str) -> bool {
         let entry = self
@@ -224,7 +260,7 @@ impl PeerScore {
             .entry(peer.to_string())
             .or_insert_with(PeerEntry::new);
         if entry.pending_validations >= PEER_MAX_PENDING_VALIDATIONS {
-            tracing::warn!(
+            warn!(
                 peer = %peer,
                 pending = entry.pending_validations,
                 "p2p::score: max pending validations reached"
@@ -239,12 +275,15 @@ impl PeerScore {
     pub fn release_validation_slot(&mut self, peer: &str) {
         if let Some(entry) = self.peers.get_mut(peer) {
             entry.pending_validations = entry.pending_validations.saturating_sub(1);
+            debug!(peer, pending = entry.pending_validations, "validation slot released");
         }
     }
 
-    // ── Score mutation ────────────────────────────────────────────────────
+    // -------------------------------------------------------------------------
+    // Score mutation
+    // -------------------------------------------------------------------------
 
-    /// Penalise a peer for a specific violation.
+    /// Penalise a peer for a specific violation (using default penalty).
     pub fn penalise(&mut self, peer: &str, reason: ViolationReason) {
         self.penalise_with(peer, reason, reason.default_penalty());
     }
@@ -257,7 +296,7 @@ impl PeerScore {
             .or_insert_with(PeerEntry::new);
         entry.score -= penalty.abs();
         entry.total_violations += 1;
-        tracing::warn!(
+        warn!(
             peer = %peer,
             score = entry.score,
             penalty,
@@ -274,24 +313,35 @@ impl PeerScore {
             .or_insert_with(PeerEntry::new);
         // Cap score at 0 to prevent score farming.
         entry.score = (entry.score + amount.abs()).min(0);
+        debug!(peer, score = entry.score, amount, "p2p::score: peer rewarded");
     }
 
-    // ── Legacy helpers (backward compat) ──────────────────────────────────
+    // -------------------------------------------------------------------------
+    // Legacy helpers (backward compat)
+    // -------------------------------------------------------------------------
 
+    /// Legacy method: note a bad behaviour with a custom penalty.
     pub fn note_bad(&mut self, peer: impl Into<String>, penalty: i64) {
         self.penalise_with(&peer.into(), ViolationReason::Custom, penalty);
     }
 
+    /// Legacy method: note good behaviour with a reward.
     pub fn note_good(&mut self, peer: impl Into<String>, reward: i64) {
         self.reward(&peer.into(), reward);
     }
 
-    // ── Status queries ────────────────────────────────────────────────────
+    // -------------------------------------------------------------------------
+    // Status queries
+    // -------------------------------------------------------------------------
 
+    /// Get the current score of a peer.
+    #[must_use]
     pub fn score(&self, peer: &str) -> i64 {
         self.peers.get(peer).map(|e| e.score).unwrap_or(0)
     }
 
+    /// Check if a peer should be permanently banned.
+    #[must_use]
     pub fn should_ban(&self, peer: &str) -> bool {
         self.peers
             .get(peer)
@@ -299,6 +349,8 @@ impl PeerScore {
             .unwrap_or(false)
     }
 
+    /// Check if a peer should be quarantined (temporary isolation).
+    #[must_use]
     pub fn should_quarantine(&self, peer: &str) -> bool {
         self.peers
             .get(peer)
@@ -306,6 +358,8 @@ impl PeerScore {
             .unwrap_or(false)
     }
 
+    /// Check if a peer is blocked (quarantined or banned).
+    #[must_use]
     pub fn is_blocked(&self, peer: &str) -> bool {
         self.peers
             .get(peer)
@@ -313,6 +367,8 @@ impl PeerScore {
             .unwrap_or(false)
     }
 
+    /// Number of pending validation slots currently used by a peer.
+    #[must_use]
     pub fn pending_validations(&self, peer: &str) -> usize {
         self.peers
             .get(peer)
@@ -320,8 +376,18 @@ impl PeerScore {
             .unwrap_or(0)
     }
 
-    // ── Snapshot for metrics ──────────────────────────────────────────────
+    /// Get the total number of tracked peers.
+    #[must_use]
+    pub fn total_peers(&self) -> usize {
+        self.peers.len()
+    }
 
+    // -------------------------------------------------------------------------
+    // Snapshot for metrics
+    // -------------------------------------------------------------------------
+
+    /// Capture a snapshot of current peer scores for metrics export.
+    #[must_use]
     pub fn snapshot(&self) -> PeerScoreSnapshot {
         let quarantined = self
             .peers
@@ -342,31 +408,46 @@ impl PeerScore {
         }
     }
 
-    // ── Score decay (call periodically) ─────────────────────────────────
+    // -------------------------------------------------------------------------
+    // Score decay (call periodically)
+    // -------------------------------------------------------------------------
 
+    /// Apply score decay to all peers (move scores toward zero).
+    /// Should be called regularly (e.g., every 10 seconds).
     pub fn decay(&mut self) {
         if self.last_decay.elapsed() < self.decay_every {
             return;
         }
         self.last_decay = Instant::now();
+        let mut decayed = 0;
         for entry in self.peers.values_mut() {
-            // Decay score toward 0 (negative scores improve, positive scores stay at 0).
             if entry.score < 0 {
+                let old = entry.score;
                 entry.score = (entry.score * DECAY_FACTOR) / DECAY_DIVISOR;
+                if entry.score != old {
+                    decayed += 1;
+                }
             }
-            // Decay bucket tokens toward max (refill them).
-            // (Already handled by elapsed time in try_consume.)
         }
 
         // Evict very old inactive peers (10 min idle, not banned).
         let cutoff = Duration::from_secs(600);
-        self.peers.retain(|_, e| {
-            e.score <= self.ban_threshold // keep banned peers
-                || e.last_active.elapsed() < cutoff
-        });
+        let removed = self
+            .peers
+            .extract_if(|_, e| e.score > self.ban_threshold && e.last_active.elapsed() > cutoff)
+            .count();
+
+        if decayed > 0 || removed > 0 {
+            debug!(decayed, removed, "peer score decay applied");
+        }
     }
 }
 
+// -----------------------------------------------------------------------------
+// Snapshot structure
+// -----------------------------------------------------------------------------
+
+/// Snapshot of peer score statistics (for metrics).
 #[derive(Debug, Clone)]
 pub struct PeerScoreSnapshot {
     pub quarantined: usize,
@@ -375,7 +456,9 @@ pub struct PeerScoreSnapshot {
     pub total_violations: u64,
 }
 
-// ── Tests ─────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
+// Tests
+// -----------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
@@ -384,7 +467,6 @@ mod tests {
     #[test]
     fn test_msg_rate_quota_allows_burst() {
         let mut ps = PeerScore::with_defaults();
-        // Should allow up to PEER_MAX_MSGS_PER_SEC consecutive msgs.
         for _ in 0..(PEER_MAX_MSGS_PER_SEC as usize) {
             assert!(ps.check_msg_quota("peer1"), "expected allowed");
         }
@@ -396,14 +478,12 @@ mod tests {
         for _ in 0..(PEER_MAX_MSGS_PER_SEC as usize) {
             ps.check_msg_quota("peer1");
         }
-        // One more should fail.
         assert!(!ps.check_msg_quota("peer1"), "expected rate-limited");
     }
 
     #[test]
     fn test_byte_quota_rejects_large_message() {
         let mut ps = PeerScore::with_defaults();
-        // A message larger than the total per-second budget should fail.
         let too_big = PEER_MAX_BYTES_PER_SEC as usize + 1;
         assert!(!ps.check_byte_quota("peer1", too_big));
     }
@@ -414,9 +494,7 @@ mod tests {
         for _ in 0..PEER_MAX_PENDING_VALIDATIONS {
             assert!(ps.acquire_validation_slot("peer1"));
         }
-        // Next slot should fail.
         assert!(!ps.acquire_validation_slot("peer1"));
-        // After releasing one, it should work again.
         ps.release_validation_slot("peer1");
         assert!(ps.acquire_validation_slot("peer1"));
     }
@@ -424,14 +502,12 @@ mod tests {
     #[test]
     fn test_ban_threshold_blocks_all_traffic() {
         let mut ps = PeerScore::with_defaults();
-        // Force the peer to BAN_THRESHOLD.
         ps.penalise_with(
             "peer1",
             ViolationReason::InvalidBlock,
             BAN_THRESHOLD.unsigned_abs() as i64 + 10,
         );
         assert!(ps.should_ban("peer1"));
-        // All quota checks must fail for a banned peer.
         assert!(!ps.check_msg_quota("peer1"));
         assert!(!ps.check_byte_quota("peer1", 1));
     }
@@ -456,7 +532,6 @@ mod tests {
         let mut ps = PeerScore::new(200, Duration::from_millis(1));
         ps.penalise_with("peer1", ViolationReason::Custom, 100);
         let before = ps.score("peer1");
-        // Force decay by sleeping past decay_every.
         std::thread::sleep(Duration::from_millis(2));
         ps.decay();
         let after = ps.score("peer1");
@@ -469,12 +544,10 @@ mod tests {
     #[test]
     fn test_different_peers_are_independent() {
         let mut ps = PeerScore::with_defaults();
-        // Exhaust peer1's msg quota.
         for _ in 0..(PEER_MAX_MSGS_PER_SEC as usize) {
             ps.check_msg_quota("peer1");
         }
         assert!(!ps.check_msg_quota("peer1"));
-        // peer2 must be unaffected.
         assert!(ps.check_msg_quota("peer2"));
     }
 
@@ -487,5 +560,15 @@ mod tests {
         assert_eq!(snap.banned, 1);
         assert_eq!(snap.quarantined, 1);
         assert_eq!(snap.total_peers, 2);
+    }
+
+    #[test]
+    fn test_total_peers() {
+        let mut ps = PeerScore::with_defaults();
+        assert_eq!(ps.total_peers(), 0);
+        ps.check_msg_quota("peer1");
+        assert_eq!(ps.total_peers(), 1);
+        ps.check_msg_quota("peer2");
+        assert_eq!(ps.total_peers(), 2);
     }
 }
