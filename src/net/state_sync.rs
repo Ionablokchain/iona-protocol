@@ -1,12 +1,32 @@
 //! P2P state sync (snapshot download) client.
 //!
-//! Mega++ improvements:
+//! This module implements a client for downloading state snapshots and delta updates
+//! from peers in the P2P network. It is used when a node's local state is missing
+//! or outdated.
+//!
+//! # Features
+//!
 //! - Peer selection uses *height* first, then measured manifest RTT (latency) and a small throughput probe.
 //! - Incremental verification: each *full* manifest chunk is verified against per-chunk hashes.
 //! - Resume supports partial chunks: if a download is interrupted mid-chunk, we request only the missing tail,
 //!   then verify the assembled full chunk (no boundary-only truncation).
 //! - Multi-peer fallback: on timeouts/mismatches, switch to the next best peer; retries can re-request partial
 //!   tails or whole chunks without discarding previously verified data.
+//! - Delta sync: if local snapshots exist, the client attempts to download delta updates instead of a full snapshot.
+//!
+//! # Example
+//!
+//! ```rust,ignore
+//! use iona::net::state_sync::try_p2p_restore_state;
+//!
+//! let restored = try_p2p_restore_state(
+//!     "./data/node",
+//!     "./data/node/state_full.json",
+//!     vec![multiaddr1, multiaddr2],
+//!     30,
+//!     1024 * 1024,
+//! ).await?;
+//! ```
 
 use crate::net::p2p::{
     proto_state, Codec, DeltaChunkRequest, DeltaChunkResponse, DeltaManifestRequest,
@@ -25,14 +45,25 @@ use libp2p::{
     swarm::{NetworkBehaviour, SwarmEvent},
     tcp, yamux, Multiaddr, PeerId, Swarm, Transport,
 };
-use std::{collections::BTreeMap, io, path::Path, time::Duration};
+use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::io;
+use std::path::Path;
+use std::time::Duration;
 use tokio::time::timeout;
 use tracing::{debug, info, warn};
+
+// -----------------------------------------------------------------------------
+// Network behaviour
+// -----------------------------------------------------------------------------
 
 #[derive(NetworkBehaviour)]
 struct Behaviour {
     rr: RequestResponse<Codec>,
 }
+
+// -----------------------------------------------------------------------------
+// Candidate peer for snapshot download
+// -----------------------------------------------------------------------------
 
 #[derive(Debug, Clone)]
 struct Candidate {
@@ -42,25 +73,9 @@ struct Candidate {
     throughput_bps: u64,
 }
 
-fn chunk_index(offset: u64, chunk_size: u32) -> usize {
-    (offset / chunk_size as u64) as usize
-}
-
-fn verify_full_chunk_hash(mani: &StateManifestResponse, chunk_start: u64, data: &[u8]) -> bool {
-    let idx = chunk_index(chunk_start, mani.chunk_size);
-    if idx >= mani.chunk_hashes.len() {
-        return false;
-    }
-    if data.len() != mani.chunk_size as usize
-        && (chunk_start + data.len() as u64) < mani.total_bytes
-    {
-        // We only verify full-sized chunks (except possibly the last partial chunk at EOF).
-        return false;
-    }
-    let got = blake3::hash(data);
-    let got_hex = hex::encode(got.as_bytes());
-    mani.chunk_hashes[idx] == got_hex
-}
+// -----------------------------------------------------------------------------
+// Resume information for interrupted downloads
+// -----------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Copy)]
 struct ResumeInfo {
@@ -70,8 +85,47 @@ struct ResumeInfo {
     partial_len: u64,
 }
 
-/// Verify existing full chunks from disk; keep a partial tail (if present) for partial re-request.
-fn resume_info(tmp_path: &str, mani: &StateManifestResponse) -> anyhow::Result<ResumeInfo> {
+// -----------------------------------------------------------------------------
+// Helper functions
+// -----------------------------------------------------------------------------
+
+/// Compute the chunk index for a given offset.
+#[must_use]
+fn chunk_index(offset: u64, chunk_size: u32) -> usize {
+    (offset / chunk_size as u64) as usize
+}
+
+/// Verify that a full chunk matches the expected hash from the manifest.
+#[must_use]
+fn verify_full_chunk_hash(manifest: &StateManifestResponse, chunk_start: u64, data: &[u8]) -> bool {
+    let idx = chunk_index(chunk_start, manifest.chunk_size);
+    if idx >= manifest.chunk_hashes.len() {
+        return false;
+    }
+    if data.len() != manifest.chunk_size as usize
+        && (chunk_start + data.len() as u64) < manifest.total_bytes
+    {
+        // We only verify full-sized chunks (except possibly the last partial chunk at EOF).
+        return false;
+    }
+    let got = blake3::hash(data);
+    let got_hex = hex::encode(got.as_bytes());
+    manifest.chunk_hashes[idx] == got_hex
+}
+
+/// Verify that a delta chunk matches the expected hash.
+#[must_use]
+fn verify_delta_chunk_hash(delta_manifest: &DeltaManifestResponse, offset: u64, data: &[u8]) -> bool {
+    let idx = (offset / delta_manifest.chunk_size as u64) as usize;
+    if idx >= delta_manifest.chunk_hashes.len() {
+        return false;
+    }
+    let got = blake3::hash(data);
+    delta_manifest.chunk_hashes[idx] == hex::encode(got.as_bytes())
+}
+
+/// Resume information for a partially downloaded snapshot file.
+fn resume_info(tmp_path: &str, manifest: &StateManifestResponse) -> anyhow::Result<ResumeInfo> {
     if !Path::new(tmp_path).exists() {
         return Ok(ResumeInfo {
             chunk_start: 0,
@@ -87,7 +141,7 @@ fn resume_info(tmp_path: &str, mani: &StateManifestResponse) -> anyhow::Result<R
         });
     }
 
-    let cs = mani.chunk_size as u64;
+    let cs = manifest.chunk_size as u64;
     let full = (len / cs) * cs;
     let partial = len - full;
 
@@ -95,12 +149,12 @@ fn resume_info(tmp_path: &str, mani: &StateManifestResponse) -> anyhow::Result<R
     use std::io::{Read, Seek, SeekFrom};
     let mut f = std::fs::File::open(tmp_path)?;
     let mut off = 0u64;
-    let mut buf = vec![0u8; mani.chunk_size as usize];
+    let mut buf = vec![0u8; manifest.chunk_size as usize];
 
     while off < full {
         f.seek(SeekFrom::Start(off))?;
         f.read_exact(&mut buf)?;
-        if !verify_full_chunk_hash(mani, off, &buf) {
+        if !verify_full_chunk_hash(manifest, off, &buf) {
             warn!(
                 offset = off,
                 "statesync: resume verification failed; truncating to last valid boundary"
@@ -124,14 +178,99 @@ fn resume_info(tmp_path: &str, mani: &StateManifestResponse) -> anyhow::Result<R
     })
 }
 
-async fn wait_for_chunk_response(
+/// Find a path of delta edges from `from` to `to` using BFS.
+fn find_delta_path(edges: &[(u64, u64)], from: u64, to: u64) -> Option<Vec<(u64, u64)>> {
+    if from == to {
+        return Some(vec![]);
+    }
+    let mut adj: HashMap<u64, Vec<u64>> = HashMap::new();
+    for (a, b) in edges {
+        adj.entry(*a).or_default().push(*b);
+    }
+    let mut queue = VecDeque::new();
+    let mut prev: HashMap<u64, u64> = HashMap::new();
+    queue.push_back(from);
+    prev.insert(from, from);
+
+    while let Some(x) = queue.pop_front() {
+        let Some(neighbors) = adj.get(&x) else {
+            continue;
+        };
+        for &n in neighbors {
+            if prev.contains_key(&n) {
+                continue;
+            }
+            prev.insert(n, x);
+            if n == to {
+                break;
+            }
+            queue.push_back(n);
+        }
+        if prev.contains_key(&to) {
+            break;
+        }
+    }
+    if !prev.contains_key(&to) {
+        return None;
+    }
+    // reconstruct heights
+    let mut heights = vec![to];
+    let mut cur = to;
+    while cur != from {
+        let p = *prev.get(&cur).unwrap();
+        heights.push(p);
+        cur = p;
+    }
+    heights.reverse();
+    // edges
+    let mut path = vec![];
+    for w in heights.windows(2) {
+        path.push((w[0], w[1]));
+    }
+    Some(path)
+}
+
+// -----------------------------------------------------------------------------
+// Low‑level response waiters
+// -----------------------------------------------------------------------------
+
+async fn wait_for_state_manifest_response(
+    swarm: &mut Swarm<Behaviour>,
+    peer: PeerId,
+    timeout_s: u64,
+) -> Option<StateManifestResponse> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout_s.max(3));
+    while tokio::time::Instant::now() < deadline {
+        let ev = timeout(Duration::from_millis(250), swarm.select_next_some()).await;
+        let Ok(ev) = ev else {
+            continue;
+        };
+        if let SwarmEvent::Behaviour(BehaviourEvent::Rr(RequestResponseEvent::Message {
+            peer: p,
+            message,
+        })) = ev
+        {
+            if p != peer {
+                continue;
+            }
+            if let RequestResponseMessage::Response { response, .. } = message {
+                if let Resp::State(StateResp::Manifest(m)) = response {
+                    return Some(m);
+                }
+            }
+        }
+    }
+    None
+}
+
+async fn wait_for_state_chunk_response(
     swarm: &mut Swarm<Behaviour>,
     peer: PeerId,
     expected_offset: u64,
     timeout_s: u64,
 ) -> Option<StateChunkResponse> {
-    let chunk_deadline = tokio::time::Instant::now() + Duration::from_secs(timeout_s.max(3));
-    while tokio::time::Instant::now() < chunk_deadline {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout_s.max(3));
+    while tokio::time::Instant::now() < deadline {
         let ev = timeout(Duration::from_millis(250), swarm.select_next_some()).await;
         let Ok(ev) = ev else {
             continue;
@@ -149,6 +288,35 @@ async fn wait_for_chunk_response(
                     if c.offset == expected_offset {
                         return Some(c);
                     }
+                }
+            }
+        }
+    }
+    None
+}
+
+async fn wait_for_state_index_response(
+    swarm: &mut Swarm<Behaviour>,
+    peer: PeerId,
+    timeout_s: u64,
+) -> Option<StateIndexResponse> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout_s.max(3));
+    while tokio::time::Instant::now() < deadline {
+        let ev = timeout(Duration::from_millis(250), swarm.select_next_some()).await;
+        let Ok(ev) = ev else {
+            continue;
+        };
+        if let SwarmEvent::Behaviour(BehaviourEvent::Rr(RequestResponseEvent::Message {
+            peer: p,
+            message,
+        })) = ev
+        {
+            if p != peer {
+                continue;
+            }
+            if let RequestResponseMessage::Response { response, .. } = message {
+                if let Resp::State(StateResp::Index(ix)) = response {
+                    return Some(ix);
                 }
             }
         }
@@ -217,95 +385,9 @@ async fn wait_for_delta_chunk_response(
     None
 }
 
-async fn wait_for_state_index_response(
-    swarm: &mut Swarm<Behaviour>,
-    peer: PeerId,
-    timeout_s: u64,
-) -> Option<StateIndexResponse> {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout_s.max(3));
-    while tokio::time::Instant::now() < deadline {
-        let ev = timeout(Duration::from_millis(250), swarm.select_next_some()).await;
-        let Ok(ev) = ev else {
-            continue;
-        };
-        if let SwarmEvent::Behaviour(BehaviourEvent::Rr(RequestResponseEvent::Message {
-            peer: p,
-            message,
-        })) = ev
-        {
-            if p != peer {
-                continue;
-            }
-            if let RequestResponseMessage::Response { response, .. } = message {
-                if let Resp::State(StateResp::Index(ix)) = response {
-                    return Some(ix);
-                }
-            }
-        }
-    }
-    None
-}
-
-fn find_delta_path(edges: &[(u64, u64)], from: u64, to: u64) -> Option<Vec<(u64, u64)>> {
-    use std::collections::{HashMap, VecDeque};
-    if from == to {
-        return Some(vec![]);
-    }
-    let mut adj: HashMap<u64, Vec<u64>> = HashMap::new();
-    for (a, b) in edges {
-        adj.entry(*a).or_default().push(*b);
-    }
-    let mut q = VecDeque::new();
-    let mut prev: HashMap<u64, u64> = HashMap::new();
-    q.push_back(from);
-    prev.insert(from, from);
-
-    while let Some(x) = q.pop_front() {
-        let Some(ns) = adj.get(&x) else {
-            continue;
-        };
-        for n in ns {
-            if prev.contains_key(n) {
-                continue;
-            }
-            prev.insert(*n, x);
-            if *n == to {
-                break;
-            }
-            q.push_back(*n);
-        }
-        if prev.contains_key(&to) {
-            break;
-        }
-    }
-    if !prev.contains_key(&to) {
-        return None;
-    }
-    // reconstruct heights
-    let mut hs = vec![to];
-    let mut cur = to;
-    while cur != from {
-        let p = *prev.get(&cur).unwrap();
-        hs.push(p);
-        cur = p;
-    }
-    hs.reverse();
-    // edges
-    let mut out = vec![];
-    for w in hs.windows(2) {
-        out.push((w[0], w[1]));
-    }
-    Some(out)
-}
-
-fn verify_delta_chunk_hash(dm: &DeltaManifestResponse, offset: u64, data: &[u8]) -> bool {
-    let idx = (offset / dm.chunk_size as u64) as usize;
-    if idx >= dm.chunk_hashes.len() {
-        return false;
-    }
-    let got = blake3::hash(data);
-    dm.chunk_hashes[idx] == hex::encode(got.as_bytes())
-}
+// -----------------------------------------------------------------------------
+// Throughput probe
+// -----------------------------------------------------------------------------
 
 /// Small throughput probe (best-effort) used for peer ordering.
 /// We request a small prefix slice and measure wall-time.
@@ -323,16 +405,29 @@ async fn probe_throughput_bps(
         len: probe_len,
     }));
     swarm.behaviour_mut().rr.send_request(&peer, req);
-    let Some(c) = wait_for_chunk_response(swarm, peer, 0, timeout_s).await else {
+    let Some(chunk) = wait_for_state_chunk_response(swarm, peer, 0, timeout_s).await else {
         return 0;
     };
     let ms = start.elapsed().as_millis().max(1) as u64;
     // bytes per second, coarse
-    (c.data.len() as u64) * 1000 / ms
+    (chunk.data.len() as u64) * 1000 / ms
 }
 
+// -----------------------------------------------------------------------------
+// Public API
+// -----------------------------------------------------------------------------
+
 /// Try to download the latest snapshot via P2P and materialize `state_full.json`.
-/// Returns Ok(true) if the state was restored.
+///
+/// Returns `Ok(true)` if the state was restored, `Ok(false)` if no snapshot was found
+/// or no suitable peer, and `Err` on network or I/O errors.
+///
+/// # Arguments
+/// * `data_dir` – Node data directory (where snapshots are stored).
+/// * `state_full_path` – Path to the `state_full.json` file.
+/// * `peers` – List of peer multiaddresses to try.
+/// * `timeout_s` – Timeout in seconds for requests.
+/// * `chunk_bytes` – Maximum chunk size in bytes (used for fallback; manifest chunk size is preferred).
 pub async fn try_p2p_restore_state(
     data_dir: &str,
     state_full_path: &str,
@@ -341,11 +436,15 @@ pub async fn try_p2p_restore_state(
     chunk_bytes: usize,
 ) -> anyhow::Result<bool> {
     if Path::new(state_full_path).exists() {
+        debug!("state_full.json already exists, skipping restore");
         return Ok(false);
     }
     if peers.is_empty() {
+        debug!("no peers provided for state sync");
         return Ok(false);
     }
+
+    info!(peer_count = peers.len(), "starting P2P state sync");
 
     let local_key = libp2p::identity::Keypair::generate_ed25519();
     let peer_id = PeerId::from(local_key.public());
@@ -374,8 +473,8 @@ pub async fn try_p2p_restore_state(
     );
 
     let _ = swarm.listen_on("/ip4/0.0.0.0/tcp/0".parse()?);
-    for a in peers.iter().cloned() {
-        let _ = swarm.dial(a);
+    for addr in peers.iter().cloned() {
+        let _ = swarm.dial(addr);
     }
 
     // Phase 1: collect manifests + RTT
@@ -384,10 +483,7 @@ pub async fn try_p2p_restore_state(
 
     let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout_s.max(3) * 2);
 
-    loop {
-        if tokio::time::Instant::now() > deadline {
-            break;
-        }
+    while tokio::time::Instant::now() < deadline {
         let ev = timeout(Duration::from_millis(250), swarm.select_next_some()).await;
         let Ok(ev) = ev else {
             continue;
@@ -395,7 +491,7 @@ pub async fn try_p2p_restore_state(
 
         match ev {
             SwarmEvent::ConnectionEstablished { peer_id, .. } => {
-                debug!(%peer_id, "statesync connected");
+                debug!(%peer_id, "statesync: connection established");
                 let req = Req::State(StateReq::Manifest(StateManifestRequest {}));
                 inflight_manifest.insert(peer_id, tokio::time::Instant::now());
                 swarm.behaviour_mut().rr.send_request(&peer_id, req);
@@ -421,6 +517,8 @@ pub async fn try_p2p_restore_state(
                                 rtt_ms,
                                 throughput_bps: 0,
                             });
+                        } else {
+                            debug!(%peer, "statesync: invalid manifest, ignoring");
                         }
                     }
                 }
@@ -429,11 +527,13 @@ pub async fn try_p2p_restore_state(
         }
 
         if candidates.len() >= 6 {
+            debug!("statesync: collected enough candidates, stopping discovery");
             break;
         }
     }
 
     if candidates.is_empty() {
+        warn!("statesync: no valid snapshot manifests found");
         return Ok(false);
     }
 
@@ -451,12 +551,12 @@ pub async fn try_p2p_restore_state(
         .collect();
 
     // Throughput probe (best-effort) on a few best RTT peers.
-    // Probe length is capped and does not need to match manifest chunk size.
     let probe_len: u32 = 262_144; // 256 KiB
     for c in best.iter_mut().take(3) {
         let tp =
             probe_throughput_bps(&mut swarm, c.peer, c.mani.height, probe_len, timeout_s).await;
         c.throughput_bps = tp;
+        debug!(%c.peer, throughput = tp, "statesync: throughput probe");
     }
 
     // Final ordering: throughput desc, then RTT asc (height is equal here).
@@ -466,24 +566,24 @@ pub async fn try_p2p_restore_state(
             .then_with(|| a.rtt_ms.cmp(&b.rtt_ms))
     });
 
-    let mani = best[0].mani.clone();
+    let manifest = best[0].mani.clone();
 
     let snap_dir = snapshots::snapshots_dir(data_dir);
     std::fs::create_dir_all(&snap_dir)?;
 
     // --- Delta sync fast-path (delta chains) ---
     if let Ok(Some(local_h)) = snapshots::latest_snapshot_height(data_dir) {
-        if local_h > 0 && local_h < mani.height {
+        if local_h > 0 && local_h < manifest.height {
             info!(
                 from = local_h,
-                to = mani.height,
+                to = manifest.height,
                 "statesync: attempting delta-chain sync"
             );
 
             // Collect state indexes from a few best peers.
             let mut all_edges: Vec<(u64, u64)> = vec![];
             let mut edge_peers: std::collections::HashMap<(u64, u64), Vec<PeerId>> =
-                std::collections::HashMap::new();
+                HashMap::new();
 
             for c in best.iter().take(6) {
                 let peer = c.peer;
@@ -502,15 +602,15 @@ pub async fn try_p2p_restore_state(
             all_edges.sort_unstable();
             all_edges.dedup();
 
-            if let Some(path) = find_delta_path(&all_edges, local_h, mani.height) {
+            if let Some(path) = find_delta_path(&all_edges, local_h, manifest.height) {
                 info!(hops = path.len(), "statesync: found delta path");
                 // Load base snapshot state.
                 let mut state = snapshots::read_snapshot_state(data_dir, local_h)?;
 
+                let mut ok = true;
                 for (from_h, to_h) in path {
                     // Choose a peer for this edge: prefer highest throughput, then lowest RTT.
-                    let peers_for_edge =
-                        edge_peers.get(&(from_h, to_h)).cloned().unwrap_or_default();
+                    let peers_for_edge = edge_peers.get(&(from_h, to_h)).cloned().unwrap_or_default();
                     let mut chosen: Option<PeerId> = None;
                     let mut chosen_score: (u64, u64) = (0, u64::MAX); // (throughput, rtt)
                     for p in peers_for_edge {
@@ -533,7 +633,7 @@ pub async fn try_p2p_restore_state(
                             to = to_h,
                             "statesync: no peer for delta edge; falling back"
                         );
-                        chosen = None;
+                        ok = false;
                         break;
                     };
 
@@ -553,7 +653,7 @@ pub async fn try_p2p_restore_state(
                             to = to_h,
                             "statesync: delta manifest timeout; falling back"
                         );
-                        chosen = None;
+                        ok = false;
                         break;
                     };
                     if dm.total_bytes == 0 || dm.chunk_hashes.is_empty() {
@@ -562,7 +662,7 @@ pub async fn try_p2p_restore_state(
                             to = to_h,
                             "statesync: invalid delta manifest; falling back"
                         );
-                        chosen = None;
+                        ok = false;
                         break;
                     }
 
@@ -585,7 +685,7 @@ pub async fn try_p2p_restore_state(
                                 len,
                             })),
                         );
-                        let Some(c) =
+                        let Some(chunk) =
                             wait_for_delta_chunk_response(&mut swarm, peer, off, timeout_s).await
                         else {
                             warn!(
@@ -594,36 +694,36 @@ pub async fn try_p2p_restore_state(
                                 offset = off,
                                 "statesync: delta chunk timeout; falling back"
                             );
-                            chosen = None;
+                            ok = false;
                             break;
                         };
-                        if !verify_delta_chunk_hash(&dm, off, &c.data) {
+                        if !verify_delta_chunk_hash(&dm, off, &chunk.data) {
                             warn!(
                                 from = from_h,
                                 to = to_h,
                                 offset = off,
                                 "statesync: delta chunk hash mismatch; falling back"
                             );
-                            chosen = None;
+                            ok = false;
                             break;
                         }
                         use std::io::Write;
-                        f.write_all(&c.data)?;
-                        off = off.saturating_add(c.data.len() as u64);
-                        if c.done {
+                        f.write_all(&chunk.data)?;
+                        off = off.saturating_add(chunk.data.len() as u64);
+                        if chunk.done {
                             break;
                         }
                     }
-                    if chosen.is_none() {
+                    if !ok {
                         break;
                     }
 
                     let bytes = std::fs::read(&tmp_delta)?;
                     let json = zstd::decode_all(&bytes[..])
                         .map_err(|e| anyhow::anyhow!("delta decode: {e}"))?;
-                    let d: snapshots::StateDelta = serde_json::from_slice(&json)
+                    let delta: snapshots::StateDelta = serde_json::from_slice(&json)
                         .map_err(|e| anyhow::anyhow!("delta json: {e}"))?;
-                    state = snapshots::apply_delta(&state, &d);
+                    state = snapshots::apply_delta(&state, &delta);
                     let got_root = hex::encode(state.root().0);
                     if got_root != dm.to_state_root_hex {
                         warn!(
@@ -631,60 +731,65 @@ pub async fn try_p2p_restore_state(
                             to = to_h,
                             "statesync: delta root mismatch; falling back"
                         );
-                        chosen = None;
+                        ok = false;
                         break;
                     }
                 }
 
                 // If we successfully applied the chain, persist state_full.
-                let ok_root = match &mani.state_root_hex {
-                    Some(r) => hex::encode(state.root().0) == *r,
-                    None => true,
-                };
-                if ok_root {
-                    let json = serde_json::to_vec(&state)?;
-                    std::fs::write(state_full_path, json)?;
-                    info!(
-                        height = mani.height,
-                        "statesync: delta-chain sync completed"
-                    );
-                    return Ok(true);
+                if ok {
+                    let root_ok = match &manifest.state_root_hex {
+                        Some(r) => hex::encode(state.root().0) == *r,
+                        None => true,
+                    };
+                    if root_ok {
+                        let json = serde_json::to_vec(&state)?;
+                        std::fs::write(state_full_path, json)?;
+                        info!(
+                            height = manifest.height,
+                            "statesync: delta-chain sync completed"
+                        );
+                        return Ok(true);
+                    } else {
+                        warn!(
+                            expected = ?manifest.state_root_hex,
+                            "statesync: final state root mismatch after delta chain"
+                        );
+                    }
                 }
             } else {
                 warn!(
                     from = local_h,
-                    to = mani.height,
+                    to = manifest.height,
                     "statesync: no delta path; falling back to full snapshot"
                 );
             }
         }
     }
 
-    // We always request in manifest-sized "full chunk" steps for hashing, except when resuming a partial chunk tail.
-    let req_chunk = (mani.chunk_size as usize).min(chunk_bytes.max(1));
-    if req_chunk != mani.chunk_size as usize {
+    // Full snapshot download (fallback or no local snapshot)
+    let req_chunk = (manifest.chunk_size as usize).min(chunk_bytes.max(1));
+    if req_chunk != manifest.chunk_size as usize {
         warn!(
-            manifest_chunk = mani.chunk_size,
+            manifest_chunk = manifest.chunk_size,
             local_chunk = chunk_bytes as u32,
             "statesync: local chunk_bytes differs; using manifest chunk_size for correctness"
         );
     }
 
-    // snap_dir already ensured above.
-    let tmp_path = format!("{}/statesync_{}.zst", snap_dir, mani.height);
+    let tmp_path = format!("{}/statesync_{}.zst", snap_dir, manifest.height);
 
     // Resume info (verify full chunks; keep partial tail)
-    let mut resume = resume_info(&tmp_path, &mani)?;
+    let mut resume = resume_info(&tmp_path, &manifest)?;
     info!(
-        height = mani.height,
-        bytes = mani.total_bytes,
+        height = manifest.height,
+        bytes = manifest.total_bytes,
         chunk_start = resume.chunk_start,
         partial_len = resume.partial_len,
         peers = best.len(),
-        "statesync: starting download (resume enabled)"
+        "statesync: starting full snapshot download"
     );
 
-    // Open file for random write (supports overwrite on mismatch).
     use std::io::{Read, Seek, SeekFrom, Write};
     let mut f = std::fs::OpenOptions::new()
         .create(true)
@@ -692,18 +797,17 @@ pub async fn try_p2p_restore_state(
         .write(true)
         .open(&tmp_path)?;
 
-    // Ensure file length matches resume state (don't extend unexpectedly).
+    // Ensure file length matches resume state
     let cur_len = std::fs::metadata(&tmp_path)?.len();
     if cur_len < resume.chunk_start + resume.partial_len {
-        // Strange, clamp to existing.
         resume = ResumeInfo {
-            chunk_start: (cur_len / mani.chunk_size as u64) * mani.chunk_size as u64,
-            partial_len: cur_len % mani.chunk_size as u64,
+            chunk_start: (cur_len / manifest.chunk_size as u64) * manifest.chunk_size as u64,
+            partial_len: cur_len % manifest.chunk_size as u64,
         };
     }
 
-    let total = mani.total_bytes;
-    let cs = mani.chunk_size as u64;
+    let total = manifest.total_bytes;
+    let cs = manifest.chunk_size as u64;
 
     // If we have a partial tail, complete it first by requesting only the missing bytes.
     let mut offset = resume.chunk_start;
@@ -714,46 +818,40 @@ pub async fn try_p2p_restore_state(
 
         'tail: loop {
             if peer_idx >= best.len() {
-                warn!(
-                    offset = tail_off,
-                    "statesync: no peers left to complete partial tail"
-                );
+                warn!(offset = tail_off, "statesync: no peers left to complete partial tail");
                 return Ok(false);
             }
             let peer = best[peer_idx].peer;
             let req = Req::State(StateReq::Chunk(StateChunkRequest {
-                height: mani.height,
+                height: manifest.height,
                 offset: tail_off,
                 len: missing as u32,
             }));
             swarm.behaviour_mut().rr.send_request(&peer, req);
 
-            let Some(chunk) = wait_for_chunk_response(&mut swarm, peer, tail_off, timeout_s).await
+            let Some(chunk) =
+                wait_for_state_chunk_response(&mut swarm, peer, tail_off, timeout_s).await
             else {
-                warn!(peer=%peer, offset=tail_off, "statesync: tail timeout; switching peer");
+                warn!(%peer, offset = tail_off, "statesync: tail timeout; switching peer");
                 peer_idx += 1;
                 continue;
             };
 
-            // Write tail at tail_off.
             f.seek(SeekFrom::Start(tail_off))?;
             f.write_all(&chunk.data)?;
             f.flush()?;
 
             // Verify assembled full chunk (read from disk).
             if (tail_off + chunk.data.len() as u64) >= (offset + cs).min(total) {
-                // read the whole chunk (or last-partial at EOF) and verify
                 let want_len = ((total - offset).min(cs)) as usize;
                 let mut buf = vec![0u8; want_len];
                 f.seek(SeekFrom::Start(offset))?;
                 f.read_exact(&mut buf)?;
-                if want_len == mani.chunk_size as usize || (offset + want_len as u64) == total {
-                    // If it is a full chunk, verify against chunk hash list.
-                    if want_len == mani.chunk_size as usize
-                        && !verify_full_chunk_hash(&mani, offset, &buf)
+                if want_len == manifest.chunk_size as usize || (offset + want_len as u64) == total {
+                    if want_len == manifest.chunk_size as usize
+                        && !verify_full_chunk_hash(&manifest, offset, &buf)
                     {
-                        warn!(peer=%peer, chunk_start=offset, "statesync: assembled chunk hash mismatch; re-requesting whole chunk");
-                        // Re-request the whole chunk and overwrite.
+                        warn!(%peer, chunk_start = offset, "statesync: assembled chunk hash mismatch; re-requesting whole chunk");
                         peer_idx += 1;
                         continue 'tail;
                     }
@@ -767,7 +865,7 @@ pub async fn try_p2p_restore_state(
     }
 
     // Download remaining full chunks.
-    let mut peer_idx: usize = 0;
+    let mut peer_idx = 0;
     while offset < total {
         if peer_idx >= best.len() {
             warn!(offset, "statesync: no peers left to try");
@@ -777,34 +875,31 @@ pub async fn try_p2p_restore_state(
 
         let len = (total - offset).min(cs) as u32;
         let req = Req::State(StateReq::Chunk(StateChunkRequest {
-            height: mani.height,
+            height: manifest.height,
             offset,
             len,
         }));
         swarm.behaviour_mut().rr.send_request(&peer, req);
 
-        let Some(chunk) = wait_for_chunk_response(&mut swarm, peer, offset, timeout_s).await else {
-            warn!(peer=%peer, offset, "statesync: chunk timeout; switching peer");
+        let Some(chunk) = wait_for_state_chunk_response(&mut swarm, peer, offset, timeout_s).await
+        else {
+            warn!(%peer, offset, "statesync: chunk timeout; switching peer");
             peer_idx += 1;
             continue;
         };
 
-        // Verify full chunk hash (except last partial at EOF).
-        if (len as u64) == cs && !verify_full_chunk_hash(&mani, offset, &chunk.data) {
-            warn!(peer=%peer, offset, "statesync: chunk hash mismatch; switching peer");
+        if (len as u64) == cs && !verify_full_chunk_hash(&manifest, offset, &chunk.data) {
+            warn!(%peer, offset, "statesync: chunk hash mismatch; switching peer");
             peer_idx += 1;
             continue;
         }
 
-        // Write at exact offset (supports overwrite if needed).
         f.seek(SeekFrom::Start(offset))?;
         f.write_all(&chunk.data)?;
         f.flush()?;
 
         offset += chunk.data.len() as u64;
-
-        // Prefer best peer after success.
-        peer_idx = 0;
+        peer_idx = 0; // reset to best peer on success
 
         if chunk.done {
             break;
@@ -815,10 +910,14 @@ pub async fn try_p2p_restore_state(
 
     // Final file hash verify.
     let bytes = std::fs::read(&tmp_path)?;
-    let h = blake3::hash(&bytes);
-    let hexh = hex::encode(h.as_bytes());
-    if !mani.blake3_hex.is_empty() && mani.blake3_hex != hexh {
-        warn!(expected = %mani.blake3_hex, got = %hexh, "statesync: final file hash mismatch");
+    let final_hash = blake3::hash(&bytes);
+    let final_hash_hex = hex::encode(final_hash.as_bytes());
+    if !manifest.blake3_hex.is_empty() && manifest.blake3_hex != final_hash_hex {
+        warn!(
+            expected = %manifest.blake3_hex,
+            got = %final_hash_hex,
+            "statesync: final file hash mismatch"
+        );
         return Ok(false);
     }
 
@@ -828,7 +927,7 @@ pub async fn try_p2p_restore_state(
     std::fs::write(state_full_path, json)?;
 
     info!(
-        height = mani.height,
+        height = manifest.height,
         "statesync: state_full.json restored via P2P snapshot"
     );
     Ok(true)
