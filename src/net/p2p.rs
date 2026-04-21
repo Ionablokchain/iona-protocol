@@ -1,11 +1,30 @@
-//! Production P2P networking for IONA v21.
+//! Production P2P networking for IONA v28.
 //!
-//! Changes vs v20:
-//! - Static peer dialing: --peers /ip4/1.2.3.4/tcp/7001 (works on internet, not just LAN mDNS)
-//! - Gossipsub heartbeat reduced to 100ms for sub-second block propagation
-//! - Peer reconnect: disconnected static peers are redialed every 30s
-//! - Max message size increased to 16 MiB (for large blocks)
-//! - Peer banning: peers with score < -50 are disconnected
+//! This module implements the libp2p-based peer-to-peer networking stack,
+//! including:
+//! - Gossipsub for consensus message broadcasting
+//! - Request‑response protocols for blocks, status, ranges, and state sync
+//! - Peer scoring, rate limiting, quarantine, and banning
+//! - Eclipse attack protection via diversity buckets
+//! - Static peer dialing and reconnection
+//! - Kademlia DHT for peer discovery (optional)
+//! - mDNS for local network discovery (optional)
+//!
+//! # Example
+//!
+//! ```rust,ignore
+//! use iona::net::p2p::{P2p, P2pConfig};
+//!
+//! let config = P2pConfig::default();
+//! let mut p2p = P2p::new(config)?;
+//! p2p.dial_static_peers();
+//! while let Some(event) = p2p.next_event().await {
+//!     match event {
+//!         P2pEvent::Consensus { from, msg, .. } => { /* handle consensus message */ }
+//!         // ...
+//!     }
+//! }
+//! ```
 
 use crate::consensus::ConsensusMsg;
 use crate::types::{Block, Hash32, Height};
@@ -36,78 +55,99 @@ use std::{
     io,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
-// ── Protocol definitions ──────────────────────────────────────────────────
-// libp2p request_response uses StreamProtocol (no ProtocolName trait in newer versions).
+// -----------------------------------------------------------------------------
+// Protocol definitions
+// -----------------------------------------------------------------------------
+
+/// Block request/response protocol name.
+#[must_use]
 pub fn proto_block() -> StreamProtocol {
     StreamProtocol::new("/iona/block/1.0.0")
 }
+
+/// Node status protocol name.
+#[must_use]
 pub fn proto_status() -> StreamProtocol {
     StreamProtocol::new("/iona/status/1.0.0")
 }
+
+/// Block range protocol name.
+#[must_use]
 pub fn proto_range() -> StreamProtocol {
     StreamProtocol::new("/iona/blockrange/1.0.0")
 }
+
+/// State sync protocol name.
+#[must_use]
 pub fn proto_state() -> StreamProtocol {
     StreamProtocol::new("/iona/state/1.0.0")
 }
 
-// ── Message types ─────────────────────────────────────────────────────────
-// -------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
+// Message types
+// -----------------------------------------------------------------------------
 
+/// Request for a single block by hash.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct BlockRequest {
     pub id: Hash32,
 }
+
+/// Response containing a block (or `None` if not found).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct BlockResponse {
     pub block: Option<Block>,
 }
 
+/// Request for node status.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct StatusRequest {}
+
+/// Node status response.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct StatusResponse {
     pub best_height: Height,
     pub best_block_id: Option<Hash32>,
 }
 
+/// Request for a range of blocks.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct RangeRequest {
     pub from: Height,
     pub to: Height,
 }
+
+/// Response containing a list of blocks.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct RangeResponse {
     pub blocks: Vec<Block>,
 }
 
-// --- State sync (snapshot transfer) ---
+// -----------------------------------------------------------------------------
+// State sync message types
+// -----------------------------------------------------------------------------
 
+/// Request the latest snapshot manifest.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct StateManifestRequest {}
 
+/// Snapshot manifest response.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct StateManifestResponse {
-    /// Latest snapshot height (0 if none)
     pub height: u64,
-    /// Total bytes of the compressed snapshot file
     pub total_bytes: u64,
-    /// blake3 hash hex of the compressed file
     pub blake3_hex: String,
-    /// Chunk size used to compute chunk_hashes (bytes)
     pub chunk_size: u32,
-    /// blake3 hash hex per chunk (chunk i covers [i*chunk_size, (i+1)*chunk_size))
     pub chunk_hashes: Vec<String>,
-
     #[serde(default)]
     pub state_root_hex: Option<String>,
-
     #[serde(default)]
     pub attestation: Option<SnapshotAttestation>,
 }
 
+/// Snapshot attestation (validator signatures).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SnapshotAttestation {
     pub validators_hash_hex: String,
@@ -115,20 +155,21 @@ pub struct SnapshotAttestation {
     pub signatures: Vec<AttestationSig>,
 }
 
+/// Attestation signature.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct AttestationSig {
     pub pubkey_hex: String,
     pub sig_base64: String,
 }
 
-// --- Delta sync (snapshot-to-snapshot diffs) ---
-
+/// Request a delta manifest.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct DeltaManifestRequest {
     pub from_height: u64,
     pub to_height: u64,
 }
 
+/// Delta manifest response.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct DeltaManifestResponse {
     pub from_height: u64,
@@ -140,6 +181,7 @@ pub struct DeltaManifestResponse {
     pub to_state_root_hex: String,
 }
 
+/// Request a delta chunk.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct DeltaChunkRequest {
     pub from_height: u64,
@@ -148,6 +190,7 @@ pub struct DeltaChunkRequest {
     pub len: u32,
 }
 
+/// Delta chunk response.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct DeltaChunkResponse {
     pub offset: u64,
@@ -155,33 +198,34 @@ pub struct DeltaChunkResponse {
     pub done: bool,
 }
 
+/// Request state index (available snapshots and delta edges).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct StateIndexRequest {}
 
+/// State index response.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct StateIndexResponse {
-    /// Snapshot heights available on the peer.
     pub snapshot_heights: Vec<u64>,
-    /// Directed delta edges (from_height -> to_height) available on the peer.
     pub delta_edges: Vec<(u64, u64)>,
 }
 
+/// Request a snapshot attestation.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SnapshotAttestRequest {
     pub height: u64,
     pub state_root_hex: String,
 }
 
+/// Snapshot attestation response.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SnapshotAttestResponse {
     pub height: u64,
     pub state_root_hex: String,
-    /// Hex-encoded ed25519 public key bytes (verifying key).
     pub pubkey_hex: String,
-    /// Base64 signature over canonical bytes: b"iona:snapshot_attest:v1" || height(le) || state_root(32).
     pub sig_b64: String,
 }
 
+/// Request a snapshot chunk.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct StateChunkRequest {
     pub height: u64,
@@ -189,6 +233,7 @@ pub struct StateChunkRequest {
     pub len: u32,
 }
 
+/// Snapshot chunk response.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct StateChunkResponse {
     pub offset: u64,
@@ -196,10 +241,15 @@ pub struct StateChunkResponse {
     pub done: bool,
 }
 
+// -----------------------------------------------------------------------------
+// Enums for request/response
+// -----------------------------------------------------------------------------
+
 /// Maximum blocks served or accepted in a single range response.
 /// Prevents OOM from malicious peers sending enormous responses.
 pub const MAX_RANGE_BLOCKS: u64 = 200;
 
+/// State sync request variants.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum StateReq {
     Index(StateIndexRequest),
@@ -210,6 +260,7 @@ pub enum StateReq {
     Attest(SnapshotAttestRequest),
 }
 
+/// State sync response variants.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum StateResp {
     Index(StateIndexResponse),
@@ -220,6 +271,7 @@ pub enum StateResp {
     Attest(SnapshotAttestResponse),
 }
 
+/// Top‑level request enum.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum Req {
     Block(BlockRequest),
@@ -228,6 +280,7 @@ pub enum Req {
     State(StateReq),
 }
 
+/// Top‑level response enum.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum Resp {
     Block(BlockResponse),
@@ -235,6 +288,10 @@ pub enum Resp {
     Range(RangeResponse),
     State(StateResp),
 }
+
+// -----------------------------------------------------------------------------
+// Internal protocol kind
+// -----------------------------------------------------------------------------
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
 enum ProtoKind {
@@ -254,6 +311,10 @@ impl ProtoKind {
         }
     }
 }
+
+// -----------------------------------------------------------------------------
+// Abuse tracking structures
+// -----------------------------------------------------------------------------
 
 #[derive(Debug, Clone)]
 struct AbuseState {
@@ -297,16 +358,22 @@ impl GsWindow {
     }
 }
 
+// -----------------------------------------------------------------------------
+// Quarantine persistence
+// -----------------------------------------------------------------------------
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct QuarantineFile {
-    // peer_id (base58) -> unix_seconds_until
-    peers: BTreeMap<String, u64>,
+    peers: BTreeMap<String, u64>, // peer_id (base58) -> unix_seconds_until
 }
 
-// ── Codec ─────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
+// Codec
+// -----------------------------------------------------------------------------
 
 const MAX_MSG_SIZE: usize = 16 * 1024 * 1024; // 16 MiB
 
+/// Request‑response codec using bincode serialization.
 #[derive(Clone)]
 pub struct Codec;
 
@@ -376,7 +443,9 @@ impl RequestResponseCodec for Codec {
     }
 }
 
-// ── Network behaviour ─────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
+// Network behaviour
+// -----------------------------------------------------------------------------
 
 #[derive(NetworkBehaviour)]
 pub struct Behaviour {
@@ -387,8 +456,113 @@ pub struct Behaviour {
     pub rr: RequestResponse<Codec>,
 }
 
-// ── P2p ──────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
+// P2p configuration
+// -----------------------------------------------------------------------------
 
+/// Configuration for the P2P stack.
+#[derive(Debug, Clone)]
+pub struct P2pConfig {
+    pub local_key: libp2p::identity::Keypair,
+    pub listen: Multiaddr,
+    pub static_peers: Vec<Multiaddr>,
+    pub bootnodes: Vec<Multiaddr>,
+    pub enable_mdns: bool,
+    pub enable_kad: bool,
+    pub reconnect_s: u64,
+    pub max_connections_total: usize,
+    pub max_connections_per_peer: usize,
+    // Per‑protocol rate limits (req/sec)
+    pub rr_max_req_per_sec_block: u32,
+    pub rr_max_req_per_sec_status: u32,
+    pub rr_max_req_per_sec_range: u32,
+    pub rr_max_req_per_sec_state: u32,
+    // Per‑protocol inbound bandwidth caps (bytes/sec)
+    pub rr_max_bytes_per_sec_block: u32,
+    pub rr_max_bytes_per_sec_status: u32,
+    pub rr_max_bytes_per_sec_range: u32,
+    pub rr_max_bytes_per_sec_state: u32,
+    // Global inbound/outbound caps for RR (bytes/sec)
+    pub rr_global_in_bytes_per_sec: u32,
+    pub rr_global_out_bytes_per_sec: u32,
+    // Abuse handling
+    pub peer_strike_decay_s: u64,
+    pub peer_score_decay_s: u64,
+    pub peer_quarantine_s: u64,
+    pub rr_strikes_before_quarantine: u32,
+    pub rr_strikes_before_ban: u32,
+    pub rr_quarantines_before_ban: u32,
+    // Gossipsub caps
+    pub gs_max_publish_msgs_per_sec: u32,
+    pub gs_max_publish_bytes_per_sec: u32,
+    pub gs_max_in_msgs_per_sec: u32,
+    pub gs_max_in_bytes_per_sec: u32,
+    // Gossipsub ACL + per‑topic overrides
+    pub gs_allowed_topics: Vec<String>,
+    pub gs_deny_unknown_topics: bool,
+    pub gs_topic_limits: Vec<(String, u32, u32)>,
+    // Diversity / eclipse resistance
+    pub diversity_bucket_kind: String,
+    pub max_inbound_per_bucket: usize,
+    pub max_outbound_per_bucket: usize,
+    pub eclipse_detection_min_buckets: usize,
+    pub reseed_cooldown_s: u64,
+    // Quarantine persistence
+    pub quarantine_path: PathBuf,
+    pub persist_quarantine: bool,
+}
+
+impl Default for P2pConfig {
+    fn default() -> Self {
+        Self {
+            local_key: libp2p::identity::Keypair::generate_ed25519(),
+            listen: "/ip4/0.0.0.0/tcp/0".parse().unwrap(),
+            static_peers: vec![],
+            bootnodes: vec![],
+            enable_mdns: false,
+            enable_kad: true,
+            reconnect_s: 30,
+            max_connections_total: 200,
+            max_connections_per_peer: 8,
+            rr_max_req_per_sec_block: 15,
+            rr_max_req_per_sec_status: 30,
+            rr_max_req_per_sec_range: 5,
+            rr_max_req_per_sec_state: 10,
+            rr_max_bytes_per_sec_block: 2_000_000,
+            rr_max_bytes_per_sec_status: 200_000,
+            rr_max_bytes_per_sec_range: 4_000_000,
+            rr_max_bytes_per_sec_state: 8_000_000,
+            rr_global_in_bytes_per_sec: 10_000_000,
+            rr_global_out_bytes_per_sec: 10_000_000,
+            peer_strike_decay_s: 30,
+            peer_score_decay_s: 60,
+            peer_quarantine_s: 60,
+            rr_strikes_before_quarantine: 2,
+            rr_strikes_before_ban: 3,
+            rr_quarantines_before_ban: 2,
+            gs_max_publish_msgs_per_sec: 50,
+            gs_max_publish_bytes_per_sec: 5_242_880,
+            gs_max_in_msgs_per_sec: 100,
+            gs_max_in_bytes_per_sec: 10_485_760,
+            gs_allowed_topics: vec!["iona/tx".into(), "iona/blocks".into(), "iona/evidence".into()],
+            gs_deny_unknown_topics: true,
+            gs_topic_limits: vec![],
+            diversity_bucket_kind: "ip16".into(),
+            max_inbound_per_bucket: 4,
+            max_outbound_per_bucket: 4,
+            eclipse_detection_min_buckets: 3,
+            reseed_cooldown_s: 60,
+            quarantine_path: PathBuf::from("./data/quarantine.json"),
+            persist_quarantine: true,
+        }
+    }
+}
+
+// -----------------------------------------------------------------------------
+// P2p main struct
+// -----------------------------------------------------------------------------
+
+/// Main P2P networking handle.
 pub struct P2p {
     swarm: Swarm<Behaviour>,
     topic: IdentTopic,
@@ -397,14 +571,13 @@ pub struct P2p {
     quarantine_path: PathBuf,
     persist_quarantine: bool,
     last_score_decay: std::time::Instant,
-    static_peers: Vec<Multiaddr>, // addresses to always maintain connections to
+    static_peers: Vec<Multiaddr>,
     bootnodes: Vec<Multiaddr>,
     banned_peers: HashSet<PeerId>,
     max_connections_total: usize,
     max_connections_per_peer: usize,
     connections_total: usize,
     connections_per_peer: BTreeMap<PeerId, usize>,
-    // Diversity / eclipse resistance
     diversity_bucket_kind: String,
     max_inbound_per_bucket: usize,
     max_outbound_per_bucket: usize,
@@ -439,72 +612,21 @@ pub struct P2p {
     gs_allowed_topics: HashSet<String>,
     gs_deny_unknown_topics: bool,
     gs_topic_limits: BTreeMap<String, (u32, u32)>,
-    rr_global_window: (std::time::Instant, u32, u32), // (window_start, in_bytes, out_bytes)
+    rr_global_window: (std::time::Instant, u32, u32),
 }
 
-pub struct P2pConfig {
-    pub local_key: libp2p::identity::Keypair,
-    pub listen: Multiaddr,
-    /// Static peer addresses (format: /ip4/1.2.3.4/tcp/7001)
-    pub static_peers: Vec<Multiaddr>,
-    /// Bootstrap peers (may include /p2p/<peerid> for DHT)
-    pub bootnodes: Vec<Multiaddr>,
-    pub enable_mdns: bool,
-    pub enable_kad: bool,
-    pub reconnect_s: u64,
-    pub max_connections_total: usize,
-    pub max_connections_per_peer: usize,
-    // Per-protocol rate limits (req/sec)
-    pub rr_max_req_per_sec_block: u32,
-    pub rr_max_req_per_sec_status: u32,
-    pub rr_max_req_per_sec_range: u32,
-    pub rr_max_req_per_sec_state: u32,
-    // Per-protocol inbound bandwidth caps (bytes/sec)
-    pub rr_max_bytes_per_sec_block: u32,
-    pub rr_max_bytes_per_sec_status: u32,
-    pub rr_max_bytes_per_sec_range: u32,
-    pub rr_max_bytes_per_sec_state: u32,
-    // Global inbound/outbound caps for RR (bytes/sec)
-    pub rr_global_in_bytes_per_sec: u32,
-    pub rr_global_out_bytes_per_sec: u32,
-    // Abuse handling
-    pub peer_strike_decay_s: u64,
-    pub peer_score_decay_s: u64,
-    pub peer_quarantine_s: u64,
-    pub rr_strikes_before_quarantine: u32,
-    pub rr_strikes_before_ban: u32,
-    pub rr_quarantines_before_ban: u32,
-    // Gossipsub caps
-    pub gs_max_publish_msgs_per_sec: u32,
-    pub gs_max_publish_bytes_per_sec: u32,
-    pub gs_max_in_msgs_per_sec: u32,
-    pub gs_max_in_bytes_per_sec: u32,
-    // Gossipsub ACL + per-topic overrides
-    pub gs_allowed_topics: Vec<String>,
-    pub gs_deny_unknown_topics: bool,
-    /// Optional per-topic inbound caps (topic -> (msgs/sec, bytes/sec))
-    pub gs_topic_limits: Vec<(String, u32, u32)>,
-    // Diversity / eclipse resistance
-    pub diversity_bucket_kind: String,
-    pub max_inbound_per_bucket: usize,
-    pub max_outbound_per_bucket: usize,
-    pub eclipse_detection_min_buckets: usize,
-    pub reseed_cooldown_s: u64,
-    // Quarantine persistence
-    pub quarantine_path: PathBuf,
-    pub persist_quarantine: bool,
-}
+// -----------------------------------------------------------------------------
+// Helper: seed Kademlia and dial
+// -----------------------------------------------------------------------------
 
 /// If `addr` contains a trailing `/p2p/<peerid>`, seed that peer + base address into Kademlia.
 /// Always attempts to dial the full address.
 fn seed_kad_and_dial(swarm: &mut Swarm<Behaviour>, addr: Multiaddr) {
-    // Extract optional peer id from the last /p2p component.
     let mut peer_opt: Option<PeerId> = None;
     let mut base_addr = addr.clone();
 
     if let Some(Protocol::P2p(pid)) = addr.iter().last() {
         peer_opt = Some(pid);
-        // Strip /p2p so we can add the transport address to the routing table.
         let mut a2 = Multiaddr::empty();
         for proto in addr.iter() {
             if let Protocol::P2p(_) = proto {
@@ -516,16 +638,60 @@ fn seed_kad_and_dial(swarm: &mut Swarm<Behaviour>, addr: Multiaddr) {
     }
 
     if let Some(pid) = peer_opt {
-        if let Some(k) = swarm.behaviour_mut().kad.as_mut() {
-            k.add_address(&pid, base_addr);
-            let _ = k.bootstrap();
+        if let Some(kad) = swarm.behaviour_mut().kad.as_mut() {
+            kad.add_address(&pid, base_addr);
+            let _ = kad.bootstrap();
         }
     }
 
     let _ = swarm.dial(addr);
 }
 
+// -----------------------------------------------------------------------------
+// Helper: bucket from multiaddress
+// -----------------------------------------------------------------------------
+
+/// Extract a diversity bucket string from a multiaddress based on the bucket kind.
+#[must_use]
+fn bucket_from_multiaddr(addr: &Multiaddr, kind: &str) -> Option<String> {
+    let mut ip4: Option<[u8; 4]> = None;
+    let mut ip6: Option<[u8; 16]> = None;
+    for p in addr.iter() {
+        match p {
+            Protocol::Ip4(v4) => {
+                ip4 = Some(v4.octets());
+                break;
+            }
+            Protocol::Ip6(v6) => {
+                ip6 = Some(v6.octets());
+                break;
+            }
+            _ => {}
+        }
+    }
+    match (kind, ip4, ip6) {
+        ("ip24", Some(o), _) => Some(format!("ip4:{}.{}.{}", o[0], o[1], o[2])),
+        ("ip16", Some(o), _) => Some(format!("ip4:{}.{}", o[0], o[1])),
+        ("ip16", None, Some(o)) => Some(format!(
+            "ip6:{:02x}{:02x}{:02x}{:02x}",
+            o[0], o[1], o[2], o[3]
+        )),
+        ("ip24", None, Some(o)) => Some(format!(
+            "ip6:{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+            o[0], o[1], o[2], o[3], o[4], o[5]
+        )),
+        ("asn", Some(o), _) => Some(format!("asn_scaffold:{}.{}", o[0], o[1])),
+        ("asn", None, Some(o)) => Some(format!("asn_scaffold:{:02x}{:02x}", o[0], o[1])),
+        _ => None,
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Implementation of P2p
+// -----------------------------------------------------------------------------
+
 impl P2p {
+    /// Current Unix timestamp in seconds.
     fn now_unix() -> u64 {
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -533,6 +699,7 @@ impl P2p {
             .as_secs()
     }
 
+    /// Load quarantine list from disk.
     fn load_quarantine(path: &PathBuf) -> BTreeMap<PeerId, std::time::Instant> {
         let now_i = std::time::Instant::now();
         let now_u = Self::now_unix();
@@ -557,6 +724,7 @@ impl P2p {
         out
     }
 
+    /// Persist the quarantine list to disk.
     fn persist_quarantine_file(&self) {
         if !self.persist_quarantine {
             return;
@@ -567,7 +735,6 @@ impl P2p {
         let now_u = Self::now_unix();
         let mut peers = BTreeMap::new();
         for (pid, until_i) in self.peer_quarantine.iter() {
-            // convert Instant to unix seconds approximately
             let rem = until_i
                 .saturating_duration_since(std::time::Instant::now())
                 .as_secs();
@@ -582,6 +749,7 @@ impl P2p {
         }
     }
 
+    /// Quarantine a peer for a given number of seconds.
     fn quarantine_peer(&mut self, peer: PeerId, secs: u64, reason: &str) {
         let until = std::time::Instant::now() + Duration::from_secs(secs.max(1));
         self.peer_quarantine.insert(peer, until);
@@ -590,6 +758,7 @@ impl P2p {
         let _ = self.swarm.disconnect_peer_id(peer);
     }
 
+    /// Check if a peer is currently quarantined.
     fn is_quarantined(&mut self, peer: PeerId) -> bool {
         if let Some(until) = self.peer_quarantine.get(&peer).cloned() {
             if std::time::Instant::now() < until {
@@ -602,6 +771,7 @@ impl P2p {
         false
     }
 
+    /// Decay peer scores periodically.
     fn maybe_decay_peer_scores(&mut self) {
         if self.peer_score_decay_s == 0 {
             return;
@@ -611,8 +781,7 @@ impl P2p {
         if now.duration_since(self.last_score_decay) < every {
             return;
         }
-        let mut steps =
-            now.duration_since(self.last_score_decay).as_secs() / every.as_secs().max(1);
+        let mut steps = now.duration_since(self.last_score_decay).as_secs() / every.as_secs().max(1);
         if steps == 0 {
             steps = 1;
         }
@@ -628,6 +797,7 @@ impl P2p {
         }
     }
 
+    /// Check inbound Gossipsub message quota.
     fn gs_allow_inbound(
         &mut self,
         peer: PeerId,
@@ -645,13 +815,13 @@ impl P2p {
         st.msg_count = st.msg_count.saturating_add(1);
         st.byte_count = st.byte_count.saturating_add(bytes);
 
-        if (max_msgs > 0 && st.msg_count > max_msgs) || (max_bytes > 0 && st.byte_count > max_bytes)
-        {
+        if (max_msgs > 0 && st.msg_count > max_msgs) || (max_bytes > 0 && st.byte_count > max_bytes) {
             return false;
         }
         true
     }
 
+    /// Check local publish quota.
     fn gs_allow_publish(&mut self, bytes: u32) -> bool {
         let now = std::time::Instant::now();
         let st = &mut self.gs_publish_window;
@@ -672,6 +842,7 @@ impl P2p {
         true
     }
 
+    /// Create a new P2P instance.
     pub fn new(cfg: P2pConfig) -> anyhow::Result<Self> {
         let peer_id = PeerId::from(cfg.local_key.public());
         info!(%peer_id, "local peer id");
@@ -690,9 +861,8 @@ impl P2p {
             .map(IdentTopic::new)
             .collect();
 
-        // Gossipsub — tuned for sub-second blocks
         let gossipsub_config = gossipsub::ConfigBuilder::default()
-            .heartbeat_interval(Duration::from_millis(100)) // 100ms (vs 800ms before)
+            .heartbeat_interval(Duration::from_millis(100))
             .validation_mode(ValidationMode::Strict)
             .max_transmit_size(MAX_MSG_SIZE)
             .mesh_n(6)
@@ -719,7 +889,6 @@ impl P2p {
         for t in allowed_topics.iter() {
             let _ = gossipsub.subscribe(t);
         }
-        // Always subscribe to consensus topic
         let _ = gossipsub.subscribe(&consensus_topic);
 
         let mdns = if cfg.enable_mdns {
@@ -744,14 +913,14 @@ impl P2p {
         } else {
             Toggle::from(None)
         };
+
         let protocols = vec![
             (proto_block(), ProtocolSupport::Full),
             (proto_status(), ProtocolSupport::Full),
             (proto_range(), ProtocolSupport::Full),
             (proto_state(), ProtocolSupport::Full),
         ];
-        let rr_cfg =
-            request_response::Config::default().with_request_timeout(Duration::from_secs(10));
+        let rr_cfg = request_response::Config::default().with_request_timeout(Duration::from_secs(10));
         let rr = RequestResponse::with_codec(Codec, protocols, rr_cfg);
 
         let behaviour = Behaviour {
@@ -769,7 +938,6 @@ impl P2p {
         );
         swarm.listen_on(cfg.listen)?;
 
-        // Dial bootnodes immediately and seed DHT routing table if possible.
         for addr in cfg.bootnodes.iter().cloned() {
             seed_kad_and_dial(&mut swarm, addr);
         }
@@ -839,9 +1007,8 @@ impl P2p {
         })
     }
 
-    /// Dial all static peers. Call at startup and periodically for reconnects.
+    /// Dial all static peers and bootnodes. Call at startup and periodically for reconnects.
     pub fn dial_static_peers(&mut self) {
-        // Bootnodes are also (re)dialed, in case the initial dial happened before NAT was ready.
         for addr in self.bootnodes.clone() {
             seed_kad_and_dial(&mut self.swarm, addr);
         }
@@ -853,6 +1020,7 @@ impl P2p {
         }
     }
 
+    /// Publish a consensus message via Gossipsub.
     pub fn publish(&mut self, msg: &ConsensusMsg) {
         if let Ok(bytes) = bincode::serialize(msg) {
             let b = bytes.len() as u32;
@@ -874,6 +1042,8 @@ impl P2p {
         }
     }
 
+    /// Return a list of connected peer IDs (excluding banned).
+    #[must_use]
     pub fn peers(&self) -> Vec<PeerId> {
         self.peer_scores
             .keys()
@@ -882,10 +1052,13 @@ impl P2p {
             .collect()
     }
 
+    /// Number of connected peers.
+    #[must_use]
     pub fn peer_count(&self) -> usize {
         self.peers().len()
     }
 
+    /// Send status requests to a list of peers.
     pub fn request_status(&mut self, peers: Vec<PeerId>) {
         for p in peers {
             let req = Req::Status(StatusRequest {});
@@ -898,6 +1071,8 @@ impl P2p {
             }
         }
     }
+
+    /// Send block requests to a list of peers.
     pub fn request_block(&mut self, peers: Vec<PeerId>, id: Hash32) {
         for p in peers {
             let req = Req::Block(BlockRequest { id: id.clone() });
@@ -910,21 +1085,21 @@ impl P2p {
             }
         }
     }
+
+    /// Send a range request to a specific peer (capped to `MAX_RANGE_BLOCKS`).
     pub fn request_range(&mut self, peer: PeerId, from: Height, to: Height) {
-        // Cap range to prevent requesting/serving too many blocks at once
         let to = to.min(from + MAX_RANGE_BLOCKS - 1);
-        {
-            let req = Req::Range(RangeRequest { from, to });
-            let now = std::time::Instant::now();
-            let est = bincode::serialized_size(&req).unwrap_or(0) as u32;
-            if self.rr_allow_global_out(now, est) {
-                self.swarm.behaviour_mut().rr.send_request(&peer, req);
-            } else {
-                warn!(%peer, bytes=est, "global RR outbound bandwidth cap hit; skipping range request");
-            }
+        let req = Req::Range(RangeRequest { from, to });
+        let now = std::time::Instant::now();
+        let est = bincode::serialized_size(&req).unwrap_or(0) as u32;
+        if self.rr_allow_global_out(now, est) {
+            self.swarm.behaviour_mut().rr.send_request(&peer, req);
+        } else {
+            warn!(%peer, bytes=est, "global RR outbound bandwidth cap hit; skipping range request");
         }
     }
 
+    /// Request state index from a peer.
     pub fn request_state_index(&mut self, peer: PeerId) {
         let req = Req::State(StateReq::Index(StateIndexRequest {}));
         let now = std::time::Instant::now();
@@ -936,6 +1111,7 @@ impl P2p {
         }
     }
 
+    /// Request a snapshot attestation from a peer.
     pub fn request_snapshot_attest(&mut self, peer: PeerId, height: u64, state_root_hex: String) {
         let req = Req::State(StateReq::Attest(SnapshotAttestRequest {
             height,
@@ -950,6 +1126,7 @@ impl P2p {
         }
     }
 
+    /// Send a response on a given request channel.
     pub fn respond(&mut self, ch: request_response::ResponseChannel<Resp>, resp: Resp) {
         let now = std::time::Instant::now();
         let est = bincode::serialized_size(&resp).unwrap_or(0) as u32;
@@ -963,8 +1140,8 @@ impl P2p {
         }
     }
 
+    /// Return per‑protocol rate limits.
     fn rr_limits_for(&self, kind: ProtoKind) -> (u32, u32) {
-        // returns (max_req_per_sec, max_bytes_per_sec)
         match kind {
             ProtoKind::Block => (
                 self.rr_max_req_per_sec_block,
@@ -986,7 +1163,6 @@ impl P2p {
     }
 
     fn rr_allow_global_in(&mut self, now: std::time::Instant, bytes: u32) -> bool {
-        // Fixed window (1s) global inbound cap.
         if now.duration_since(self.rr_global_window.0) > Duration::from_secs(1) {
             self.rr_global_window = (now, 0, 0);
         }
@@ -999,7 +1175,6 @@ impl P2p {
     }
 
     fn rr_allow_global_out(&mut self, now: std::time::Instant, bytes: u32) -> bool {
-        // Fixed window (1s) global outbound cap.
         if now.duration_since(self.rr_global_window.0) > Duration::from_secs(1) {
             self.rr_global_window = (now, 0, 0);
         }
@@ -1018,7 +1193,6 @@ impl P2p {
         kind: ProtoKind,
         bytes: u32,
     ) -> bool {
-        // IMPORTANT: avoid holding a mutable borrow into `self.rr_abuse` while calling other `&mut self` helpers.
         if self.is_quarantined(peer) {
             warn!(%peer, ?kind, "peer is quarantined; dropping request");
             self.bump_score(peer, -1);
@@ -1028,7 +1202,6 @@ impl P2p {
         let key = (peer, kind);
         let (max_req, max_bytes) = self.rr_limits_for(kind);
 
-        #[derive(Clone, Copy, Debug)]
         enum Act {
             Allow,
             Drop(i32),
@@ -1048,7 +1221,6 @@ impl P2p {
                 .entry(key)
                 .or_insert_with(|| AbuseState::new(now));
 
-            // Existing quarantine window inside AbuseState.
             if let Some(until) = st.quarantine_until {
                 if now < until {
                     act = Act::Drop(-1);
@@ -1058,7 +1230,6 @@ impl P2p {
                 }
             }
 
-            // Strike decay.
             if self.peer_strike_decay_s > 0 {
                 let decay_every = Duration::from_secs(self.peer_strike_decay_s);
                 let mut elapsed = now.duration_since(st.last_strike);
@@ -1069,7 +1240,6 @@ impl P2p {
                 }
             }
 
-            // Fixed window counters per peer+protocol.
             if now.duration_since(st.window_start) > Duration::from_secs(1) {
                 st.window_start = now;
                 st.req_count = 0;
@@ -1087,19 +1257,16 @@ impl P2p {
             }
 
             if matches!(act, Act::Drop(_)) {
-                // still quarantined in-state
+                // already quarantined
             } else if !limited {
-                // keep possible Boost
                 if !matches!(act, Act::Boost(_)) {
                     act = Act::Allow;
                 }
             } else {
-                // Rate/bandwidth limited: add strike, penalize, quarantine/ban.
                 st.strikes = st.strikes.saturating_add(1);
                 st.last_strike = now;
                 warn!(%peer, ?kind, reqs = st.req_count, bytes = st.byte_count, strikes = st.strikes, "RR limited; dropping request");
 
-                // Default penalty.
                 act = Act::Disconnect(-5);
 
                 if st.strikes >= self.rr_strikes_before_ban && self.rr_strikes_before_ban > 0 {
@@ -1156,6 +1323,7 @@ impl P2p {
             }
         }
     }
+
     fn bump_score(&mut self, peer: PeerId, delta: i32) {
         let score = self.peer_scores.entry(peer).or_insert(0);
         *score = score.saturating_add(delta);
@@ -1163,6 +1331,7 @@ impl P2p {
             self.ban_peer(peer);
         }
     }
+
     fn ban_peer(&mut self, peer: PeerId) {
         warn!(%peer, "banning peer (score too low)");
         self.banned_peers.insert(peer);
@@ -1192,11 +1361,12 @@ impl P2p {
             "possible eclipse (low diversity); reseeding via bootnodes"
         );
         self.last_reseed = std::time::Instant::now();
-        // Best-effort: redial bootnodes to refresh peer set.
         for a in self.bootnodes.iter().cloned() {
             seed_kad_and_dial(&mut self.swarm, a);
         }
     }
+
+    /// Process the next network event.
     pub async fn next_event(&mut self) -> anyhow::Result<P2pEvent> {
         loop {
             self.maybe_decay_peer_scores();
@@ -1230,15 +1400,13 @@ impl P2p {
                     ..
                 })) => {
                     if !self.banned_peers.contains(&peer_id) {
-                        // Feed observed listen addresses into Kademlia.
-                        if let Some(k) = self.swarm.behaviour_mut().kad.as_mut() {
+                        if let Some(kad) = self.swarm.behaviour_mut().kad.as_mut() {
                             for a in info.listen_addrs.iter().cloned() {
-                                k.add_address(&peer_id, a);
+                                kad.add_address(&peer_id, a);
                             }
-                            let _ = k.bootstrap();
+                            let _ = kad.bootstrap();
                         }
 
-                        // Diversity / eclipse resistance: bucket peers by IP prefix and limit per bucket.
                         if let Some(bucket) = self.bucket_from_addrs(&info.listen_addrs) {
                             let c = self.bucket_counts.entry(bucket.clone()).or_insert(0);
                             *c = c.saturating_add(1);
@@ -1265,7 +1433,6 @@ impl P2p {
                         continue;
                     }
 
-                    // Connection limits (simple hard guardrails).
                     self.connections_total = self.connections_total.saturating_add(1);
                     let per = self.connections_per_peer.entry(peer_id).or_insert(0);
                     *per = per.saturating_add(1);
@@ -1274,7 +1441,6 @@ impl P2p {
                         || *per > self.max_connections_per_peer
                     {
                         warn!(%peer_id, total = self.connections_total, per_peer = *per, "connection limit exceeded; disconnecting");
-                        // Roll back counters and drop the connection.
                         self.connections_total = self.connections_total.saturating_sub(1);
                         *per = per.saturating_sub(1);
                         let _ = self.swarm.disconnect_peer_id(peer_id);
@@ -1371,21 +1537,17 @@ impl P2p {
                         RequestResponseMessage::Request {
                             request, channel, ..
                         } => {
-                            // Per-peer + per-protocol request-rate and bandwidth limiting with quarantine + strike decay.
                             let now = std::time::Instant::now();
                             let kind = ProtoKind::from_req(&request);
                             let est_bytes = bincode::serialized_size(&request).unwrap_or(0) as u32;
 
-                            // Global inbound RR cap.
                             if !self.rr_allow_global_in(now, est_bytes) {
                                 warn!(%peer, ?kind, bytes = est_bytes, "global RR inbound bandwidth cap hit; dropping request");
                                 self.bump_score(peer, -2);
-                                // Drop request.
                                 continue;
                             }
 
                             if !self.rr_allow_inbound(now, peer, kind, est_bytes) {
-                                // Drop request.
                                 continue;
                             }
 
@@ -1413,6 +1575,11 @@ impl P2p {
     }
 }
 
+// -----------------------------------------------------------------------------
+// P2pEvent
+// -----------------------------------------------------------------------------
+
+/// Events produced by the P2p layer.
 #[derive(Debug)]
 pub enum P2pEvent {
     Consensus {
@@ -1431,35 +1598,37 @@ pub enum P2pEvent {
     },
 }
 
-fn bucket_from_multiaddr(addr: &Multiaddr, kind: &str) -> Option<String> {
-    let mut ip4: Option<[u8; 4]> = None;
-    let mut ip6: Option<[u8; 16]> = None;
-    for p in addr.iter() {
-        match p {
-            Protocol::Ip4(v4) => {
-                ip4 = Some(v4.octets());
-                break;
-            }
-            Protocol::Ip6(v6) => {
-                ip6 = Some(v6.octets());
-                break;
-            }
-            _ => {}
-        }
+// -----------------------------------------------------------------------------
+// Tests
+// -----------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_bucket_from_multiaddr_ip4() {
+        let addr: Multiaddr = "/ip4/192.168.1.100/tcp/7001".parse().unwrap();
+        let bucket = bucket_from_multiaddr(&addr, "ip16");
+        assert_eq!(bucket, Some("ip4:192.168".to_string()));
+        let bucket24 = bucket_from_multiaddr(&addr, "ip24");
+        assert_eq!(bucket24, Some("ip4:192.168.1".to_string()));
     }
-    match (kind, ip4, ip6) {
-        ("ip24", Some(o), _) => Some(format!("ip4:{}.{}.{}", o[0], o[1], o[2])),
-        ("ip16", Some(o), _) => Some(format!("ip4:{}.{}", o[0], o[1])),
-        ("ip16", None, Some(o)) => Some(format!(
-            "ip6:{:02x}{:02x}{:02x}{:02x}",
-            o[0], o[1], o[2], o[3]
-        )),
-        ("ip24", None, Some(o)) => Some(format!(
-            "ip6:{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-            o[0], o[1], o[2], o[3], o[4], o[5]
-        )),
-        ("asn", Some(o), _) => Some(format!("asn_scaffold:{}.{}", o[0], o[1])), // placeholder
-        ("asn", None, Some(o)) => Some(format!("asn_scaffold:{:02x}{:02x}", o[0], o[1])),
-        _ => None,
+
+    #[test]
+    fn test_bucket_from_multiaddr_ip6() {
+        let addr: Multiaddr = "/ip6/2001:0db8:85a3:0000:0000:8a2e:0370:7334/tcp/7001".parse().unwrap();
+        let bucket = bucket_from_multiaddr(&addr, "ip16");
+        assert_eq!(bucket, Some("ip6:20010db8".to_string()));
+        let bucket24 = bucket_from_multiaddr(&addr, "ip24");
+        assert_eq!(bucket24, Some("ip6:20010db885a3".to_string()));
+    }
+
+    #[test]
+    fn test_proto_constants() {
+        assert_eq!(proto_block().as_ref(), "/iona/block/1.0.0");
+        assert_eq!(proto_status().as_ref(), "/iona/status/1.0.0");
+        assert_eq!(proto_range().as_ref(), "/iona/blockrange/1.0.0");
+        assert_eq!(proto_state().as_ref(), "/iona/state/1.0.0");
     }
 }
