@@ -5,7 +5,7 @@
 //!
 //! - **Wire format compatibility**: Messages can be decoded by older nodes
 //! - **State format compatibility**: Storage can be read by older binaries
-//! - **RPC compatibility**: API responses remain backward-compatible
+//! - **RPC compatibility**: API responses remain backward‑compatible
 //! - **Consensus rule compatibility**: Block validation rules are monotonic
 //!
 //! # Compatibility Levels
@@ -13,15 +13,31 @@
 //! ```text
 //! Level 0 (Full):      No changes to wire/state/RPC format
 //! Level 1 (Additive):  New optional fields only (serde default)
-//! Level 2 (Migration): Requires schema migration (dual-read period)
+//! Level 2 (Migration): Requires schema migration (dual‑read period)
 //! Level 3 (Breaking):  Requires protocol version bump + activation height
+//! ```
+//!
+//! # Example
+//!
+//! ```rust,ignore
+//! use iona::protocol::compat::{CompatChecker, build_compat_matrix};
+//! use iona::protocol::version::default_activations;
+//!
+//! let checker = CompatChecker::new(default_activations());
+//! let report = checker.check_all();
+//! if !report.passed {
+//!     eprintln!("{}", report);
+//! }
 //! ```
 
 use serde::{Deserialize, Serialize};
+use tracing::{debug, info, warn};
 
 use super::version::{ProtocolActivation, CURRENT_PROTOCOL_VERSION, SUPPORTED_PROTOCOL_VERSIONS};
 
-// ─── Compatibility level ─────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
+// Compatibility level
+// -----------------------------------------------------------------------------
 
 /// Backward compatibility level for a change.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -30,7 +46,7 @@ pub enum CompatLevel {
     Full = 0,
     /// Additive changes only (new optional fields with defaults).
     Additive = 1,
-    /// Requires schema migration with dual-read support.
+    /// Requires schema migration with dual‑read support.
     Migration = 2,
     /// Breaking change requiring PV bump and activation height.
     Breaking = 3,
@@ -47,29 +63,18 @@ impl std::fmt::Display for CompatLevel {
     }
 }
 
-// ─── Compatibility rule ──────────────────────────────────────────────────────
-
-/// A compatibility rule that can be checked.
-#[derive(Debug, Clone)]
-pub struct CompatRule {
-    /// Rule identifier (e.g., "WIRE-001").
-    pub id: String,
-    /// Human-readable description.
-    pub description: String,
-    /// Which compatibility domain this rule applies to.
-    pub domain: CompatDomain,
-    /// Whether this rule is enforced (failure = error) or advisory (failure = warning).
-    pub enforced: bool,
-}
+// -----------------------------------------------------------------------------
+// Compatibility domain
+// -----------------------------------------------------------------------------
 
 /// Domain of a compatibility rule.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CompatDomain {
     /// P2P wire format (messages, handshake).
     Wire,
-    /// On-disk state format (state_full.json, blocks/, stakes.json).
+    /// On‑disk state format (state_full.json, blocks/, stakes.json).
     State,
-    /// RPC API responses (JSON-RPC, REST).
+    /// RPC API responses (JSON‑RPC, REST).
     Rpc,
     /// Consensus rules (block validation, finality).
     Consensus,
@@ -86,7 +91,26 @@ impl std::fmt::Display for CompatDomain {
     }
 }
 
-// ─── Check result ────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
+// Compatibility rule
+// -----------------------------------------------------------------------------
+
+/// A compatibility rule that can be checked.
+#[derive(Debug, Clone)]
+pub struct CompatRule {
+    /// Rule identifier (e.g., "WIRE-001").
+    pub id: String,
+    /// Human‑readable description.
+    pub description: String,
+    /// Which compatibility domain this rule applies to.
+    pub domain: CompatDomain,
+    /// Whether this rule is enforced (failure = error) or advisory (failure = warning).
+    pub enforced: bool,
+}
+
+// -----------------------------------------------------------------------------
+// Check result and report
+// -----------------------------------------------------------------------------
 
 /// Result of a single compatibility check.
 #[derive(Debug, Clone)]
@@ -107,6 +131,8 @@ pub struct CompatReport {
 }
 
 impl CompatReport {
+    /// Create a report from a list of results.
+    #[must_use]
     pub fn from_results(results: Vec<CompatCheckResult>) -> Self {
         let passed = results.iter().all(|r| r.passed);
         let overall_level = results
@@ -122,11 +148,13 @@ impl CompatReport {
     }
 
     /// Get results filtered by domain.
+    #[must_use]
     pub fn by_domain(&self, domain: CompatDomain) -> Vec<&CompatCheckResult> {
         self.results.iter().filter(|r| r.domain == domain).collect()
     }
 
     /// Get only failed checks.
+    #[must_use]
     pub fn failures(&self) -> Vec<&CompatCheckResult> {
         self.results.iter().filter(|r| !r.passed).collect()
     }
@@ -152,11 +180,14 @@ impl std::fmt::Display for CompatReport {
     }
 }
 
-// ─── Compatibility checker ───────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
+// Compatibility checker
+// -----------------------------------------------------------------------------
 
 /// Backward compatibility enforcement checker.
 ///
 /// Validates that protocol changes maintain compatibility at all levels.
+#[derive(Debug)]
 pub struct CompatChecker {
     /// Active protocol activations.
     activations: Vec<ProtocolActivation>,
@@ -166,7 +197,9 @@ pub struct CompatChecker {
 
 impl CompatChecker {
     /// Create a new checker with the default rule set.
+    #[must_use]
     pub fn new(activations: Vec<ProtocolActivation>) -> Self {
+        info!(count = activations.len(), "creating compatibility checker");
         Self {
             activations,
             rules: default_rules(),
@@ -174,7 +207,9 @@ impl CompatChecker {
     }
 
     /// Run all compatibility checks and return a report.
+    #[must_use]
     pub fn check_all(&self) -> CompatReport {
+        debug!("running all compatibility checks");
         let mut results = Vec::new();
 
         // Wire compatibility checks.
@@ -196,28 +231,42 @@ impl CompatChecker {
         results.push(self.check_consensus_activation_scheduled());
         results.push(self.check_consensus_grace_window());
 
-        CompatReport::from_results(results)
+        let report = CompatReport::from_results(results);
+        if report.passed {
+            info!("all compatibility checks passed");
+        } else {
+            warn!(failures = report.failures().len(), "compatibility checks failed");
+        }
+        report
     }
 
-    // ── Wire checks ──────────────────────────────────────────────────────
+    // -------------------------------------------------------------------------
+    // Wire checks
+    // -------------------------------------------------------------------------
 
     /// WIRE-001: Supported PV sets must overlap during rolling upgrade.
     fn check_wire_pv_overlap(&self) -> CompatCheckResult {
-        // During rolling upgrade, old nodes have PV={1} and new nodes have PV={1,2}.
-        // The intersection must be non-empty.
         let current_pvs = SUPPORTED_PROTOCOL_VERSIONS;
         let has_overlap = current_pvs.contains(&1); // Must always support PV=1 for backward compat.
+
+        let detail = format!(
+            "supported PVs {:?} {}include PV=1",
+            current_pvs,
+            if has_overlap { "" } else { "do NOT " }
+        );
+
+        if !has_overlap {
+            warn!("WIRE-001 violation: {}", detail);
+        } else {
+            debug!("WIRE-001: {}", detail);
+        }
 
         CompatCheckResult {
             rule_id: "WIRE-001".into(),
             domain: CompatDomain::Wire,
             passed: has_overlap,
             level: CompatLevel::Full,
-            detail: format!(
-                "supported PVs {:?} {}include PV=1",
-                current_pvs,
-                if has_overlap { "" } else { "do NOT " }
-            ),
+            detail,
         }
     }
 
@@ -228,7 +277,7 @@ impl CompatChecker {
         CompatCheckResult {
             rule_id: "WIRE-002".into(),
             domain: CompatDomain::Wire,
-            passed: true, // By design in wire.rs
+            passed: true,
             level: CompatLevel::Full,
             detail: "unknown msg_type IDs silently ignored (by design)".into(),
         }
@@ -240,25 +289,34 @@ impl CompatChecker {
         CompatCheckResult {
             rule_id: "WIRE-003".into(),
             domain: CompatDomain::Wire,
-            passed: true, // Verified in wire.rs Hello struct
+            passed: true,
             level: CompatLevel::Full,
             detail: "Hello includes supported_pv, chain_id, genesis_hash".into(),
         }
     }
 
-    // ── State checks ─────────────────────────────────────────────────────
+    // -------------------------------------------------------------------------
+    // State checks
+    // -------------------------------------------------------------------------
 
     /// STATE-001: Schema version must be monotonically increasing.
     fn check_state_schema_monotonic(&self) -> CompatCheckResult {
         let sv = crate::storage::CURRENT_SCHEMA_VERSION;
         let monotonic = sv >= 1; // Must be at least 1
 
+        let detail = format!("schema_version={sv} (monotonic: {monotonic})");
+        if !monotonic {
+            warn!("STATE-001 violation: {}", detail);
+        } else {
+            debug!("STATE-001: {}", detail);
+        }
+
         CompatCheckResult {
             rule_id: "STATE-001".into(),
             domain: CompatDomain::State,
             passed: monotonic,
             level: CompatLevel::Migration,
-            detail: format!("schema_version={sv} (monotonic: {monotonic})"),
+            detail,
         }
     }
 
@@ -281,31 +339,40 @@ impl CompatChecker {
         // Check that MIGRATIONS covers up to current version.
         let max_migration_from = crate::storage::migrations::MIGRATIONS
             .iter()
-            .map(|(from, _, _)| *from)
+            .map(|e| e.from_version)
             .max()
             .unwrap_or(0);
 
-        // The legacy migrations cover v0-v2, new registry covers v3+.
+        // The legacy migrations cover v0‑v2, new registry covers v3+.
         // For SV=4, we need migration from v3.
         let covered = max_migration_from >= 3 || sv <= 3;
+
+        let detail = format!("schema_version={sv}, max migration from_v={max_migration_from}");
+        if !covered {
+            warn!("STATE-003 violation: {}", detail);
+        } else {
+            debug!("STATE-003: {}", detail);
+        }
 
         CompatCheckResult {
             rule_id: "STATE-003".into(),
             domain: CompatDomain::State,
             passed: covered,
             level: CompatLevel::Migration,
-            detail: format!("schema_version={sv}, max migration from_v={max_migration_from}",),
+            detail,
         }
     }
 
-    // ── RPC checks ───────────────────────────────────────────────────────
+    // -------------------------------------------------------------------------
+    // RPC checks
+    // -------------------------------------------------------------------------
 
     /// RPC-001: New RPC response fields are additive (existing fields preserved).
     fn check_rpc_field_additive(&self) -> CompatCheckResult {
         CompatCheckResult {
             rule_id: "RPC-001".into(),
             domain: CompatDomain::Rpc,
-            passed: true, // By convention; new fields use Option<T>
+            passed: true,
             level: CompatLevel::Additive,
             detail: "RPC responses preserve existing fields; new fields are Optional".into(),
         }
@@ -313,22 +380,21 @@ impl CompatChecker {
 
     /// RPC-002: Existing RPC methods are not removed or renamed.
     fn check_rpc_method_preserved(&self) -> CompatCheckResult {
-        // Core methods: eth_blockNumber, eth_getBalance, net_peerCount, web3_clientVersion
-        // These must always be present.
         CompatCheckResult {
             rule_id: "RPC-002".into(),
             domain: CompatDomain::Rpc,
-            passed: true, // Verified by RPC module existence
+            passed: true,
             level: CompatLevel::Full,
             detail: "core RPC methods (eth_*, net_*, web3_*) preserved".into(),
         }
     }
 
-    // ── Consensus checks ─────────────────────────────────────────────────
+    // -------------------------------------------------------------------------
+    // Consensus checks
+    // -------------------------------------------------------------------------
 
     /// CONS-001: PV selection is deterministic (same height -> same PV).
     fn check_consensus_pv_deterministic(&self) -> CompatCheckResult {
-        // Test determinism by computing PV for several heights twice.
         let heights = [0, 1, 100, 1000, 999_999];
         let deterministic = heights.iter().all(|&h| {
             let pv1 = super::version::version_for_height(h, &self.activations);
@@ -336,18 +402,24 @@ impl CompatChecker {
             pv1 == pv2
         });
 
+        let detail = format!("PV determinism verified for {} heights", heights.len());
+        if !deterministic {
+            warn!("CONS-001 violation: {}", detail);
+        } else {
+            debug!("CONS-001: {}", detail);
+        }
+
         CompatCheckResult {
             rule_id: "CONS-001".into(),
             domain: CompatDomain::Consensus,
             passed: deterministic,
             level: CompatLevel::Full,
-            detail: format!("PV determinism verified for {} heights", heights.len()),
+            detail,
         }
     }
 
     /// CONS-002: Protocol activation has a valid schedule.
     fn check_consensus_activation_scheduled(&self) -> CompatCheckResult {
-        // Activation heights must be strictly increasing.
         let mut prev_height: Option<u64> = None;
         let mut prev_pv: Option<u32> = None;
         let mut valid = true;
@@ -376,6 +448,12 @@ impl CompatChecker {
             detail = format!("{} activations in valid order", self.activations.len());
         }
 
+        if !valid {
+            warn!("CONS-002 violation: {}", detail);
+        } else {
+            debug!("CONS-002: {}", detail);
+        }
+
         CompatCheckResult {
             rule_id: "CONS-002".into(),
             domain: CompatDomain::Consensus,
@@ -387,7 +465,6 @@ impl CompatChecker {
 
     /// CONS-003: Grace window allows stragglers to catch up.
     fn check_consensus_grace_window(&self) -> CompatCheckResult {
-        // Any activation with PV > 1 should have a grace window > 0.
         let needs_grace: Vec<_> = self
             .activations
             .iter()
@@ -396,25 +473,38 @@ impl CompatChecker {
 
         let all_have_grace = needs_grace.iter().all(|a| a.grace_blocks > 0);
 
+        let detail = if needs_grace.is_empty() {
+            "no activations requiring grace window".into()
+        } else {
+            format!(
+                "{}/{} activations have grace > 0",
+                needs_grace.iter().filter(|a| a.grace_blocks > 0).count(),
+                needs_grace.len()
+            )
+        };
+
+        if !all_have_grace {
+            warn!("CONS-003 violation: {}", detail);
+        } else {
+            debug!("CONS-003: {}", detail);
+        }
+
         CompatCheckResult {
             rule_id: "CONS-003".into(),
             domain: CompatDomain::Consensus,
             passed: all_have_grace || needs_grace.is_empty(),
             level: CompatLevel::Breaking,
-            detail: if needs_grace.is_empty() {
-                "no activations requiring grace window".into()
-            } else {
-                format!(
-                    "{}/{} activations have grace > 0",
-                    needs_grace.iter().filter(|a| a.grace_blocks > 0).count(),
-                    needs_grace.len()
-                )
-            },
+            detail,
         }
     }
 }
 
+// -----------------------------------------------------------------------------
+// Default rules
+// -----------------------------------------------------------------------------
+
 /// Default set of compatibility rules.
+#[must_use]
 fn default_rules() -> Vec<CompatRule> {
     vec![
         CompatRule {
@@ -486,7 +576,9 @@ fn default_rules() -> Vec<CompatRule> {
     ]
 }
 
-// ─── Compatibility matrix ────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
+// Compatibility matrix
+// -----------------------------------------------------------------------------
 
 /// Entry in the compatibility matrix.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -504,6 +596,7 @@ pub struct CompatMatrixEntry {
 }
 
 /// Build the compatibility matrix for known versions.
+#[must_use]
 pub fn build_compat_matrix() -> Vec<CompatMatrixEntry> {
     vec![
         CompatMatrixEntry {
@@ -530,13 +623,15 @@ pub fn build_compat_matrix() -> Vec<CompatMatrixEntry> {
     ]
 }
 
-/// Check if two versions are wire-compatible.
+/// Check if two versions are wire‑compatible.
+#[must_use]
 pub fn check_version_compat(a: &CompatMatrixEntry, b: &CompatMatrixEntry) -> bool {
-    // Wire-compatible if supported_pv sets overlap.
     a.supported_pv.iter().any(|pv| b.supported_pv.contains(pv))
 }
 
-// ─── Tests ──────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
+// Tests
+// -----------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
@@ -599,7 +694,7 @@ mod tests {
         let matrix = build_compat_matrix();
         assert_eq!(matrix.len(), 3);
 
-        // All versions should be wire-compatible with each other.
+        // All versions should be wire‑compatible with each other.
         for i in 0..matrix.len() {
             for j in 0..matrix.len() {
                 assert!(
