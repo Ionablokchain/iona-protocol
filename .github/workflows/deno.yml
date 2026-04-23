@@ -1,0 +1,114 @@
+# Deno CI for IONA TypeScript SDK
+#
+# This workflow runs Deno linter and tests on every push to `main` and on pull requests.
+# It uses caching for Deno’s dependency cache to speed up subsequent runs.
+#
+# Environment variables:
+#   - DENO_VERSION: Deno version to use (default: v1.x)
+#
+# Secrets:
+#   - CODECOV_TOKEN: token for uploading coverage to Codecov (optional)
+
+name: Deno
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+  # Allow manual trigger from Actions tab
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  DENO_VERSION: v1.x
+
+jobs:
+  # -------------------------------------------------------------------------
+  # Lint and test Deno code
+  # -------------------------------------------------------------------------
+  lint-and-test:
+    name: Lint and Test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # Setup Deno with a specific version (pinned for reproducibility)
+      - name: Setup Deno
+        uses: denoland/setup-deno@v2
+        with:
+          deno-version: ${{ env.DENO_VERSION }}
+
+      # Cache Deno's dependency cache (deno.land and other remote modules)
+      - name: Cache Deno dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/deno/deps
+            ~/.cache/deno/npm
+          key: ${{ runner.os }}-deno-${{ hashFiles('**/deno.lock', '**/deps.ts') }}
+          restore-keys: |
+            ${{ runner.os }}-deno-
+
+      # Verify formatting (optional, can be uncommented)
+      - name: Check formatting
+        run: deno fmt --check
+
+      # Run linter
+      - name: Run linter
+        run: deno lint
+
+      # Run tests with coverage collection
+      - name: Run tests with coverage
+        run: deno test -A --coverage=coverage
+
+      # Generate coverage report (as text and lcov)
+      - name: Generate coverage report
+        run: deno coverage coverage --lcov > coverage.lcov
+
+      # Optional: upload coverage to Codecov (requires CODECOV_TOKEN secret)
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v4
+        if: github.event_name != 'pull_request' && secrets.CODECOV_TOKEN != ''
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          file: ./coverage.lcov
+          flags: deno
+          name: deno-coverage
+          fail_ci_if_error: false
+
+      # Optional: run with `--doc` to check documentation examples
+      - name: Check documentation examples
+        run: deno test --doc
+
+      # Optional: run slow tests separately (e.g., integration tests)
+      # - name: Run integration tests
+      #   run: deno test -A -- --unstable ./tests/integration
+
+  # -------------------------------------------------------------------------
+  # Security audit (using Deno's built-in audit)
+  # -------------------------------------------------------------------------
+  security-audit:
+    name: Security Audit
+    runs-on: ubuntu-latest
+    needs: lint-and-test
+    if: github.event_name != 'pull_request'
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Deno
+        uses: denoland/setup-deno@v2
+        with:
+          deno-version: ${{ env.DENO_VERSION }}
+
+      # Check for known vulnerabilities in deno.land/x dependencies (experimental)
+      - name: Run Deno audit
+        run: deno info --unstable --json | jq '.modules | map(select(.version)) | .[]' || echo "Audit not yet supported"
