@@ -14,10 +14,24 @@
 //!    - Pre-activation: nodes support *both* old and new versions.
 //!    - At `activation_height`: nodes start producing new-version blocks.
 //!    - After a grace window: old-version blocks are rejected.
+//!
+//! # Example
+//!
+//! ```
+//! use iona::protocol::version::{version_for_height, validate_block_version, default_activations};
+//!
+//! let activations = default_activations();
+//! let pv = version_for_height(1000, &activations);
+//! assert_eq!(pv, 1);
+//! validate_block_version(1, 1000, &activations).unwrap();
+//! ```
 
 use serde::{Deserialize, Serialize};
+use tracing::{debug, info, warn};
 
-// ─── Constants ───────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
+// Constants
+// -----------------------------------------------------------------------------
 
 /// The protocol version this binary produces when creating new blocks.
 pub const CURRENT_PROTOCOL_VERSION: u32 = 1;
@@ -30,7 +44,9 @@ pub const SUPPORTED_PROTOCOL_VERSIONS: &[u32] = &[1];
 /// Set equal to `CURRENT_PROTOCOL_VERSION` once a hard fork is fully activated.
 pub const MIN_PROTOCOL_VERSION: u32 = 1;
 
-// ─── Activation config ──────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
+// Activation config
+// -----------------------------------------------------------------------------
 
 /// Per-version activation rule.
 ///
@@ -56,24 +72,27 @@ fn default_grace_blocks() -> u64 {
 }
 
 /// Default activation schedule: v1 active from genesis.
+#[must_use]
 pub fn default_activations() -> Vec<ProtocolActivation> {
     vec![ProtocolActivation {
         protocol_version: 1,
-        activation_height: None, // genesis
+        activation_height: None,
         grace_blocks: 0,
     }]
 }
 
-// ─── Queries ─────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
+// Core queries
+// -----------------------------------------------------------------------------
 
 /// Returns the protocol version that should be used when producing a block
 /// at the given `height`, based on the activation schedule.
+#[must_use]
 pub fn version_for_height(height: u64, activations: &[ProtocolActivation]) -> u32 {
     let mut active_version = 1u32;
     for a in activations {
         match a.activation_height {
             None => {
-                // Active from genesis
                 active_version = active_version.max(a.protocol_version);
             }
             Some(h) if height >= h => {
@@ -82,27 +101,28 @@ pub fn version_for_height(height: u64, activations: &[ProtocolActivation]) -> u3
             _ => {}
         }
     }
+    debug!(height, active_version, "computed PV for height");
     active_version
 }
 
 /// Check whether a given `protocol_version` is acceptable for a block at
 /// `height`.  Returns `Ok(())` or an error string.
+#[must_use]
 pub fn validate_block_version(
     block_version: u32,
     height: u64,
     activations: &[ProtocolActivation],
 ) -> Result<(), String> {
-    // Must be a version we know how to execute.
     if !SUPPORTED_PROTOCOL_VERSIONS.contains(&block_version) {
-        return Err(format!(
+        let err = format!(
             "unsupported protocol version {block_version}; supported: {SUPPORTED_PROTOCOL_VERSIONS:?}"
-        ));
+        );
+        warn!("{}", err);
+        return Err(err);
     }
 
-    // After activation + grace, the old version is rejected.
     let expected = version_for_height(height, activations);
     if block_version < expected {
-        // Check if we're still inside the grace window of the *next* activation.
         let in_grace = activations.iter().any(|a| {
             a.protocol_version == expected
                 && a.activation_height
@@ -110,24 +130,36 @@ pub fn validate_block_version(
                     .unwrap_or(false)
         });
         if !in_grace {
-            return Err(format!(
+            let err = format!(
                 "protocol version {block_version} is too old at height {height}; \
                  expected >= {expected}"
-            ));
+            );
+            warn!("{}", err);
+            return Err(err);
         }
     }
 
+    debug!(
+        height,
+        block_version,
+        expected_version = expected,
+        "block version validation passed"
+    );
     Ok(())
 }
 
 /// Returns `true` if this binary supports the given protocol version.
+#[must_use]
 pub fn is_supported(version: u32) -> bool {
     SUPPORTED_PROTOCOL_VERSIONS.contains(&version)
 }
 
-// ─── Display ─────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
+// Convenience helpers
+// -----------------------------------------------------------------------------
 
 /// Human-readable version string for logs / RPC.
+#[must_use]
 pub fn version_string() -> String {
     format!(
         "iona-node v{} (protocol v{}, schema v{})",
@@ -137,7 +169,35 @@ pub fn version_string() -> String {
     )
 }
 
-// ─── Tests ───────────────────────────────────────────────────────────────────
+/// Returns the highest (latest) protocol version supported by this binary.
+#[must_use]
+pub fn max_supported_pv() -> u32 {
+    *SUPPORTED_PROTOCOL_VERSIONS.iter().max().unwrap_or(&1)
+}
+
+/// Returns the lowest (earliest) protocol version supported by this binary.
+#[must_use]
+pub fn min_supported_pv() -> u32 {
+    *SUPPORTED_PROTOCOL_VERSIONS.iter().min().unwrap_or(&1)
+}
+
+/// Get a summary of the activation schedule (for debugging / RPC).
+#[must_use]
+pub fn activation_summary(activations: &[ProtocolActivation]) -> Vec<String> {
+    activations
+        .iter()
+        .map(|a| {
+            format!(
+                "PV {} -> height {:?}, grace {}",
+                a.protocol_version, a.activation_height, a.grace_blocks
+            )
+        })
+        .collect()
+}
+
+// -----------------------------------------------------------------------------
+// Tests
+// -----------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
@@ -184,22 +244,14 @@ mod tests {
 
     #[test]
     fn test_validate_block_version_grace_window() {
-        // This test simulates a future scenario where SUPPORTED includes v2.
-        // Since SUPPORTED_PROTOCOL_VERSIONS is compile-time &[1], we test the
-        // grace-window logic using only v1 blocks against a schedule that
-        // activates v1 at a specific height (no higher version needed).
         let activations = vec![ProtocolActivation {
             protocol_version: 1,
             activation_height: Some(1000),
             grace_blocks: 100,
         }];
-        // Before activation: v1 is fine (version_for_height returns 1)
         assert!(validate_block_version(1, 999, &activations).is_ok());
-        // At activation: v1 is the expected version
         assert!(validate_block_version(1, 1000, &activations).is_ok());
-        // After activation + grace: v1 still fine (it IS the active version)
         assert!(validate_block_version(1, 1100, &activations).is_ok());
-        // Unsupported version always rejected
         assert!(validate_block_version(99, 1000, &activations).is_err());
     }
 
@@ -208,5 +260,31 @@ mod tests {
         assert!(is_supported(1));
         assert!(!is_supported(0));
         assert!(!is_supported(99));
+    }
+
+    #[test]
+    fn test_max_supported_pv() {
+        assert_eq!(max_supported_pv(), 1);
+    }
+
+    #[test]
+    fn test_min_supported_pv() {
+        assert_eq!(min_supported_pv(), 1);
+    }
+
+    #[test]
+    fn test_version_string() {
+        let s = version_string();
+        assert!(s.contains("iona-node v"));
+        assert!(s.contains("protocol v1"));
+        assert!(s.contains("schema v"));
+    }
+
+    #[test]
+    fn test_activation_summary() {
+        let activations = default_activations();
+        let summary = activation_summary(&activations);
+        assert_eq!(summary.len(), 1);
+        assert!(summary[0].contains("PV 1"));
     }
 }
