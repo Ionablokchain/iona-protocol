@@ -9,9 +9,27 @@
 //!
 //! The node code uses `HsmSigner` trait instead of concrete signing implementations,
 //! allowing operators to plug in their preferred key management solution.
+//!
+//! # Example
+//!
+//! ```rust,ignore
+//! use iona::crypto::hsm::{KeyBackendConfig, create_signer};
+//!
+//! let config = KeyBackendConfig::Local {
+//!     path: "keys.enc".into(),
+//!     password_env: "IONA_KEYSTORE_PASSWORD".into(),
+//! };
+//! let signer = create_signer(&config)?;
+//! let sig = signer.sign(b"hello")?;
+//! ```
 
 use crate::crypto::{CryptoError, PublicKeyBytes, SignatureBytes};
 use serde::{Deserialize, Serialize};
+use tracing::{debug, error, info, warn};
+
+// -----------------------------------------------------------------------------
+// Configuration
+// -----------------------------------------------------------------------------
 
 /// Configuration for key management backend.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -25,7 +43,10 @@ pub enum KeyBackendConfig {
         password_env: String,
     },
     /// Remote signer HTTP service.
-    Remote { url: String, timeout_s: u64 },
+    Remote {
+        url: String,
+        timeout_s: u64,
+    },
     /// PKCS#11 HSM (e.g., YubiHSM, Thales Luna).
     Pkcs11 {
         /// Path to PKCS#11 shared library.
@@ -74,9 +95,13 @@ impl Default for KeyBackendConfig {
     }
 }
 
-/// Trait for HSM/KMS-backed signing operations.
+// -----------------------------------------------------------------------------
+// Trait
+// -----------------------------------------------------------------------------
+
+/// Trait for HSM/KMS‑backed signing operations.
 ///
-/// Implementors must be thread-safe (Send + Sync) since signing may happen
+/// Implementors must be thread‑safe (`Send + Sync`) since signing may happen
 /// from multiple consensus/RPC threads concurrently.
 pub trait HsmSigner: Send + Sync {
     /// Get the public key bytes.
@@ -92,17 +117,27 @@ pub trait HsmSigner: Send + Sync {
     fn health_check(&self) -> Result<(), CryptoError>;
 }
 
+// -----------------------------------------------------------------------------
+// Local signer
+// -----------------------------------------------------------------------------
+
 /// Local keystore signer (wraps existing Ed25519Keypair).
 pub struct LocalSigner {
     inner: crate::crypto::ed25519::Ed25519Keypair,
 }
 
 impl LocalSigner {
+    /// Create a new local signer from an existing keypair.
+    #[must_use]
     pub fn new(keypair: crate::crypto::ed25519::Ed25519Keypair) -> Self {
+        debug!("created local signer");
         Self { inner: keypair }
     }
 
+    /// Create a local signer from a 32‑byte seed.
+    #[must_use]
     pub fn from_seed(seed: &[u8; 32]) -> Self {
+        debug!("created local signer from seed");
         Self {
             inner: crate::crypto::ed25519::Ed25519Keypair::from_seed(*seed),
         }
@@ -118,6 +153,7 @@ impl HsmSigner for LocalSigner {
     fn sign(&self, msg: &[u8]) -> Result<SignatureBytes, CryptoError> {
         use crate::crypto::Signer;
         let sig = self.inner.sign(msg);
+        debug!(msg_len = msg.len(), "local signer produced signature");
         Ok(sig)
     }
 
@@ -130,6 +166,10 @@ impl HsmSigner for LocalSigner {
     }
 }
 
+// -----------------------------------------------------------------------------
+// PKCS#11 signer (placeholder)
+// -----------------------------------------------------------------------------
+
 /// Placeholder PKCS#11 signer.
 /// In production, this would use the `cryptoki` crate to talk to the HSM.
 pub struct Pkcs11Signer {
@@ -139,12 +179,20 @@ pub struct Pkcs11Signer {
 }
 
 impl Pkcs11Signer {
+    /// Create a new PKCS#11 signer (placeholder).
+    #[must_use]
     pub fn new(
         library_path: &str,
         slot: u64,
         key_label: &str,
         _pin: &str,
     ) -> Result<Self, CryptoError> {
+        debug!(
+            library_path,
+            slot,
+            key_label,
+            "creating PKCS#11 signer (placeholder)"
+        );
         Ok(Self {
             _library_path: library_path.to_string(),
             _slot: slot,
@@ -171,6 +219,10 @@ impl HsmSigner for Pkcs11Signer {
     }
 }
 
+// -----------------------------------------------------------------------------
+// AWS KMS signer (placeholder)
+// -----------------------------------------------------------------------------
+
 /// Placeholder AWS KMS signer.
 pub struct AwsKmsSigner {
     _key_id: String,
@@ -178,7 +230,10 @@ pub struct AwsKmsSigner {
 }
 
 impl AwsKmsSigner {
+    /// Create a new AWS KMS signer (placeholder).
+    #[must_use]
     pub fn new(key_id: &str, region: &str, _endpoint: Option<&str>) -> Result<Self, CryptoError> {
+        debug!(key_id, region, "creating AWS KMS signer (placeholder)");
         Ok(Self {
             _key_id: key_id.to_string(),
             _region: region.to_string(),
@@ -204,6 +259,10 @@ impl HsmSigner for AwsKmsSigner {
     }
 }
 
+// -----------------------------------------------------------------------------
+// Azure Key Vault signer (placeholder)
+// -----------------------------------------------------------------------------
+
 /// Placeholder Azure Key Vault signer.
 pub struct AzureKeyVaultSigner {
     _vault_url: String,
@@ -211,11 +270,14 @@ pub struct AzureKeyVaultSigner {
 }
 
 impl AzureKeyVaultSigner {
+    /// Create a new Azure Key Vault signer (placeholder).
+    #[must_use]
     pub fn new(
         vault_url: &str,
         key_name: &str,
         _key_version: Option<&str>,
     ) -> Result<Self, CryptoError> {
+        debug!(vault_url, key_name, "creating Azure Key Vault signer (placeholder)");
         Ok(Self {
             _vault_url: vault_url.to_string(),
             _key_name: key_name.to_string(),
@@ -247,13 +309,20 @@ impl HsmSigner for AzureKeyVaultSigner {
     }
 }
 
+// -----------------------------------------------------------------------------
+// GCP KMS signer (placeholder)
+// -----------------------------------------------------------------------------
+
 /// Placeholder GCP Cloud KMS signer.
 pub struct GcpKmsSigner {
     _resource_name: String,
 }
 
 impl GcpKmsSigner {
+    /// Create a new GCP KMS signer (placeholder).
+    #[must_use]
     pub fn new(resource_name: &str) -> Result<Self, CryptoError> {
+        debug!(resource_name, "creating GCP KMS signer (placeholder)");
         Ok(Self {
             _resource_name: resource_name.to_string(),
         })
@@ -278,24 +347,35 @@ impl HsmSigner for GcpKmsSigner {
     }
 }
 
-/// Create an HsmSigner from configuration.
+// -----------------------------------------------------------------------------
+// Factory
+// -----------------------------------------------------------------------------
+
+/// Create an `HsmSigner` from configuration.
 pub fn create_signer(config: &KeyBackendConfig) -> Result<Box<dyn HsmSigner>, CryptoError> {
     match config {
         KeyBackendConfig::Local { path, password_env } => {
             let password = std::env::var(password_env).unwrap_or_default();
+            debug!(path, "attempting to create local signer");
             if !password.is_empty() && std::path::Path::new(path).exists() {
                 match crate::crypto::keystore::decrypt_seed32_from_file(path, &password) {
                     Ok(seed) => {
+                        info!("loaded local signer from encrypted keystore");
                         let signer = LocalSigner::from_seed(&seed);
-                        return Ok(Box::new(signer));
+                        Ok(Box::new(signer))
                     }
                     Err(e) => {
-                        return Err(CryptoError::Key(format!("keystore decrypt failed: {e}")));
+                        let err = format!("keystore decrypt failed: {e}");
+                        error!("{}", err);
+                        Err(CryptoError::Key(err))
                     }
                 }
+            } else {
+                warn!(path, "keystore not found or no password, using deterministic seed [1u8;32] (INSECURE)");
+                let seed = [1u8; 32];
+                let signer = LocalSigner::from_seed(&seed);
+                Ok(Box::new(signer))
             }
-            let seed = [1u8; 32];
-            Ok(Box::new(LocalSigner::from_seed(&seed)))
         }
         KeyBackendConfig::Remote { .. } => Err(CryptoError::Key(
             "remote signer: use remote_signer module instead".into(),
@@ -307,6 +387,7 @@ pub fn create_signer(config: &KeyBackendConfig) -> Result<Box<dyn HsmSigner>, Cr
             pin_env,
         } => {
             let pin = std::env::var(pin_env).unwrap_or_default();
+            info!(library_path, slot, key_label, "creating PKCS#11 signer");
             let signer = Pkcs11Signer::new(library_path, *slot, key_label, &pin)?;
             Ok(Box::new(signer))
         }
@@ -315,6 +396,7 @@ pub fn create_signer(config: &KeyBackendConfig) -> Result<Box<dyn HsmSigner>, Cr
             region,
             endpoint,
         } => {
+            info!(key_id, region, "creating AWS KMS signer");
             let signer = AwsKmsSigner::new(key_id, region, endpoint.as_deref())?;
             Ok(Box::new(signer))
         }
@@ -323,15 +405,21 @@ pub fn create_signer(config: &KeyBackendConfig) -> Result<Box<dyn HsmSigner>, Cr
             key_name,
             key_version,
         } => {
+            info!(vault_url, key_name, "creating Azure Key Vault signer");
             let signer = AzureKeyVaultSigner::new(vault_url, key_name, key_version.as_deref())?;
             Ok(Box::new(signer))
         }
         KeyBackendConfig::GcpKms { resource_name } => {
+            info!(resource_name, "creating GCP KMS signer");
             let signer = GcpKmsSigner::new(resource_name)?;
             Ok(Box::new(signer))
         }
     }
 }
+
+// -----------------------------------------------------------------------------
+// Tests
+// -----------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
